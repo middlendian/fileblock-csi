@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fileblock-node
+  namespace: fileblock-system
+spec:
+  selector:
+    matchLabels:
+      app: fileblock-node
+  template:
+    metadata:
+      labels:
+        app: fileblock-node
+    spec:
+      serviceAccountName: fileblock-node
+      hostPID: true
+      containers:
+        - name: fileblock-node
+          image: ghcr.io/middlendian/fileblock-csi:dev
+          imagePullPolicy: IfNotPresent
+          command: [/usr/local/bin/fileblock-node]
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --node-id=$(NODE_NAME)
+            - --state-dir=/var/lib/kubelet/plugins/fileblock.csi
+            - --backing-store=/var/lib/fileblock
+            - --log-level=info
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            capabilities:
+              add: [SYS_ADMIN]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: host-dev
+              mountPath: /dev
+            - name: backing-store
+              mountPath: /var/lib/fileblock
+              mountPropagation: HostToContainer
+        - name: csi-node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/fileblock.csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.13.1
+          args:
+            - --csi-address=/csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/fileblock.csi
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: host-dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: backing-store
+          # Overlay patches this hostPath to point at the operator's chosen
+          # directory (NFS mount, local dir, FUSE mount, etc.).
+          hostPath:
+            path: /var/lib/fileblock
+            type: DirectoryOrCreate

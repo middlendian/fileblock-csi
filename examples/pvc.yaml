@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fileblock
+  resources:
+    requests:
+      storage: 1Gi

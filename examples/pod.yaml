@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fileblock-demo
+spec:
+  restartPolicy: OnFailure
+  containers:
+    - name: shell
+      image: debian:bookworm-slim
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          cd /data
+          echo '#!/bin/sh' > hello.sh
+          echo 'echo "execute bit survived"' >> hello.sh
+          chmod +x hello.sh
+          ls -l hello.sh
+          ./hello.sh
+          stat -f -c 'fs type: %T' .
+          sleep 3600
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: agent-workspace

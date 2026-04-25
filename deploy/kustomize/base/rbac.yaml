@@ -1,0 +1,79 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fileblock-controller
+  namespace: fileblock-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fileblock-node
+  namespace: fileblock-system
+---
+# Permissions required by external-provisioner v5.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fileblock-controller
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims/status]
+    verbs: [patch, update]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [csinodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list, watch, create, update, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fileblock-controller
+subjects:
+  - kind: ServiceAccount
+    name: fileblock-controller
+    namespace: fileblock-system
+roleRef:
+  kind: ClusterRole
+  name: fileblock-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+# csi-node-driver-registrar only needs to GET its own pod and list nodes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fileblock-node
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fileblock-node
+subjects:
+  - kind: ServiceAccount
+    name: fileblock-node
+    namespace: fileblock-system
+roleRef:
+  kind: ClusterRole
+  name: fileblock-node
+  apiGroup: rbac.authorization.k8s.io
