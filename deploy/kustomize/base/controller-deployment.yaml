@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fileblock-controller
+  namespace: fileblock-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: fileblock-controller
+  template:
+    metadata:
+      labels:
+        app: fileblock-controller
+    spec:
+      serviceAccountName: fileblock-controller
+      containers:
+        - name: fileblock-controller
+          image: ghcr.io/middlendian/fileblock-csi:dev
+          imagePullPolicy: IfNotPresent
+          command: [/usr/local/bin/fileblock-controller]
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --backing-store=/var/lib/fileblock
+            - --log-level=info
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: backing-store
+              mountPath: /var/lib/fileblock
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.0.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --feature-gates=Topology=true
+            - --strict-topology
+            - --leader-election
+            - --leader-election-namespace=fileblock-system
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.11.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+            - --leader-election-namespace=fileblock-system
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.13.1
+          args:
+            - --csi-address=/csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: backing-store
+          # Overlay patches this hostPath to point at the operator's chosen
+          # directory (NFS mount, local dir, FUSE mount, etc.).
+          hostPath:
+            path: /var/lib/fileblock
+            type: DirectoryOrCreate

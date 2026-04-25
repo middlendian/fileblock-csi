@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Example overlay: backing store is a plain host-local directory at
+# /var/lib/fileblock on every node — exactly what the base ships with.
+# To use a different path, copy this overlay, change the StorageClass
+# parameter and the hostPath in a strategic-merge patch on the controller
+# Deployment and node DaemonSet to point at your own NFS / SMB / FUSE mount,
+# and update --backing-store= in the container args to match.
+
+namespace: fileblock-system
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/middlendian/fileblock-csi
+    newTag: dev
