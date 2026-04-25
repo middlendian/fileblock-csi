@@ -1,0 +1,62 @@
+name: Integration
+
+# Runs the local smoke and CSI sanity scripts as root on a hosted Ubuntu
+# runner. These need real loop devices, mkfs.ext4, and friends, so they live
+# in their own workflow and only run on push/dispatch — not on every PR
+# triggered from a fork (where they wouldn't have privileged access anyway).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: hack/smoke.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            e2fsprogs util-linux git
+      - name: Install csc (kubernetes-csi client)
+        run: |
+          go install github.com/rexray/gocsi/csc@latest
+          # Ensure GOBIN is on the PATH for sudo invocations.
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run smoke script
+        run: |
+          sudo -E PATH="$PATH" hack/smoke.sh
+
+  csi-sanity:
+    name: hack/csi-sanity.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            e2fsprogs util-linux
+      - name: Install csi-sanity
+        run: |
+          go install github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Run csi-sanity script
+        run: |
+          sudo -E PATH="$PATH" hack/csi-sanity.sh

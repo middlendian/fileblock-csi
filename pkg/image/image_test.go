@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
+	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 )
 
 // TestRoundTrip exercises Create → Get → List → Resize → Delete against the
@@ -94,6 +95,77 @@ func TestRoundTrip(t *testing.T) {
 	// Idempotent delete.
 	if err := mgr.Delete(ctx, "fb-test"); err != nil {
 		t.Fatalf("Delete not idempotent: %v", err)
+	}
+}
+
+func TestNewRejectsNonExistentRoot(t *testing.T) {
+	if _, err := New("/this/path/should/not/exist", fbexec.New(0)); err == nil {
+		t.Fatal("expected error for missing dir")
+	}
+}
+
+func TestNewRejectsFile(t *testing.T) {
+	dir := t.TempDir()
+	f := dir + "/notadir"
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(f, fbexec.New(0)); err == nil {
+		t.Fatal("expected error for file path")
+	}
+}
+
+func TestFsckSuccess(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("e2fsck", "", nil)
+	if err := Fsck(context.Background(), fake, "/dev/loop0"); err != nil {
+		t.Fatalf("Fsck: %v", err)
+	}
+}
+
+func TestFsckExit1IsClean(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("e2fsck", "fixed", &fbexec.Error{Cmd: "e2fsck", ExitCode: 1, Err: errors.New("exit status 1")})
+	if err := Fsck(context.Background(), fake, "/dev/loop0"); err != nil {
+		t.Fatalf("Fsck exit 1 should be success, got %v", err)
+	}
+}
+
+func TestFsckFatalExit(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("e2fsck", "broken", &fbexec.Error{Cmd: "e2fsck", ExitCode: 8, Err: errors.New("exit status 8")})
+	if err := Fsck(context.Background(), fake, "/dev/loop0"); err == nil {
+		t.Fatal("expected error for fatal exit code")
+	}
+}
+
+func TestResize2fs(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("resize2fs", "", nil)
+	if err := Resize2fs(context.Background(), fake, "/dev/loop0"); err != nil {
+		t.Fatalf("Resize2fs: %v", err)
+	}
+}
+
+func TestResize2fsFails(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("resize2fs", "boom", errors.New("nope"))
+	if err := Resize2fs(context.Background(), fake, "/dev/loop0"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCapacityMismatchErrorMessage(t *testing.T) {
+	e := &CapacityMismatchError{Requested: 100, Existing: 200}
+	if e.Error() == "" {
+		t.Fatal("empty Error()")
+	}
+}
+
+func TestVolumeInUseErrorMessage(t *testing.T) {
+	e := &VolumeInUseError{Node: "n1"}
+	if e.Error() == "" {
+		t.Fatal("empty Error()")
 	}
 }
 

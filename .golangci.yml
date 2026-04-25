@@ -1,0 +1,64 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - fmt.Fprintln
+        - fmt.Fprintf
+    gosec:
+      excludes:
+        # G115 (integer overflow uint64->int64): statfs blocks/inodes counts
+        # never approach 2^63 on real filesystems; checking would just be noise.
+        - G115
+        # G204 (subprocess launched with variable): pkg/exec exists to shell
+        # out with caller-supplied arguments; callsites validate inputs first.
+        - G204
+        # G301/G302/G306 (file or dir perms): kubelet plugin dirs and the
+        # state file are intentionally world-readable; image files are 0o600.
+        - G301
+        - G302
+        - G306
+        # G304 (file inclusion via variable): all paths are constructed inside
+        # the driver from validated volume IDs / configured roots.
+        - G304
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/middlendian/fileblock-csi
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
