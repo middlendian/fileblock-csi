@@ -18,6 +18,7 @@ import (
 func main() {
 	endpoint := flag.String("endpoint", "unix:///csi/csi.sock", "CSI endpoint (unix:// or tcp://)")
 	backingStore := flag.String("backing-store", "", "directory where .img files are stored (must be readable from every node)")
+	topologyKey := flag.String("topology-key", "", "topology segment key (default fileblock.csi/node); set to match the node plugin")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -40,7 +41,7 @@ func main() {
 	}
 
 	identity := driver.NewIdentityServer(true)
-	controller := driver.NewControllerServer(images, *backingStore)
+	controller := driver.NewControllerServer(images, *backingStore, *topologyKey)
 	srv := driver.NewServer(*endpoint, log, identity, controller, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -96,8 +96,11 @@ metadata. Nothing else lives on the backing store.
 Other knobs:
 
 - `volumeBindingMode: WaitForFirstConsumer` is **required** — fileblock pins
-  each PV to the first node that mounts it, so the scheduler must place the
-  pod before the volume is provisioned.
+  each PV to a topology segment at provisioning time, so the scheduler must
+  place the pod before the volume is provisioned. By default the segment is
+  the node ID, so the PV is pinned to that one node. See
+  [Sharing a backing store across nodes](#sharing-a-backing-store-across-nodes)
+  to make a PV usable from any node that mounts the same shared store.
 - `reclaimPolicy: Delete` removes the `.img` and sidecar when the PVC is
   deleted. `Retain` leaves them in place.
 - `allowVolumeExpansion: false` in v1; offline expand is supported via
@@ -105,12 +108,46 @@ Other knobs:
   for the resize to land.
 - `fsType` is pinned to `ext4` in v1.
 
+## Sharing a backing store across nodes
+
+When the backing store is genuinely shared (one NFS export mounted at the
+same path on every node, an SMB share, a FUSE-backed cluster filesystem),
+you can let any node stage any volume. The driver's defense-in-depth still
+applies — the OS-level `flock` held on each `.img` is what keeps two nodes
+from staging the same volume at once.
+
+Two flags control this:
+
+| Flag (node and controller)        | Default               | Notes                                                       |
+|-----------------------------------|-----------------------|-------------------------------------------------------------|
+| `--topology-key`                  | `fileblock.csi/node`  | Set the same on the controller and every node DaemonSet pod |
+| `--topology-value` (node only)    | `$NODE_NAME`          | Set the **same value** on every node sharing the store      |
+
+When every node advertises an identical `(key, value)` segment, the
+external-provisioner's `--strict-topology` no longer pins the PV to one
+node — it pins it to that segment, and any node that advertises it is a
+valid landing zone.
+
+A worked example overlay lives at
+`deploy/kustomize/overlays/example-nfs-shared/`. Edit the `nfs.server` /
+`nfs.path` placeholders in `patch-controller.yaml` and `patch-node.yaml`
+and apply with `kubectl apply -k`.
+
+NFS lock-manager note: the cross-node mutual exclusion that prevents two
+nodes from loop-mounting the same `.img` simultaneously relies on
+`flock(2)` being honored across hosts. NFSv4 has byte-range locks built in;
+NFSv3 needs the kernel's NLM (`rpc.statd` and `rpc.lockd`) running on
+every node and on the server. If lock recovery after a node crash is too
+slow for your workloads, prefer NFSv4.
+
 ## Limitations
 
 - **RWO only.** `ext4` has no distributed locking, so two nodes cannot
-  safely mount the same image. fileblock advertises only
-  `SINGLE_NODE_WRITER` and additionally holds an OS-level `flock` on the
-  `.img` file for the lifetime of the mount as defense-in-depth.
+  safely mount the same image **at the same time**. fileblock advertises
+  only `SINGLE_NODE_WRITER` and additionally holds an OS-level `flock` on
+  the `.img` file for the lifetime of the mount as defense-in-depth — this
+  is also what serializes a pod moving between nodes when the backing
+  store is shared.
 - **Offline expand only.** Expanding the PVC truncates the image; the
   filesystem grows on the next stage (i.e. after the pod is recreated).
 - **One pod per volume at a time.** As above.

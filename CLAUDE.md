@@ -18,7 +18,7 @@ pkg/loop/               losetup wrappers, loop-mappings.json state file, reconci
 pkg/mount/              mount / bind / unmount / findmnt wrappers
 pkg/flock/              advisory lock around an .img file
 pkg/exec/               os/exec wrapper with timeout + structured Error
-deploy/kustomize/       base manifests + example-localdir overlay
+deploy/kustomize/       base manifests + example-localdir, example-nfs-shared overlays
 examples/               PVC + Pod manifests (no overlay-specific values)
 hack/                   smoke.sh, csi-sanity.sh
 Dockerfile              single multi-stage image used by both binaries
@@ -53,7 +53,12 @@ lock-free.
 
 `AttachedNode` is updated by the node plugin from inside the flock-guarded
 section of `NodeStageVolume` and cleared in `NodeUnstageVolume`. The
-controller refuses `ControllerExpandVolume` while it is non-empty.
+controller refuses `ControllerExpandVolume` while it is non-empty. With a
+shared backing store the field may legitimately change as a pod moves
+between nodes; the cross-node lease is the kernel-level `flock(2)` on the
+`.img` (NFS-mediated via NLM on v3, native on v4), not this field. When
+NodeStage acquires the flock and finds a stale `AttachedNode != nodeID`,
+it logs a takeover warning and overwrites.
 
 ## State file invariants (`pkg/loop`)
 
