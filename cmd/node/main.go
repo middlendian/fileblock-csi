@@ -22,6 +22,8 @@ func main() {
 	nodeID := flag.String("node-id", os.Getenv("NODE_NAME"), "node identifier; defaults to $NODE_NAME")
 	stateDir := flag.String("state-dir", "/var/lib/kubelet/plugins/fileblock.csi", "directory for the loop-mappings state file")
 	backingStore := flag.String("backing-store", "", "directory where .img files live; used only for reconciliation")
+	topologyKey := flag.String("topology-key", "", "topology segment key advertised in NodeGetInfo (default fileblock.csi/node)")
+	topologyValue := flag.String("topology-value", "", "topology segment value (default --node-id); set the same on every node sharing a backing store")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -55,7 +57,7 @@ func main() {
 	}
 
 	identity := driver.NewIdentityServer(false)
-	node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log)
+	node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, *topologyKey, *topologyValue)
 	srv := driver.NewServer(*endpoint, log, identity, nil, node)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

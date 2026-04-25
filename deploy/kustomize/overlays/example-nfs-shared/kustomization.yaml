@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Example overlay: backing store is a single NFS export mounted at the same
+# path on every node. All nodes advertise the same topology segment, so the
+# external-provisioner sees them as interchangeable landing zones for any
+# PV created in this store.
+#
+# Edit the `server`/`path` fields in patch-controller.yaml and patch-node.yaml
+# to match your NFS export. NFSv4 is recommended; NFSv3 requires the Network
+# Lock Manager (rpc.statd / rpc.lockd) on every node so the kernel-side flock
+# the driver holds on each .img is honored across hosts.
+
+namespace: fileblock-system
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/middlendian/fileblock-csi
+    newTag: dev
+
+patches:
+  - path: patch-controller.yaml
+    target:
+      kind: Deployment
+      name: fileblock-controller
+  - path: patch-node.yaml
+    target:
+      kind: DaemonSet
+      name: fileblock-node

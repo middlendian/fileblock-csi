@@ -36,6 +36,12 @@ type NodeServer struct {
 	state   *loop.State
 	log     *slog.Logger
 
+	// topologyKey/topologyValue are the single segment NodeGetInfo reports.
+	// When all nodes that mount the same backing store share these values,
+	// any of them is a valid landing zone for a PV from that store.
+	topologyKey   string
+	topologyValue string
+
 	// One mutex per volumeID protects Stage/Unstage from racing each other.
 	mu       sync.Mutex
 	volMutex map[string]*sync.Mutex
@@ -46,16 +52,27 @@ type NodeServer struct {
 	fdByVolume map[string]*flock.Handle
 }
 
-func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *loop.Losetup, st *loop.State, log *slog.Logger) *NodeServer {
+// NewNodeServer constructs a NodeServer. topologyKey/topologyValue may be
+// empty, in which case they default to TopologyKeyNode and nodeID — that is,
+// the legacy per-node pin.
+func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *loop.Losetup, st *loop.State, log *slog.Logger, topologyKey, topologyValue string) *NodeServer {
+	if topologyKey == "" {
+		topologyKey = TopologyKeyNode
+	}
+	if topologyValue == "" {
+		topologyValue = nodeID
+	}
 	return &NodeServer{
-		nodeID:     nodeID,
-		exec:       exec,
-		mnt:        mnt,
-		losetup:    ls,
-		state:      st,
-		log:        log,
-		volMutex:   map[string]*sync.Mutex{},
-		fdByVolume: map[string]*flock.Handle{},
+		nodeID:        nodeID,
+		exec:          exec,
+		mnt:           mnt,
+		losetup:       ls,
+		state:         st,
+		log:           log,
+		topologyKey:   topologyKey,
+		topologyValue: topologyValue,
+		volMutex:      map[string]*sync.Mutex{},
+		fdByVolume:    map[string]*flock.Handle{},
 	}
 }
 
@@ -80,7 +97,7 @@ func (n *NodeServer) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest)
 	return &csi.NodeGetInfoResponse{
 		NodeId: n.nodeID,
 		AccessibleTopology: &csi.Topology{
-			Segments: map[string]string{TopologyKeyNode: n.nodeID},
+			Segments: map[string]string{n.topologyKey: n.topologyValue},
 		},
 		// One loop device per volume; pick a generous cap. Operators can
 		// raise this with modprobe loop max_loop=N.
@@ -135,6 +152,16 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 			_ = fd.Close()
 		}
 	}()
+
+	// Holding the flock proves no other node is using this image. If the
+	// sidecar still names a different node, the previous holder lost its
+	// lock (process exit, kernel-side NFS lease expiry, etc.) and we are
+	// taking over. Log it; SetAttachedNode below overwrites the field.
+	if meta, err := images.Get(ctx, volumeID); err == nil &&
+		meta.AttachedNode != "" && meta.AttachedNode != n.nodeID {
+		n.log.Warn("taking over volume from previous node",
+			"volumeID", volumeID, "from", meta.AttachedNode, "to", n.nodeID)
+	}
 
 	// 2. Attach a loop device.
 	dev, err := n.losetup.Attach(ctx, imgPath)

@@ -17,9 +17,12 @@ import (
 // returned in the volume context so the node plugin knows where to look.
 const ParamBackingStorePath = "backingStorePath"
 
-// TopologyKeyNode is the topology key the controller uses to pin a PV to the
-// node where it was first staged. The node plugin reports the same key in
-// NodeGetInfo.
+// TopologyKeyNode is the default topology key. With this key each node
+// reports its own NodeID as the segment value, so a PV is pinned to the
+// node it was first scheduled on. Operators sharing a backing store across
+// multiple nodes (NFS, SMB, FUSE) override this with a per-store key — for
+// example fileblock.csi/backing-store — so all nodes that mount the same
+// store advertise the same segment and the PV can land on any of them.
 const TopologyKeyNode = "fileblock.csi/node"
 
 const (
@@ -30,10 +33,23 @@ type ControllerServer struct {
 	csi.UnimplementedControllerServer
 	images           image.Manager
 	backingStorePath string
+	// topologyKey is accepted for symmetry with the node plugin so the two
+	// can be configured together; the controller itself only echoes whatever
+	// key the provisioner passes in AccessibilityRequirements.
+	topologyKey string
 }
 
-func NewControllerServer(images image.Manager, backingStorePath string) *ControllerServer {
-	return &ControllerServer{images: images, backingStorePath: backingStorePath}
+// NewControllerServer constructs a ControllerServer. topologyKey may be empty;
+// it defaults to TopologyKeyNode (per-node pin).
+func NewControllerServer(images image.Manager, backingStorePath, topologyKey string) *ControllerServer {
+	if topologyKey == "" {
+		topologyKey = TopologyKeyNode
+	}
+	return &ControllerServer{
+		images:           images,
+		backingStorePath: backingStorePath,
+		topologyKey:      topologyKey,
+	}
 }
 
 func (c *ControllerServer) ControllerGetCapabilities(ctx context.Context, _ *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
@@ -87,9 +103,12 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 			ParamBackingStorePath: c.backingStorePath,
 		},
 	}
-	// Honor topology preference from the external-provisioner so the PV
-	// pins to a single node — required because the underlying ext4 has no
-	// distributed locking.
+	// Honor the provisioner's topology preference. The pin is to a single
+	// segment (key=value), not necessarily a single node: when every node
+	// that mounts the same backing store advertises the same segment, the
+	// PV is schedulable on any of them. ext4 still has no distributed
+	// locking, so the OS-level flock on the .img file remains the
+	// per-stage cross-node mutual-exclusion primitive (see pkg/flock).
 	if reqTop := req.GetAccessibilityRequirements(); reqTop != nil {
 		if pref := reqTop.GetPreferred(); len(pref) > 0 {
 			vol.AccessibleTopology = []*csi.Topology{pref[0]}

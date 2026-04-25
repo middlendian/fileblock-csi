@@ -142,5 +142,71 @@ sleep 1
 losetup "$ORPHAN" 2>/dev/null && { echo "orphan loop not reclaimed"; exit 1; } || true
 csc controller del "$VOL2"
 
+echo "::: cross-node takeover (shared backing store)"
+# Simulates a pod rescheduling onto a different node when the .img lives on
+# a filesystem both nodes mount: stage as node-a, kill the plugin (kernel
+# releases the flock), restart as node-b, and stage again. The new node
+# must succeed and the sidecar's attachedNode must flip.
+CREATE_OUT=$(csc controller new \
+  --cap "SINGLE_NODE_WRITER,mount,ext4" \
+  --req-bytes $((128*1024*1024)) \
+  --params "backingStorePath=$BACKING" \
+  takeover-vol)
+VOL3=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
+STAGE_A="$STATE/staging/${VOL3}-a"
+STAGE_B="$STATE/staging/${VOL3}-b"
+mkdir -p "$STAGE_A" "$STAGE_B"
+
+kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
+"$BIN/fileblock-node" \
+  --endpoint="unix://$NODE_SOCK" \
+  --node-id=node-a \
+  --state-dir="$STATE" \
+  --backing-store="$BACKING" \
+  --log-level=debug >>"$LOG/node.log" 2>&1 &
+NODE_PID=$!
+for _ in $(seq 1 20); do [[ -S "$NODE_SOCK" ]] && break; sleep 0.1; done
+CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
+  --cap "SINGLE_NODE_WRITER,mount,ext4" \
+  --staging-target-path "$STAGE_A" \
+  --vol-context "backingStorePath=$BACKING" \
+  "$VOL3"
+grep -q '"attachedNode": "node-a"' "$BACKING/$VOL3.json" || {
+  echo "attachedNode not set to node-a"; exit 1; }
+
+# node-a "crashes" — kernel releases the flock on plugin exit. Unmount the
+# stage path here too, since the kernel-level mount survives the plugin
+# kill (in production, kubelet would unmount when the node goes away).
+kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
+umount "$STAGE_A" 2>/dev/null || true
+losetup --json --list 2>/dev/null \
+  | grep -oE '"/dev/loop[0-9]+"' \
+  | tr -d '"' \
+  | while read -r dev; do
+      back=$(losetup --noheadings --output BACK-FILE "$dev" 2>/dev/null || true)
+      [[ "$back" == "$BACKING/$VOL3.img" ]] && losetup --detach "$dev"
+    done
+
+"$BIN/fileblock-node" \
+  --endpoint="unix://$NODE_SOCK" \
+  --node-id=node-b \
+  --state-dir="$STATE" \
+  --backing-store="$BACKING" \
+  --log-level=debug >>"$LOG/node.log" 2>&1 &
+NODE_PID=$!
+for _ in $(seq 1 20); do [[ -S "$NODE_SOCK" ]] && break; sleep 0.1; done
+CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
+  --cap "SINGLE_NODE_WRITER,mount,ext4" \
+  --staging-target-path "$STAGE_B" \
+  --vol-context "backingStorePath=$BACKING" \
+  "$VOL3"
+grep -q '"attachedNode": "node-b"' "$BACKING/$VOL3.json" || {
+  echo "attachedNode did not flip to node-b"; exit 1; }
+grep -q "taking over volume from previous node" "$LOG/node.log" || {
+  echo "expected takeover warning in node log"; exit 1; }
+
+CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE_B" "$VOL3"
+csc controller del "$VOL3"
+
 echo
 echo "smoke OK"
