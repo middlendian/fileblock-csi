@@ -26,17 +26,41 @@ Dockerfile              single multi-stage image used by both binaries
 
 ## Build / test commands
 
-```sh
-go build ./...
-go vet ./...
-go test ./...
+The Makefile is the single source of truth. CI runs the same targets, so
+running them locally is the fastest way to confirm a change will pass.
 
-sudo hack/smoke.sh         # local end-to-end, no cluster
-sudo hack/csi-sanity.sh    # csi-test sanity suite, no cluster
+```sh
+make build          # compile both binaries into ./bin
+make test           # go test ./...
+make test-race      # go test -race ./...
+make cover          # coverage profile in cover.out
+make vet            # go vet
+make fmt-check      # fail if any file isn't gofmt-clean (CI gate)
+make fmt            # gofmt -s -w in place
+make lint           # golangci-lint run
+make tidy           # go mod tidy
+make smoke          # sudo hack/smoke.sh
+make sanity         # sudo hack/csi-sanity.sh
+make docker         # docker build the runtime image
+make all            # fmt-check + vet + lint + test + build
 ```
 
 The smoke and sanity scripts must run as root (loop devices and mount(8)).
 They use plain temp directories — no kind, no kubelet.
+
+## CI
+
+GitHub Actions workflows live in `.github/workflows/`:
+
+- `ci.yml` runs on every push and PR: fmt-check, vet, golangci-lint
+  (config in `.golangci.yml`), race-enabled `go test ./...` with
+  coverage, `go mod tidy` verification, and a container build.
+- `integration.yml` runs `hack/smoke.sh` and `hack/csi-sanity.sh` on
+  push to `main` and via workflow_dispatch.
+
+Lint config lives in `.golangci.yml`. When adding a shell-out, prefer to
+unit-test the new package via `pkg/exec/exectest.FakeRunner` rather than
+gating tests on root + losetup.
 
 ## On-disk contract
 

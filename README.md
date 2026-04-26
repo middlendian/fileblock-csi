@@ -166,25 +166,10 @@ slow for your workloads, prefer NFSv4.
 
 ## Local development without a cluster
 
-The repo ships a Makefile that wraps the common contributor commands:
-
 ```sh
-make build          # compile both binaries into ./bin
-make test           # go test ./...
-make test-race      # go test -race ./...
-make cover          # coverage profile in cover.out
-make vet            # go vet
-make fmt-check      # fail if any file isn't gofmt-clean
-make lint           # golangci-lint run
-make smoke          # sudo hack/smoke.sh
-make sanity         # sudo hack/csi-sanity.sh
-make docker         # docker build the runtime image
+sudo hack/smoke.sh        # full lifecycle against a temp directory
+sudo hack/csi-sanity.sh   # csi-test suite, also no cluster
 ```
 
-`make smoke` and `make sanity` run the binaries directly on unix sockets —
-no Docker, no kind, no kubelet. They require root for loop devices and
-`mount(8)`. See [CLAUDE.md](./CLAUDE.md) for contributor notes.
-
-CI runs the same checks (build, vet, fmt, golangci-lint, race-enabled
-tests, `go mod tidy`, container build) on every push and PR; see
-`.github/workflows/`.
+Both run the binaries directly on unix sockets — no Docker, no kind, no
+kubelet. See [CLAUDE.md](./CLAUDE.md) for contributor notes.
