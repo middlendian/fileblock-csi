@@ -34,9 +34,7 @@ jobs:
           go install github.com/rexray/gocsi/csc@latest
           # Ensure GOBIN is on the PATH for sudo invocations.
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Run smoke script
-        run: |
-          sudo -E PATH="$PATH" hack/smoke.sh
+      - run: make smoke
 
   csi-sanity:
     name: hack/csi-sanity.sh
@@ -57,6 +55,4 @@ jobs:
         run: |
           go install github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-      - name: Run csi-sanity script
-        run: |
-          sudo -E PATH="$PATH" hack/csi-sanity.sh
+      - run: make sanity

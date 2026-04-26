@@ -4,12 +4,13 @@
 #   make build           # compile both binaries into ./bin
 #   make test            # run unit tests
 #   make test-race       # run unit tests with -race
-#   make cover           # run tests with coverage and emit cover.out
+#   make cover           # run tests with -race and coverage; emits cover.out
 #   make vet             # go vet
 #   make fmt             # gofmt -w (modifies files in place)
 #   make fmt-check       # fail if any file needs formatting
 #   make lint            # golangci-lint run
 #   make tidy            # go mod tidy
+#   make tidy-check      # fail if go.mod / go.sum need tidying (CI gate)
 #   make smoke           # local end-to-end (requires root, loop devices)
 #   make sanity          # csi-sanity (requires root, loop devices, csi-sanity)
 #   make docker          # build the container image
@@ -55,7 +56,7 @@ test-race:
 .PHONY: cover
 cover:
 	@pkgs=$$(go list -f '{{if (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./...); \
-	go test -covermode=atomic -coverprofile=$(COVER_OUT) -coverpkg=./... $$pkgs
+	go test -race -covermode=atomic -coverprofile=$(COVER_OUT) -coverpkg=./... $$pkgs
 	@go tool cover -func=$(COVER_OUT) | tail -n 1
 
 .PHONY: vet
@@ -88,6 +89,15 @@ lint:
 .PHONY: tidy
 tidy:
 	go mod tidy
+
+.PHONY: tidy-check
+tidy-check:
+	go mod tidy
+	@if ! git diff --quiet -- go.mod go.sum; then \
+	  echo "go.mod or go.sum is not tidy. Run 'make tidy' and commit the result."; \
+	  git --no-pager diff -- go.mod go.sum; \
+	  exit 1; \
+	fi
 
 .PHONY: smoke
 smoke:

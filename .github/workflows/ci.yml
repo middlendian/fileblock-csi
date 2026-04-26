@@ -15,6 +15,7 @@ concurrency:
 
 env:
   GO_VERSION: "1.25.x"
+  GOLANGCI_LINT_VERSION: "v2.5.0"
 
 jobs:
   fmt:
@@ -48,10 +49,12 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.5.0
-          args: --timeout=5m
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make lint
 
   build:
     name: build
@@ -82,10 +85,7 @@ jobs:
       # ubuntu-latest, but be explicit.
       - name: Install e2fsprogs
         run: sudo apt-get update && sudo apt-get install -y e2fsprogs
-      - name: go test (with coverage and race)
-        run: |
-          go test -race -covermode=atomic -coverprofile=cover.out ./...
-          go tool cover -func=cover.out | tail -n 1
+      - run: make cover
       - uses: actions/upload-artifact@v4
         with:
           name: coverage
@@ -100,14 +100,7 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: Verify go.mod / go.sum are tidy
-        run: |
-          go mod tidy
-          if ! git diff --quiet -- go.mod go.sum; then
-            echo "go.mod or go.sum is not tidy. Run 'go mod tidy' and commit the result."
-            git --no-pager diff -- go.mod go.sum
-            exit 1
-          fi
+      - run: make tidy-check
 
   docker:
     name: docker build
@@ -115,11 +108,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build image (no push)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          tags: fileblock-csi:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - run: make docker
