@@ -41,7 +41,7 @@ make fmt            # gofmt -s -w in place
 make lint           # golangci-lint run
 make tidy           # go mod tidy
 make tidy-check     # fail if go.mod/go.sum need tidying (CI gate)
-make check          # full CI gate locally — run before every push
+make check          # full CI gate (fmt+vet+lint+tidy+cover+build+smoke+sanity)
 make smoke          # sudo hack/smoke.sh
 make sanity         # sudo hack/csi-sanity.sh
 make e2e            # kind + go test ./test/e2e (local backing store)
@@ -50,12 +50,14 @@ make docker         # docker build the runtime image
 make all            # fmt-check + vet + lint + test + build
 ```
 
-**Run `make check` before every `git push`.** It runs the same gates
-ci.yml runs (fmt-check, vet, lint, tidy-check, test, build) and is the
-cheapest way to catch what CI will catch on the PR. Skipping it has
-burnt several CI runs already — most recently a `tidy-check` failure
-because a new direct import wasn't reflected in `go.mod`. If `make check`
-fails, fix it locally and amend or follow up before pushing.
+**Run `make check` before every `git push`.** It is *literally* what
+ci.yml runs — one job, one command — covering fmt, vet, lint, tidy,
+race-enabled test + coverage, build, smoke, and csi-sanity. Skipping
+it has burnt several CI runs already. Because smoke and sanity are
+included, `make check` needs root, loop devices, `csc`, and
+`csi-sanity` on the PATH (see the smoke/sanity prereqs); on machines
+where those aren't available, run the lighter gates individually
+(`make fmt-check vet lint tidy-check test build`) before pushing.
 
 The smoke and sanity scripts must run as root (loop devices and mount(8)).
 They use plain temp directories — no kind, no kubelet.
