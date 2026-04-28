@@ -1,0 +1,29 @@
+# kind cluster used by hack/e2e.sh. Two nodes (control-plane + worker), both
+# with the same host directory bind-mounted at /var/lib/fileblock so the
+# backing store is shared. The control-plane node is left untainted so user
+# pods can land on either side — needed for the cross-node takeover test.
+#
+# /dev is bind-mounted from the runner host into each kind node so the loop
+# devices fileblock allocates via losetup are visible to mount(8). Without
+# this, kind nodes get a containerd-managed /dev with no /dev/loopN nodes
+# and the node DaemonSet fails to stage any volume.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: __E2E_BACKING_HOST__
+        containerPath: /var/lib/fileblock
+      - hostPath: /dev
+        containerPath: /dev
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          taints: []
+  - role: worker
+    extraMounts:
+      - hostPath: __E2E_BACKING_HOST__
+        containerPath: /var/lib/fileblock
+      - hostPath: /dev
+        containerPath: /dev

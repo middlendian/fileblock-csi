@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Overlay used by hack/e2e.sh against a kind cluster. The kind config bind-mounts
+# the same host directory into every kind node at /var/lib/fileblock, so the
+# backing store is genuinely shared. All nodes advertise the same topology
+# segment, which means any PV provisioned in this store can be staged on any
+# node — letting the cross-node takeover test rely on a real flock(2) handoff
+# rather than two distinct StorageClasses.
+
+namespace: fileblock-system
+
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/middlendian/fileblock-csi
+    newName: fileblock-csi
+    newTag: e2e
+
+patches:
+  - path: patch-controller.yaml
+    target:
+      kind: Deployment
+      name: fileblock-controller
+  - path: patch-node.yaml
+    target:
+      kind: DaemonSet
+      name: fileblock-node
+  - path: patch-storageclass.yaml
+    target:
+      kind: StorageClass
+      name: fileblock

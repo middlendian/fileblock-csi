@@ -18,9 +18,10 @@ pkg/loop/               losetup wrappers, loop-mappings.json state file, reconci
 pkg/mount/              mount / bind / unmount / findmnt wrappers
 pkg/flock/              advisory lock around an .img file
 pkg/exec/               os/exec wrapper with timeout + structured Error
-deploy/kustomize/       base manifests + example-localdir, example-nfs-shared overlays
+deploy/kustomize/       base manifests + example-localdir, example-nfs-shared, e2e overlays
 examples/               PVC + Pod manifests (no overlay-specific values)
-hack/                   smoke.sh, csi-sanity.sh
+test/e2e/               kubelet-driven end-to-end tests (build tag: e2e)
+hack/                   smoke.sh, csi-sanity.sh, e2e.sh, e2e-kind.yaml
 Dockerfile              single multi-stage image used by both binaries
 ```
 
@@ -41,12 +42,25 @@ make lint           # golangci-lint run
 make tidy           # go mod tidy
 make smoke          # sudo hack/smoke.sh
 make sanity         # sudo hack/csi-sanity.sh
+make e2e            # kind + go test ./test/e2e (local backing store)
+make e2e-nfs        # kind + go test ./test/e2e (NFSv3 backing store)
 make docker         # docker build the runtime image
 make all            # fmt-check + vet + lint + test + build
 ```
 
 The smoke and sanity scripts must run as root (loop devices and mount(8)).
 They use plain temp directories — no kind, no kubelet.
+
+The e2e suite is the only layer that drives kubelet directly. It boots a
+two-node kind cluster with a shared backing store, applies the `e2e` overlay,
+and runs the Go tests under `test/e2e/` (build tag `e2e` so they don't run
+under `make test`). `make e2e-nfs` further mounts the backing store over
+NFSv3 with NLM, so the same suite verifies that fileblock corrects the
+exec-bit, chmod, and flock pathologies on a real NFSv3 export — the
+project's stated reason to exist. Caveat: kind nodes share the host's NFS
+client, so cross-node flock is serialized in-kernel before reaching NLM.
+The full cross-client NLM path needs a custom kind node image with
+`nfs-common`; we have not paid that cost yet.
 
 ## CI
 
@@ -57,6 +71,10 @@ GitHub Actions workflows live in `.github/workflows/`:
   coverage, `go mod tidy` verification, and a container build.
 - `integration.yml` runs `hack/smoke.sh` and `hack/csi-sanity.sh` on
   push to `main` and via workflow_dispatch.
+- `e2e.yml` runs `hack/e2e.sh` in a `local` and an `nfs` matrix variant on
+  push to `main` and via workflow_dispatch. Each variant boots a kind
+  cluster, deploys the e2e overlay, and runs `go test -tags=e2e
+  ./test/e2e/...`.
 
 Lint config lives in `.golangci.yml`. When adding a shell-out, prefer to
 unit-test the new package via `pkg/exec/exectest.FakeRunner` rather than
@@ -134,5 +152,10 @@ Mirrors the validation checklist in the project plan. Before merging:
 - `go build ./...` and `go vet ./...` clean.
 - `sudo hack/smoke.sh` passes locally.
 - `sudo hack/csi-sanity.sh` passes locally.
+- `make e2e` passes locally if your change touches the kubelet path,
+  StorageClass surface, sidecar arguments, or the .img/JSON contract.
+- `make e2e-nfs` passes locally if your change could plausibly regress
+  NFSv3 backing-store behavior (anything in `pkg/image`, `pkg/flock`, or
+  `pkg/loop`'s reconciler).
 - New behavior covered by a unit test in the relevant package.
 - README + CLAUDE.md updated when surface changes.

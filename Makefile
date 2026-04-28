@@ -13,6 +13,8 @@
 #   make tidy-check      # fail if go.mod / go.sum need tidying (CI gate)
 #   make smoke           # local end-to-end (requires root, loop devices)
 #   make sanity          # csi-sanity (requires root, loop devices, csi-sanity)
+#   make e2e             # kind + go test ./test/e2e (local backing store)
+#   make e2e-nfs         # kind + go test ./test/e2e (NFSv3 backing store)
 #   make docker          # build the container image
 #   make clean           # remove ./bin and ./dist
 
@@ -106,6 +108,14 @@ smoke:
 .PHONY: sanity
 sanity:
 	sudo -E hack/csi-sanity.sh
+
+.PHONY: e2e
+e2e:
+	hack/e2e.sh
+
+.PHONY: e2e-nfs
+e2e-nfs:
+	BACKING_KIND=nfs hack/e2e.sh
 
 .PHONY: docker
 docker:

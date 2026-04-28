@@ -1,0 +1,87 @@
+name: E2E
+
+# Brings up a kind cluster, deploys fileblock-csi against the e2e overlay, and
+# runs the Go-based test/e2e suite. Lives in its own workflow because the
+# cluster bring-up and image build push the wall time well past the unit-test
+# CI target. Two backing-store variants run in parallel:
+#
+#   local  exercises pod-level chmod, flock, expand, and cross-node takeover
+#          with a plain host directory shared into both kind nodes.
+#   nfs    additionally validates that fileblock corrects NFSv3's exec-bit and
+#          flock pathologies — the original motivation for the driver — by
+#          standing up nfs-kernel-server on the runner and pointing the kind
+#          cluster at the NFSv3 mount.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.backing }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        backing: [local, nfs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Install kind
+        run: |
+          curl -fsSLo kind \
+            https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x kind && sudo mv kind /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        run: |
+          curl -fsSLo kubectl \
+            https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      # Loop devices are how fileblock attaches .img files; ensure the host
+      # subsystem is up before kind starts (the kind config bind-mounts /dev
+      # into each kind node so the same loop devices are visible there).
+      - name: Prepare host kernel modules
+        run: |
+          sudo modprobe loop
+          ls -l /dev/loop* | head -5
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y util-linux rpcbind
+
+      - name: Run e2e
+        env:
+          BACKING_KIND: ${{ matrix.backing }}
+        run: hack/e2e.sh
+
+      - name: Dump fileblock-system on failure
+        if: failure()
+        run: |
+          set +e
+          kubectl get pods -A -o wide
+          kubectl -n fileblock-system describe pods
+          kubectl -n fileblock-system logs deploy/fileblock-controller --all-containers --tail=400
+          kubectl -n fileblock-system logs ds/fileblock-node --all-containers --tail=400
+          kubectl get pvc -A
+          kubectl get pv
+          kubectl get events -A --sort-by=.lastTimestamp | tail -200
