@@ -148,13 +148,20 @@ sleep 3600
 	// pod. fileblock advertises OFFLINE expansion and its controller refuses
 	// ControllerExpandVolume while AttachedNode != "". If we recreate the
 	// pod first, NodeStageVolume sets AttachedNode and the resizer can never
-	// make progress. status.capacity flips to the new size once the controller
-	// has truncated the .img.
+	// make progress.
+	//
+	// We watch the *PV*'s spec.capacity rather than the PVC's status.capacity:
+	// after ControllerExpandVolume succeeds, the resizer updates PV.spec.capacity
+	// and marks the PVC FileSystemResizePending. PVC.status.capacity itself only
+	// flips to the new size after NodeExpandVolume runs — which only happens on
+	// the next NodeStageVolume — so waiting on it here would deadlock.
+	pv := strings.TrimSpace(kubectl(t, "-n", ns, "get", "pvc", "vol",
+		"-o", "jsonpath={.spec.volumeName}"))
 	eventually(t, defaultExpand, func() error {
-		out := strings.TrimSpace(kubectl(t, "-n", ns, "get", "pvc", "vol",
-			"-o", "jsonpath={.status.capacity.storage}"))
+		out := strings.TrimSpace(kubectl(t, "get", "pv", pv,
+			"-o", "jsonpath={.spec.capacity.storage}"))
 		if out == "" || out == "128Mi" {
-			return fmt.Errorf("PVC status.capacity not yet expanded: %q", out)
+			return fmt.Errorf("PV spec.capacity not yet expanded: %q", out)
 		}
 		return nil
 	})
