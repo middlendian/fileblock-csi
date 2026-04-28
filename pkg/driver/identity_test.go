@@ -54,7 +54,11 @@ func TestGetPluginCapabilities(t *testing.T) {
 
 func TestProbe(t *testing.T) {
 	id := NewIdentityServer(false)
-	if _, err := id.Probe(context.Background(), nil); err != nil {
+	resp, err := id.Probe(context.Background(), nil)
+	if err != nil {
 		t.Fatalf("Probe: %v", err)
+	}
+	if resp.GetReady() == nil || !resp.GetReady().GetValue() {
+		t.Fatalf("Probe.Ready=%v, want true", resp.GetReady())
 	}
 }

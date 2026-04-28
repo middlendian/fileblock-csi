@@ -11,6 +11,9 @@
 #   make lint            # golangci-lint run
 #   make tidy            # go mod tidy
 #   make tidy-check      # fail if go.mod / go.sum need tidying (CI gate)
+#   make check           # full CI gate (fmt, vet, lint, tidy, cover, build,
+#                        # smoke, sanity); run before every push. ci.yml
+#                        # runs literally this target.
 #   make smoke           # local end-to-end (requires root, loop devices)
 #   make sanity          # csi-sanity (requires root, loop devices, csi-sanity)
 #   make e2e             # kind + go test ./test/e2e (local backing store)
@@ -35,6 +38,13 @@ GO_PACKAGES := ./...
 
 .PHONY: all
 all: fmt-check vet lint test build
+
+# Single CI gate — ci.yml runs literally `make check`. Includes the
+# integration suites (smoke, sanity), so root + loop devices + csc +
+# csi-sanity are required (same prereqs the smoke/sanity targets list).
+# Run this before pushing.
+.PHONY: check
+check: fmt-check vet lint tidy-check cover build smoke sanity
 
 .PHONY: build
 build: $(BIN_DIR)/fileblock-controller $(BIN_DIR)/fileblock-node
@@ -103,11 +113,11 @@ tidy-check:
 
 .PHONY: smoke
 smoke:
-	sudo -E hack/smoke.sh
+	sudo -E env "PATH=$$PATH" hack/smoke.sh
 
 .PHONY: sanity
 sanity:
-	sudo -E hack/csi-sanity.sh
+	sudo -E env "PATH=$$PATH" hack/csi-sanity.sh
 
 .PHONY: e2e
 e2e:
