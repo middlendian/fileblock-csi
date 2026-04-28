@@ -11,6 +11,7 @@
 #   make lint            # golangci-lint run
 #   make tidy            # go mod tidy
 #   make tidy-check      # fail if go.mod / go.sum need tidying (CI gate)
+#   make check           # full CI gate locally (run before every push)
 #   make smoke           # local end-to-end (requires root, loop devices)
 #   make sanity          # csi-sanity (requires root, loop devices, csi-sanity)
 #   make e2e             # kind + go test ./test/e2e (local backing store)
@@ -35,6 +36,12 @@ GO_PACKAGES := ./...
 
 .PHONY: all
 all: fmt-check vet lint test build
+
+# Mirrors the ci.yml gate (every job except the Docker build, which needs a
+# daemon). Run this before pushing — it's the cheapest way to catch the same
+# failures CI will catch on the PR.
+.PHONY: check
+check: fmt-check vet lint tidy-check test build
 
 .PHONY: build
 build: $(BIN_DIR)/fileblock-controller $(BIN_DIR)/fileblock-node
