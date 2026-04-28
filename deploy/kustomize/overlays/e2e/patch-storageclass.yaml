@@ -1,0 +1,8 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fileblock
+# The e2e suite exercises ControllerExpandVolume, which the resizer sidecar
+# only invokes when the StorageClass opts in. The driver itself supports
+# offline expand regardless; this flag just unblocks the kube-side plumbing.
+allowVolumeExpansion: true

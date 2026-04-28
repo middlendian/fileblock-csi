@@ -172,4 +172,24 @@ sudo hack/csi-sanity.sh   # csi-test suite, also no cluster
 ```
 
 Both run the binaries directly on unix sockets — no Docker, no kind, no
-kubelet. See [CLAUDE.md](./CLAUDE.md) for contributor notes.
+kubelet.
+
+## End-to-end tests against kind
+
+`hack/e2e.sh` brings up a two-node kind cluster, builds and loads the image,
+applies `deploy/kustomize/overlays/e2e`, and runs the Go suite under
+`test/e2e/` (build tag `e2e`). It exercises the parts of the driver only a
+real kubelet can reach: pod-level chmod / fs-type, flock semantics on the
+loop-mounted ext4, offline expansion through the resizer sidecar, and
+node-to-node takeover on a shared backing store.
+
+```sh
+make e2e        # plain host directory shared into both kind nodes
+make e2e-nfs    # same suite, but the backing store is an NFSv3 export
+```
+
+`make e2e-nfs` stands up `nfs-kernel-server` on the host, mounts the export
+via NFSv3 (with NLM), and points the kind cluster at that mount — so the
+suite validates that fileblock corrects the NFSv3 exec-bit, chmod, and
+flock pathologies described above. See [CLAUDE.md](./CLAUDE.md) for
+contributor notes and harness limitations.
