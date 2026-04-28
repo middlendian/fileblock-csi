@@ -56,12 +56,18 @@ jobs:
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
           kubectl version --client
 
-      # nfs-common is needed only for the nfs matrix entry, but installing it
-      # on both is cheap and keeps the workflow uniform.
+      # Loop devices are how fileblock attaches .img files; ensure the host
+      # subsystem is up before kind starts (the kind config bind-mounts /dev
+      # into each kind node so the same loop devices are visible there).
+      - name: Prepare host kernel modules
+        run: |
+          sudo modprobe loop
+          ls -l /dev/loop* | head -5
+
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y util-linux
+          sudo apt-get install -y util-linux rpcbind
 
       - name: Run e2e
         env:
