@@ -294,7 +294,7 @@ func (n *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVol
 	if err := unix.Statfs(path, &st); err != nil {
 		return nil, status.Errorf(codes.Internal, "statfs %s: %v", path, err)
 	}
-	bs := int64(st.Bsize)
+	bs := st.Bsize
 	total := int64(st.Blocks) * bs
 	free := int64(st.Bavail) * bs
 	used := total - free
