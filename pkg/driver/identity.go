@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // DriverName is the CSI driver name. Must match StorageClass.provisioner and
@@ -51,5 +52,8 @@ func (s *IdentityServer) GetPluginCapabilities(ctx context.Context, _ *csi.GetPl
 }
 
 func (s *IdentityServer) Probe(ctx context.Context, _ *csi.ProbeRequest) (*csi.ProbeResponse, error) {
-	return &csi.ProbeResponse{}, nil
+	// Ready is optional per the CSI spec ("if not specified, plugin SHOULD be
+	// assumed ready"), but csc and a few sidecars deref .Ready.Value without
+	// nil-checking, so set it explicitly.
+	return &csi.ProbeResponse{Ready: wrapperspb.Bool(true)}, nil
 }
