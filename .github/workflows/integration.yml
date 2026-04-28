@@ -1,17 +1,24 @@
 name: Integration
 
 # Runs the local smoke and CSI sanity scripts as root on a hosted Ubuntu
-# runner. These need real loop devices, mkfs.ext4, and friends, so they live
-# in their own workflow and only run on push/dispatch — not on every PR
-# triggered from a fork (where they wouldn't have privileged access anyway).
+# runner. These need real loop devices, mkfs.ext4, and friends. They run on
+# push to main, on every PR, and via workflow_dispatch. PRs from forks still
+# execute against the runner itself (no secrets, no external services), so
+# the privileged-access concern doesn't apply.
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
@@ -32,8 +39,9 @@ jobs:
       - name: Install csc (kubernetes-csi client)
         run: |
           go install github.com/rexray/gocsi/csc@latest
-          # Ensure GOBIN is on the PATH for sudo invocations.
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          # `make smoke` runs the script via sudo, and sudo's secure_path
+          # ignores GOBIN. Drop the binary into /usr/local/bin so root sees it.
+          sudo install -m 0755 "$(go env GOPATH)/bin/csc" /usr/local/bin/csc
       - run: make smoke
 
   csi-sanity:
@@ -54,5 +62,5 @@ jobs:
       - name: Install csi-sanity
         run: |
           go install github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          sudo install -m 0755 "$(go env GOPATH)/bin/csi-sanity" /usr/local/bin/csi-sanity
       - run: make sanity
