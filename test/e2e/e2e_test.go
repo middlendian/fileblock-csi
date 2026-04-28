@@ -135,7 +135,7 @@ sleep 3600
 `))
 	waitPodReady(t, ns, "user", defaultPodReady)
 
-	// Capture the original byte capacity reported by df, then ask for 2x.
+	// Capture the original byte capacity reported by df, then ask for 3x.
 	beforeBytes := dfBytes(t, ns, "user", "/data")
 	kubectl(t, "-n", ns, "delete", "pod", "user", "--wait=true")
 	waitPodGone(t, ns, "user", 60*time.Second)
@@ -144,7 +144,24 @@ sleep 3600
 		"--type=merge",
 		"-p", `{"spec":{"resources":{"requests":{"storage":"384Mi"}}}}`)
 
-	// Re-create the pod and wait for the mount to reflect the new size.
+	// Wait for the controller-side expand to complete before recreating the
+	// pod. fileblock advertises OFFLINE expansion and its controller refuses
+	// ControllerExpandVolume while AttachedNode != "". If we recreate the
+	// pod first, NodeStageVolume sets AttachedNode and the resizer can never
+	// make progress. status.capacity flips to the new size once the controller
+	// has truncated the .img.
+	eventually(t, defaultExpand, func() error {
+		out := strings.TrimSpace(kubectl(t, "-n", ns, "get", "pvc", "vol",
+			"-o", "jsonpath={.status.capacity.storage}"))
+		if out == "" || out == "128Mi" {
+			return fmt.Errorf("PVC status.capacity not yet expanded: %q", out)
+		}
+		return nil
+	})
+
+	// Re-create the pod and wait for the mount to reflect the new size. The
+	// node plugin runs e2fsck + resize2fs on stage, so the new capacity lands
+	// on the first NodeStageVolume after the controller-side expand.
 	applyYAML(t, podWithScript(ns, "user", "vol", `
 set -eu
 df -B1 /data | tail -n1
@@ -328,6 +345,12 @@ spec:
 `, name, ns, indent(script, 10), pvc)
 }
 
+// podOnNode pins the pod to a specific node via nodeSelector rather than
+// nodeName. nodeName bypasses the scheduler, which means the PVC never gets
+// the volume.kubernetes.io/selected-node annotation that
+// WaitForFirstConsumer provisioning waits for — the pod would sit in
+// ContainerCreating forever. nodeSelector still lets the scheduler decide
+// (and set the annotation) while constraining the node choice.
 func podOnNode(ns, name, pvc, node, script string) string {
 	return fmt.Sprintf(`apiVersion: v1
 kind: Pod
@@ -336,7 +359,10 @@ metadata:
   namespace: %s
 spec:
   restartPolicy: Never
-  nodeName: %s
+  nodeSelector:
+    kubernetes.io/hostname: %s
+  tolerations:
+    - operator: Exists
   containers:
     - name: shell
       image: debian:bookworm-slim
