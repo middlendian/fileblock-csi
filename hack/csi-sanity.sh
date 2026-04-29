@@ -57,25 +57,8 @@ for _ in $(seq 1 20); do
   sleep 0.1
 done
 
-# TODO(followup PR): the driver fails 8 csi-sanity specs that exercise
-# CSI conformance edge cases the current handlers don't cover yet —
-# input-validation ordering in NodeGetVolumeStats / NodeExpandVolume /
-# ValidateVolumeCapabilities, idempotency in CreateVolume, and
-# starting_token rejection in ListVolumes. Skip them here so the suite
-# is green and the gate is wired up; remove these entries as the
-# matching handler is fixed in the follow-up PR.
-SANITY_SKIP='should fail when no volume id is provided'
-SANITY_SKIP+='|should fail when volume is not found'
-SANITY_SKIP+='|should fail when volume does not exist on the specified path'
-SANITY_SKIP+='|should fail when no volume path is provided'
-SANITY_SKIP+='|should fail when an invalid starting_token is passed'
-SANITY_SKIP+='|should not fail when requesting to create a volume with already existing name and same capacity'
-SANITY_SKIP+='|should fail when requesting to create a volume with already existing name and different capacity'
-SANITY_SKIP+='|should fail when no volume capabilities are provided'
-
 csi-sanity \
   --csi.controllerendpoint="unix://$CTL_SOCK" \
   --csi.endpoint="unix://$NODE_SOCK" \
   --csi.testvolumeparameters=<(printf "backingStorePath: %s\n" "$BACKING") \
-  --csi.testvolumesize=$((128*1024*1024)) \
-  --ginkgo.skip="$SANITY_SKIP"
+  --csi.testvolumesize=$((128*1024*1024))

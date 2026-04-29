@@ -3,9 +3,9 @@ package driver
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -86,7 +86,13 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 	}
 
-	volumeID := "fb-" + uuid.NewString()
+	// Derive a stable volumeID from the request name so repeated calls with
+	// the same name resolve to the same on-disk image — required by CSI's
+	// CreateVolume idempotency contract.
+	volumeID, err := volumeIDFromName(req.GetName())
+	if err != nil {
+		return nil, err
+	}
 	meta, err := c.images.Create(ctx, volumeID, int64(capacity))
 	if err != nil {
 		var mismatch *image.CapacityMismatchError
@@ -133,6 +139,9 @@ func (c *ControllerServer) ValidateVolumeCapabilities(ctx context.Context, req *
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "volumeId is required")
 	}
+	if len(req.GetVolumeCapabilities()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "volume_capabilities is required")
+	}
 	if _, err := c.images.Get(ctx, req.GetVolumeId()); err != nil {
 		return nil, status.Errorf(codes.NotFound, "volume %s: %v", req.GetVolumeId(), err)
 	}
@@ -146,7 +155,12 @@ func (c *ControllerServer) ValidateVolumeCapabilities(ctx context.Context, req *
 	}, nil
 }
 
-func (c *ControllerServer) ListVolumes(ctx context.Context, _ *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
+func (c *ControllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
+	// Pagination is not implemented; reject any starting_token rather than
+	// silently returning the full list and confusing the caller.
+	if req.GetStartingToken() != "" {
+		return nil, status.Error(codes.Aborted, "starting_token is not supported")
+	}
 	metas, err := c.images.List(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "list: %v", err)
@@ -184,6 +198,21 @@ func (c *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 		CapacityBytes:         meta.CapacityBytes,
 		NodeExpansionRequired: true, // node runs resize2fs after re-stage
 	}, nil
+}
+
+// volumeIDFromName produces the on-disk volume ID for a given CSI request
+// name. The mapping is deterministic: the same name always yields the same ID,
+// so a retried CreateVolume call lands on the existing image instead of
+// minting a fresh one. The "fb-" prefix mirrors the on-disk file-naming
+// convention; if the name already starts with "fb-" we don't double it.
+func volumeIDFromName(name string) (string, error) {
+	if strings.ContainsAny(name, "/\\\x00") {
+		return "", status.Errorf(codes.InvalidArgument, "name %q contains invalid characters", name)
+	}
+	if strings.HasPrefix(name, "fb-") {
+		return name, nil
+	}
+	return "fb-" + name, nil
 }
 
 func validateCapabilities(caps []*csi.VolumeCapability) error {

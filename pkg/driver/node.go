@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -286,9 +287,22 @@ func (n *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpub
 }
 
 func (n *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
+	volumeID := req.GetVolumeId()
 	path := req.GetVolumePath()
+	if volumeID == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
 	if path == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_path is required")
+	}
+	if _, ok := n.state.Get(volumeID); !ok {
+		return nil, status.Errorf(codes.NotFound, "volume %s not staged on this node", volumeID)
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, status.Errorf(codes.NotFound, "volume_path %s does not exist", path)
+		}
+		return nil, status.Errorf(codes.Internal, "stat %s: %v", path, err)
 	}
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
@@ -310,6 +324,9 @@ func (n *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVo
 	volumeID := req.GetVolumeId()
 	if volumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
+	if req.GetVolumePath() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_path is required")
 	}
 	m, ok := n.state.Get(volumeID)
 	if !ok {

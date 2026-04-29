@@ -303,6 +303,47 @@ func TestCreateVolumeFallsBackToRequisiteTopology(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeIsIdempotentOnSameName(t *testing.T) {
+	imgs := newFakeImages()
+	c := NewControllerServer(imgs, "/srv/fb", "")
+	req := &csi.CreateVolumeRequest{
+		Name:               "pvc-abc",
+		VolumeCapabilities: []*csi.VolumeCapability{mountCap()},
+		CapacityRange:      &csi.CapacityRange{RequiredBytes: 64 * 1024 * 1024},
+	}
+	first, err := c.CreateVolume(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first CreateVolume: %v", err)
+	}
+	second, err := c.CreateVolume(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second CreateVolume: %v", err)
+	}
+	if first.Volume.VolumeId != second.Volume.VolumeId {
+		t.Fatalf("VolumeIds differ: %q vs %q", first.Volume.VolumeId, second.Volume.VolumeId)
+	}
+}
+
+func TestCreateVolumeSameNameDifferentCapacityAlreadyExists(t *testing.T) {
+	imgs := newFakeImages()
+	c := NewControllerServer(imgs, "/srv/fb", "")
+	if _, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-clash",
+		VolumeCapabilities: []*csi.VolumeCapability{mountCap()},
+		CapacityRange:      &csi.CapacityRange{RequiredBytes: 64 * 1024 * 1024},
+	}); err != nil {
+		t.Fatalf("first CreateVolume: %v", err)
+	}
+	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-clash",
+		VolumeCapabilities: []*csi.VolumeCapability{mountCap()},
+		CapacityRange:      &csi.CapacityRange{RequiredBytes: 128 * 1024 * 1024},
+	})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("got %v, want AlreadyExists", err)
+	}
+}
+
 func TestCreateVolumeMapsCapacityMismatchToAlreadyExists(t *testing.T) {
 	imgs := newFakeImages()
 	imgs.createErr = &image.CapacityMismatchError{Requested: 1, Existing: 2}
@@ -344,6 +385,26 @@ func TestListVolumes(t *testing.T) {
 		if e.Volume.VolumeContext[ParamBackingStorePath] != "/srv/fb" {
 			t.Errorf("missing volumeContext: %v", e.Volume.VolumeContext)
 		}
+	}
+}
+
+func TestListVolumesRejectsStartingToken(t *testing.T) {
+	c := NewControllerServer(newFakeImages(), "/srv/fb", "")
+	_, err := c.ListVolumes(context.Background(), &csi.ListVolumesRequest{StartingToken: "garbage"})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("got %v, want Aborted", err)
+	}
+}
+
+func TestValidateVolumeCapabilitiesEmptyCapsRejected(t *testing.T) {
+	imgs := newFakeImages()
+	_, _ = imgs.Create(context.Background(), "fb-1", 1024)
+	c := NewControllerServer(imgs, "/srv/fb", "")
+	_, err := c.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId: "fb-1",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
 	}
 }
 

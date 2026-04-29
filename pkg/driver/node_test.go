@@ -12,6 +12,8 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/middlendian/fileblock-csi/pkg/loop"
 )
 
 // TestNodeGetInfoDefaultTopology verifies that an unset topology key/value
@@ -138,16 +140,66 @@ func TestNodeUnpublishMissingArgs(t *testing.T) {
 
 func TestNodeGetVolumeStatsMissingArgs(t *testing.T) {
 	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
-	_, err := n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("got %v, want InvalidArgument", err)
+	cases := []*csi.NodeGetVolumeStatsRequest{
+		{},
+		{VolumeId: "v"},
+		{VolumePath: "/tmp"},
+	}
+	for _, req := range cases {
+		_, err := n.NodeGetVolumeStats(context.Background(), req)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("req=%+v: got %v, want InvalidArgument", req, err)
+		}
+	}
+}
+
+func TestNodeGetVolumeStatsNotStaged(t *testing.T) {
+	st, err := loop.LoadState(t.TempDir() + "/state.json")
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), "", "")
+	_, err = n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{
+		VolumeId:   "missing",
+		VolumePath: "/tmp",
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("got %v, want NotFound", err)
+	}
+}
+
+func TestNodeGetVolumeStatsPathMissing(t *testing.T) {
+	st, err := loop.LoadState(t.TempDir() + "/state.json")
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if err := st.Put(loop.Mapping{VolumeID: "v", LoopDev: "/dev/loop0", ImagePath: "/tmp/x.img", StagePath: "/tmp/stage"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), "", "")
+	_, err = n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{
+		VolumeId:   "v",
+		VolumePath: "/tmp/does-not-exist-" + t.Name(),
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("got %v, want NotFound", err)
 	}
 }
 
 func TestNodeGetVolumeStatsRealPath(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	st, err := loop.LoadState(t.TempDir() + "/state.json")
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
 	dir := t.TempDir()
-	resp, err := n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{VolumePath: dir})
+	if err := st.Put(loop.Mapping{VolumeID: "v", LoopDev: "/dev/loop0", ImagePath: "/tmp/x.img", StagePath: dir}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), "", "")
+	resp, err := n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{
+		VolumeId:   "v",
+		VolumePath: dir,
+	})
 	if err != nil {
 		t.Fatalf("NodeGetVolumeStats: %v", err)
 	}
@@ -163,9 +215,16 @@ func TestNodeGetVolumeStatsRealPath(t *testing.T) {
 
 func TestNodeExpandVolumeMissingArgs(t *testing.T) {
 	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
-	_, err := n.NodeExpandVolume(context.Background(), &csi.NodeExpandVolumeRequest{})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("got %v, want InvalidArgument", err)
+	cases := []*csi.NodeExpandVolumeRequest{
+		{},
+		{VolumeId: "v"},
+		{VolumePath: "/tmp"},
+	}
+	for _, req := range cases {
+		_, err := n.NodeExpandVolume(context.Background(), req)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("req=%+v: got %v, want InvalidArgument", req, err)
+		}
 	}
 }
 
