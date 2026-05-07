@@ -105,24 +105,6 @@ func waitPodGone(t *testing.T, ns, pod string, timeout time.Duration) {
 	_, _ = kubectlRaw("-n", ns, "wait", "--for=delete", "pod/"+pod, d)
 }
 
-// volumeIDForPVC resolves PVC -> PV -> CSI volume handle. The handle is the
-// filename prefix used on the backing store, so this is also the .img/.json
-// stem.
-func volumeIDForPVC(t *testing.T, ns, pvc string) string {
-	t.Helper()
-	pv := strings.TrimSpace(kubectl(t, "-n", ns, "get", "pvc", pvc,
-		"-o", "jsonpath={.spec.volumeName}"))
-	if pv == "" {
-		t.Fatalf("PVC %s/%s has no bound PV", ns, pvc)
-	}
-	handle := strings.TrimSpace(kubectl(t, "get", "pv", pv,
-		"-o", "jsonpath={.spec.csi.volumeHandle}"))
-	if handle == "" {
-		t.Fatalf("PV %s has no CSI volume handle", pv)
-	}
-	return handle
-}
-
 // nodeNames returns the cluster's node names so cross-node tests can pick a
 // pair without hardcoding kind's naming scheme.
 func nodeNames(t *testing.T) []string {
@@ -130,15 +112,6 @@ func nodeNames(t *testing.T) []string {
 	out := kubectl(t, "get", "nodes",
 		"-o", "jsonpath={.items[*].metadata.name}")
 	return strings.Fields(out)
-}
-
-// readSidecar returns the JSON sidecar for a volumeID by exec'ing into the
-// controller pod (which has the backing store mounted at /var/lib/fileblock).
-func readSidecar(t *testing.T, volumeID string) string {
-	t.Helper()
-	return kubectl(t, "-n", "fileblock-system", "exec",
-		"deploy/fileblock-controller", "-c", "fileblock-controller",
-		"--", "cat", "/var/lib/fileblock/"+volumeID+".json")
 }
 
 // pvcManifest renders a PVC manifest with the given name and size. Size is a

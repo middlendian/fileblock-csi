@@ -3,17 +3,18 @@
 # run the Go-based end-to-end tests under test/e2e.
 #
 # This is the only test surface that exercises the kubelet stage->publish flow,
-# the resizer sidecar, and a real cross-node flock handoff. csi-sanity covers
-# the spec contract; smoke.sh covers the binaries directly. e2e.sh covers what
-# only kubelet can: pod-level chmod, flock, expand, and node-to-node takeover.
+# the resizer sidecar, and a kubelet-mediated cross-node handoff. csi-sanity
+# covers the spec contract; smoke.sh covers the binaries directly. e2e.sh
+# covers what only kubelet can: pod-level chmod, flock, expand, and the
+# node-to-node takeover that CSI's SINGLE_NODE_WRITER serializes.
 #
 # Backing-store modes (BACKING_KIND env var):
 #   local  (default)  Plain host directory bind-mounted into both kind nodes.
 #   nfs               Stand up nfs-kernel-server on the host, export a dir
-#                     over NFSv3 (with NLM), mount it locally, and bind-mount
-#                     the mount point into the kind nodes. The .img files
-#                     then actually live on NFSv3, so the suite validates
-#                     that fileblock fixes the NFSv3 exec-bit / chmod / flock
+#                     over NFSv3, mount it locally, and bind-mount the mount
+#                     point into the kind nodes. The .img files then actually
+#                     live on NFSv3, so the suite validates that fileblock
+#                     fixes the NFSv3 exec-bit / chmod / in-pod flock
 #                     pathologies the README calls out.
 #
 # Requires: docker, kind, kubectl, go. The 'nfs' mode additionally requires

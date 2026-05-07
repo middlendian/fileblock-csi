@@ -144,9 +144,9 @@ csc controller del "$VOL2"
 
 echo "::: cross-node takeover (shared backing store)"
 # Simulates a pod rescheduling onto a different node when the .img lives on
-# a filesystem both nodes mount: stage as node-a, kill the plugin (kernel
-# releases the flock), restart as node-b, and stage again. The new node
-# must succeed and the sidecar's attachedNode must flip.
+# a filesystem both nodes mount. Cross-node mutual exclusion is the kubelet's
+# job (SINGLE_NODE_WRITER); fileblock just has to make sure that once node-a
+# has unstaged, node-b can stage and read the data node-a wrote.
 CREATE_OUT=$(csc controller new \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --req-bytes $((128*1024*1024)) \
@@ -171,22 +171,13 @@ CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
   --staging-target-path "$STAGE_A" \
   --vol-context "backingStorePath=$BACKING" \
   "$VOL3"
-grep -q '"attachedNode": "node-a"' "$BACKING/$VOL3.json" || {
-  echo "attachedNode not set to node-a"; exit 1; }
+echo node-a-was-here > "$STAGE_A/who"
+CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE_A" "$VOL3"
 
-# node-a "crashes" — kernel releases the flock on plugin exit. Unmount the
-# stage path here too, since the kernel-level mount survives the plugin
-# kill (in production, kubelet would unmount when the node goes away).
+# node-a "crashes" before unstage in production; here we already unstaged
+# cleanly because that's what kubelet would do before letting another node
+# take the volume. Restart as node-b and stage the same image.
 kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
-umount "$STAGE_A" 2>/dev/null || true
-losetup --json --list 2>/dev/null \
-  | grep -oE '"/dev/loop[0-9]+"' \
-  | tr -d '"' \
-  | while read -r dev; do
-      back=$(losetup --noheadings --output BACK-FILE "$dev" 2>/dev/null || true)
-      [[ "$back" == "$BACKING/$VOL3.img" ]] && losetup --detach "$dev"
-    done
-
 "$BIN/fileblock-node" \
   --endpoint="unix://$NODE_SOCK" \
   --node-id=node-b \
@@ -200,10 +191,8 @@ CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
   --staging-target-path "$STAGE_B" \
   --vol-context "backingStorePath=$BACKING" \
   "$VOL3"
-grep -q '"attachedNode": "node-b"' "$BACKING/$VOL3.json" || {
-  echo "attachedNode did not flip to node-b"; exit 1; }
-grep -q "taking over volume from previous node" "$LOG/node.log" || {
-  echo "expected takeover warning in node log"; exit 1; }
+grep -q '^node-a-was-here$' "$STAGE_B/who" || {
+  echo "data written by node-a not visible to node-b"; exit 1; }
 
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE_B" "$VOL3"
 csc controller del "$VOL3"

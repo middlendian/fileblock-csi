@@ -18,10 +18,9 @@ spec:
             - --log-level=info
       volumes:
         - name: backing-store
-          # Same NFS export as the controller. The kernel flock held on each
-          # .img file is what keeps two nodes from staging the same volume
-          # at once; on NFSv3 this requires NLM (rpc.statd/lockd), on NFSv4
-          # it is built into the protocol.
+          # Same NFS export as the controller. Cross-node mutual exclusion
+          # comes from CSI's SINGLE_NODE_WRITER serialization, so neither
+          # NLM (NFSv3) nor server-side locks are on the critical path.
           nfs:
             server: nfs.example.internal
             path: /exports/fileblock

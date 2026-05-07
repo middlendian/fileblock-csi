@@ -112,9 +112,10 @@ Other knobs:
 
 When the backing store is genuinely shared (one NFS export mounted at the
 same path on every node, an SMB share, a FUSE-backed cluster filesystem),
-you can let any node stage any volume. The driver's defense-in-depth still
-applies — the OS-level `flock` held on each `.img` is what keeps two nodes
-from staging the same volume at once.
+you can let any node stage any volume. fileblock advertises
+`SINGLE_NODE_WRITER`, so the kubelet's CSI attach/detach controller is
+responsible for serializing Stage/Unstage on a given volume across the
+cluster — the driver does not add a second cross-node lock of its own.
 
 Two flags control this:
 
@@ -133,21 +134,12 @@ A worked example overlay lives at
 `nfs.path` placeholders in `patch-controller.yaml` and `patch-node.yaml`
 and apply with `kubectl apply -k`.
 
-NFS lock-manager note: the cross-node mutual exclusion that prevents two
-nodes from loop-mounting the same `.img` simultaneously relies on
-`flock(2)` being honored across hosts. NFSv4 has byte-range locks built in;
-NFSv3 needs the kernel's NLM (`rpc.statd` and `rpc.lockd`) running on
-every node and on the server. If lock recovery after a node crash is too
-slow for your workloads, prefer NFSv4.
-
 ## Limitations
 
 - **RWO only.** `ext4` has no distributed locking, so two nodes cannot
   safely mount the same image **at the same time**. fileblock advertises
-  only `SINGLE_NODE_WRITER` and additionally holds an OS-level `flock` on
-  the `.img` file for the lifetime of the mount as defense-in-depth — this
-  is also what serializes a pod moving between nodes when the backing
-  store is shared.
+  only `SINGLE_NODE_WRITER` and trusts the kubelet to enforce that — there
+  is no fileblock-level cross-node lease on the `.img`.
 - **Offline expand only.** Expanding the PVC truncates the image; the
   filesystem grows on the next stage (i.e. after the pod is recreated).
 - **One pod per volume at a time.** As above.
@@ -160,7 +152,6 @@ slow for your workloads, prefer NFSv4.
 | Symptom                                        | Fix                                                                                |
 |------------------------------------------------|------------------------------------------------------------------------------------|
 | `losetup: cannot find an unused loop device`   | `modprobe loop max_loop=64` (or higher) on the affected node                       |
-| Pod stuck `ContainerCreating`, "image locked"  | The volume is still flock'd by another node; check the previous attachment cleared |
 | Stale `.img` on backing store after PVC delete | Reclaim policy may be `Retain`, or the controller failed mid-delete; remove by hand |
 | Want to inspect state                          | Each node writes `/var/lib/kubelet/plugins/fileblock.csi/loop-mappings.json`        |
 
@@ -189,7 +180,7 @@ make e2e-nfs    # same suite, but the backing store is an NFSv3 export
 ```
 
 `make e2e-nfs` stands up `nfs-kernel-server` on the host, mounts the export
-via NFSv3 (with NLM), and points the kind cluster at that mount — so the
-suite validates that fileblock corrects the NFSv3 exec-bit, chmod, and
+via NFSv3, and points the kind cluster at that mount — so the suite
+validates that fileblock corrects the NFSv3 exec-bit, chmod, and in-pod
 flock pathologies described above. See [CLAUDE.md](./CLAUDE.md) for
 contributor notes and harness limitations.

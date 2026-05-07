@@ -87,9 +87,6 @@ func (f *fakeImages) Resize(_ context.Context, volumeID string, capacityBytes in
 	if !ok {
 		return nil, errors.New("not found")
 	}
-	if m.AttachedNode != "" {
-		return nil, &image.VolumeInUseError{Node: m.AttachedNode}
-	}
 	if capacityBytes < m.CapacityBytes {
 		return nil, errors.New("shrink not supported")
 	}
@@ -99,17 +96,6 @@ func (f *fakeImages) Resize(_ context.Context, volumeID string, capacityBytes in
 
 func (f *fakeImages) ImagePath(volumeID string) string   { return f.root + "/" + volumeID + ".img" }
 func (f *fakeImages) SidecarPath(volumeID string) string { return f.root + "/" + volumeID + ".json" }
-
-func (f *fakeImages) SetAttachedNode(_ context.Context, volumeID, nodeID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	m, ok := f.store[volumeID]
-	if !ok {
-		return errors.New("not found")
-	}
-	m.AttachedNode = nodeID
-	return nil
-}
 
 func mountCap() *csi.VolumeCapability {
 	return &csi.VolumeCapability{
@@ -464,20 +450,6 @@ func TestControllerExpandVolumeRequiredBytesMissing(t *testing.T) {
 	_, err := c.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{VolumeId: "x"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("got %v, want InvalidArgument", err)
-	}
-}
-
-func TestControllerExpandVolumeInUse(t *testing.T) {
-	imgs := newFakeImages()
-	_, _ = imgs.Create(context.Background(), "fb-1", 1024)
-	_ = imgs.SetAttachedNode(context.Background(), "fb-1", "node-x")
-	c := NewControllerServer(imgs, "/srv/fb", "")
-	_, err := c.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
-		VolumeId:      "fb-1",
-		CapacityRange: &csi.CapacityRange{RequiredBytes: 4096},
-	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("got %v, want FailedPrecondition", err)
 	}
 }
 
