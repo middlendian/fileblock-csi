@@ -32,10 +32,6 @@ type Metadata struct {
 	CapacityBytes int64     `json:"capacityBytes"`
 	FsType        string    `json:"fsType"`
 	CreatedAt     time.Time `json:"createdAt"`
-	// AttachedNode is set by the node plugin during NodeStageVolume and
-	// cleared on NodeUnstageVolume. ControllerExpandVolume refuses while it
-	// is non-empty.
-	AttachedNode string `json:"attachedNode,omitempty"`
 }
 
 // Manager is the image-file CRUD interface. Tests substitute a fake.
@@ -47,7 +43,6 @@ type Manager interface {
 	Resize(ctx context.Context, volumeID string, capacityBytes int64) (*Metadata, error)
 	ImagePath(volumeID string) string
 	SidecarPath(volumeID string) string
-	SetAttachedNode(ctx context.Context, volumeID, nodeID string) error
 }
 
 type fsManager struct {
@@ -169,14 +164,13 @@ func (m *fsManager) List(ctx context.Context) ([]*Metadata, error) {
 
 // Resize implements offline expand: truncate the file, update the sidecar.
 // resize2fs is run by the node plugin on next stage (it owns the loop device).
+// The CSI external-resizer is responsible for waiting until the volume is
+// unpublished before calling ControllerExpandVolume; we don't double-check.
 // Refuses to shrink.
 func (m *fsManager) Resize(ctx context.Context, volumeID string, capacityBytes int64) (*Metadata, error) {
 	meta, err := m.Get(ctx, volumeID)
 	if err != nil {
 		return nil, err
-	}
-	if meta.AttachedNode != "" {
-		return nil, &VolumeInUseError{Node: meta.AttachedNode}
 	}
 	if capacityBytes < meta.CapacityBytes {
 		return nil, fmt.Errorf("shrink not supported: %d < %d", capacityBytes, meta.CapacityBytes)
@@ -192,18 +186,6 @@ func (m *fsManager) Resize(ctx context.Context, volumeID string, capacityBytes i
 		return nil, err
 	}
 	return meta, nil
-}
-
-// SetAttachedNode atomically updates the sidecar's AttachedNode. Pass "" to
-// clear. Called by the node plugin from inside the flock-guarded section so
-// the read-modify-write is safe.
-func (m *fsManager) SetAttachedNode(ctx context.Context, volumeID, nodeID string) error {
-	meta, err := m.Get(ctx, volumeID)
-	if err != nil {
-		return err
-	}
-	meta.AttachedNode = nodeID
-	return writeSidecarAtomic(m.SidecarPath(volumeID), meta)
 }
 
 func truncateSparse(path string, size int64) error {
@@ -262,12 +244,4 @@ type CapacityMismatchError struct{ Requested, Existing int64 }
 
 func (e *CapacityMismatchError) Error() string {
 	return fmt.Sprintf("volume already exists with capacity %d, requested %d", e.Existing, e.Requested)
-}
-
-// VolumeInUseError is returned when an operation requires the volume to be
-// detached.
-type VolumeInUseError struct{ Node string }
-
-func (e *VolumeInUseError) Error() string {
-	return fmt.Sprintf("volume is attached to node %q", e.Node)
 }

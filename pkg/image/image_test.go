@@ -73,22 +73,6 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal("expected shrink to be refused")
 	}
 
-	// Resize refuses while attached.
-	if err := mgr.SetAttachedNode(ctx, "fb-test", "node-x"); err != nil {
-		t.Fatalf("SetAttachedNode: %v", err)
-	}
-	if _, err := mgr.Resize(ctx, "fb-test", cap2*2); err == nil {
-		t.Fatal("expected VolumeInUseError")
-	} else {
-		var u *VolumeInUseError
-		if !errors.As(err, &u) {
-			t.Fatalf("wanted VolumeInUseError, got %T: %v", err, err)
-		}
-	}
-	if err := mgr.SetAttachedNode(ctx, "fb-test", ""); err != nil {
-		t.Fatalf("clear AttachedNode: %v", err)
-	}
-
 	if err := mgr.Delete(ctx, "fb-test"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -157,13 +141,6 @@ func TestResize2fsFails(t *testing.T) {
 
 func TestCapacityMismatchErrorMessage(t *testing.T) {
 	e := &CapacityMismatchError{Requested: 100, Existing: 200}
-	if e.Error() == "" {
-		t.Fatal("empty Error()")
-	}
-}
-
-func TestVolumeInUseErrorMessage(t *testing.T) {
-	e := &VolumeInUseError{Node: "n1"}
 	if e.Error() == "" {
 		t.Fatal("empty Error()")
 	}

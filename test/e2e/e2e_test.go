@@ -145,10 +145,9 @@ sleep 3600
 		"-p", `{"spec":{"resources":{"requests":{"storage":"384Mi"}}}}`)
 
 	// Wait for the controller-side expand to complete before recreating the
-	// pod. fileblock advertises OFFLINE expansion and its controller refuses
-	// ControllerExpandVolume while AttachedNode != "". If we recreate the
-	// pod first, NodeStageVolume sets AttachedNode and the resizer can never
-	// make progress.
+	// pod. fileblock advertises OFFLINE expansion, so the external-resizer
+	// holds back ControllerExpandVolume until the volume is unpublished; if
+	// we recreate the pod first the resizer will never make progress.
 	//
 	// We watch the *PV*'s spec.capacity rather than the PVC's status.capacity:
 	// after ControllerExpandVolume succeeds, the resizer updates PV.spec.capacity
@@ -187,9 +186,12 @@ sleep 3600
 
 // TestCrossNodeTakeover validates the fileblock-specific cross-node handoff
 // the project's design notes call out: a pod on node A is removed, a pod on
-// node B takes the same volume, and the JSON sidecar's attachedNode flips.
-// This requires the e2e overlay's shared-topology setting; without it the
-// PV would be pinned to one node and the second pod would never schedule.
+// node B takes the same volume, and reads the data the first pod wrote.
+// Cross-node mutual exclusion is the kubelet's job — fileblock advertises
+// SINGLE_NODE_WRITER and trusts CSI to serialize Stage/Unstage. This test
+// just exercises the data-persistence half of the handoff. It requires the
+// e2e overlay's shared-topology setting; without it the PV would be pinned
+// to one node and the second pod would never schedule.
 func TestCrossNodeTakeover(t *testing.T) {
 	nodes := nodeNames(t)
 	if len(nodes) < 2 {
@@ -206,11 +208,6 @@ sleep 3600
 `))
 	waitPodReady(t, ns, "pod-a", defaultPodReady)
 
-	volID := volumeIDForPVC(t, ns, "vol")
-	if !strings.Contains(readSidecar(t, volID), `"attachedNode": "`+nodeA+`"`) {
-		t.Fatalf("expected attachedNode=%s, sidecar=%s", nodeA, readSidecar(t, volID))
-	}
-
 	kubectl(t, "-n", ns, "delete", "pod", "pod-a", "--wait=true")
 	waitPodGone(t, ns, "pod-a", 60*time.Second)
 
@@ -221,14 +218,6 @@ echo node-b >> /data/who
 sleep 3600
 `))
 	waitPodReady(t, ns, "pod-b", defaultPodReady)
-
-	eventually(t, 30*time.Second, func() error {
-		s := readSidecar(t, volID)
-		if !strings.Contains(s, `"attachedNode": "`+nodeB+`"`) {
-			return fmt.Errorf("attachedNode did not flip to %s: %s", nodeB, s)
-		}
-		return nil
-	})
 }
 
 // TestNFSv3BackingProperties only runs when E2E_BACKING_KIND=nfs. It first

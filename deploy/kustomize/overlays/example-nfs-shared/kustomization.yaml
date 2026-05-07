@@ -7,9 +7,9 @@ kind: Kustomization
 # PV created in this store.
 #
 # Edit the `server`/`path` fields in patch-controller.yaml and patch-node.yaml
-# to match your NFS export. NFSv4 is recommended; NFSv3 requires the Network
-# Lock Manager (rpc.statd / rpc.lockd) on every node so the kernel-side flock
-# the driver holds on each .img is honored across hosts.
+# to match your NFS export. Cross-node mutual exclusion comes from CSI's
+# SINGLE_NODE_WRITER serialization, not a fileblock-side lease, so the NFS
+# server's lock manager is not on the critical path.
 
 namespace: fileblock-system
 

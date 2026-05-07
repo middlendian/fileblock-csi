@@ -113,8 +113,8 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	// segment (key=value), not necessarily a single node: when every node
 	// that mounts the same backing store advertises the same segment, the
 	// PV is schedulable on any of them. ext4 still has no distributed
-	// locking, so the OS-level flock on the .img file remains the
-	// per-stage cross-node mutual-exclusion primitive (see pkg/flock).
+	// locking; SINGLE_NODE_WRITER + the kubelet's per-volume serialization
+	// is what keeps two nodes from staging at once.
 	if reqTop := req.GetAccessibilityRequirements(); reqTop != nil {
 		if pref := reqTop.GetPreferred(); len(pref) > 0 {
 			vol.AccessibleTopology = []*csi.Topology{pref[0]}
@@ -188,10 +188,6 @@ func (c *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	}
 	meta, err := c.images.Resize(ctx, req.GetVolumeId(), r.RequiredBytes)
 	if err != nil {
-		var inUse *image.VolumeInUseError
-		if errors.As(err, &inUse) {
-			return nil, status.Errorf(codes.FailedPrecondition, "volume in use: %v", err)
-		}
 		return nil, status.Errorf(codes.Internal, "resize: %v", err)
 	}
 	return &csi.ControllerExpandVolumeResponse{

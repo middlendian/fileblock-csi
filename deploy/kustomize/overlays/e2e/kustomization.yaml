@@ -5,8 +5,8 @@ kind: Kustomization
 # the same host directory into every kind node at /var/lib/fileblock, so the
 # backing store is genuinely shared. All nodes advertise the same topology
 # segment, which means any PV provisioned in this store can be staged on any
-# node — letting the cross-node takeover test rely on a real flock(2) handoff
-# rather than two distinct StorageClasses.
+# node — so the cross-node takeover test can land its second pod on a
+# different node without minting a second StorageClass.
 
 namespace: fileblock-system
 

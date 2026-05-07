@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -15,7 +14,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
-	"github.com/middlendian/fileblock-csi/pkg/flock"
 	"github.com/middlendian/fileblock-csi/pkg/image"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
@@ -23,8 +21,11 @@ import (
 
 // NodeServer implements the CSI NodeServer for fileblock. The node owns:
 //   - the loop device for each staged volume
-//   - the OS-level flock on the .img file
 //   - the staging mount and the bind mount into the pod
+//
+// Cross-node mutual exclusion is the kubelet's job: fileblock advertises only
+// SINGLE_NODE_WRITER, so the CSI attach/detach path serializes Stage/Unstage
+// per volume across the cluster.
 //
 // State is persisted to a JSON file so a plugin restart can reconcile.
 type NodeServer struct {
@@ -43,14 +44,10 @@ type NodeServer struct {
 	topologyKey   string
 	topologyValue string
 
-	// One mutex per volumeID protects Stage/Unstage from racing each other.
+	// One mutex per volumeID protects Stage/Unstage from racing each other
+	// inside this process.
 	mu       sync.Mutex
 	volMutex map[string]*sync.Mutex
-	// fdByVolume holds the open flock fd for each currently-staged volume.
-	// We can't put a *flock.Handle in the on-disk state, so it's tracked
-	// only in memory; on plugin restart the kernel-side flock is released
-	// and Reconcile.go re-detaches the orphan loop.
-	fdByVolume map[string]*flock.Handle
 }
 
 // NewNodeServer constructs a NodeServer. topologyKey/topologyValue may be
@@ -73,7 +70,6 @@ func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *lo
 		topologyKey:   topologyKey,
 		topologyValue: topologyValue,
 		volMutex:      map[string]*sync.Mutex{},
-		fdByVolume:    map[string]*flock.Handle{},
 	}
 }
 
@@ -137,34 +133,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, status.Errorf(codes.NotFound, "image %s: %v", imgPath, err)
 	}
 
-	// 1. Hold an OS-level lock on the .img for the lifetime of the stage.
-	//    Defense-in-depth against accidental dual-node mount.
-	fd, err := flock.TryLock(imgPath)
-	if err != nil {
-		if errors.Is(err, flock.ErrLocked) {
-			return nil, status.Errorf(codes.FailedPrecondition,
-				"image %s is locked by another node", imgPath)
-		}
-		return nil, status.Errorf(codes.Internal, "flock: %v", err)
-	}
-	released := false
-	defer func() {
-		if !released {
-			_ = fd.Close()
-		}
-	}()
-
-	// Holding the flock proves no other node is using this image. If the
-	// sidecar still names a different node, the previous holder lost its
-	// lock (process exit, kernel-side NFS lease expiry, etc.) and we are
-	// taking over. Log it; SetAttachedNode below overwrites the field.
-	if meta, err := images.Get(ctx, volumeID); err == nil &&
-		meta.AttachedNode != "" && meta.AttachedNode != n.nodeID {
-		n.log.Warn("taking over volume from previous node",
-			"volumeID", volumeID, "from", meta.AttachedNode, "to", n.nodeID)
-	}
-
-	// 2. Attach a loop device.
+	// 1. Attach a loop device.
 	dev, err := n.losetup.Attach(ctx, imgPath)
 	if err != nil {
 		if errors.Is(err, loop.ErrPoolExhausted) {
@@ -174,13 +143,13 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 	detachOnFail := func() { _ = n.losetup.Detach(ctx, dev) }
 
-	// 3. e2fsck always (-p is a no-op on clean fs).
+	// 2. e2fsck always (-p is a no-op on clean fs).
 	if err := image.Fsck(ctx, n.exec, dev); err != nil {
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "fsck: %v", err)
 	}
 
-	// 4. If the image was expanded since the last stage, grow the fs now.
+	// 3. If the image was expanded since the last stage, grow the fs now.
 	//    resize2fs is a no-op when the fs already fills the device.
 	if err := n.losetup.SetCapacity(ctx, dev); err != nil {
 		detachOnFail()
@@ -191,7 +160,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, status.Errorf(codes.Internal, "resize2fs: %v", err)
 	}
 
-	// 5. Mount.
+	// 4. Mount.
 	if err := os.MkdirAll(stagePath, 0o755); err != nil {
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "mkdir stage: %v", err)
@@ -202,7 +171,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, status.Errorf(codes.Internal, "mount: %v", err)
 	}
 
-	// 6. Persist mapping + sidecar's AttachedNode.
+	// 5. Persist mapping.
 	if err := n.state.Put(loop.Mapping{
 		VolumeID:  volumeID,
 		LoopDev:   dev,
@@ -213,12 +182,6 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
 	}
-	if err := images.SetAttachedNode(ctx, volumeID, n.nodeID); err != nil {
-		n.log.Warn("could not record AttachedNode in sidecar", "volumeID", volumeID, "err", err)
-	}
-
-	released = true
-	n.fdByVolume[volumeID] = fd
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
@@ -240,15 +203,7 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 		if err := n.losetup.Detach(ctx, m.LoopDev); err != nil {
 			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
 		}
-		// Best-effort sidecar update; don't fail unstage on a stale NFS link.
-		if images, err := image.New(filepath.Dir(m.ImagePath), n.exec); err == nil {
-			_ = images.SetAttachedNode(ctx, volumeID, "")
-		}
 		_ = n.state.Delete(volumeID)
-	}
-	if fd := n.fdByVolume[volumeID]; fd != nil {
-		_ = fd.Close()
-		delete(n.fdByVolume, volumeID)
 	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
