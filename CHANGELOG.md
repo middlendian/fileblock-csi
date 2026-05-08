@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `CreateVolume` is now strictly idempotent against the on-disk `.img`:
+  if the file exists at the requested size it is adopted as-is, never
+  re-`mkfs`'d. Mismatched on-disk size returns `AlreadyExists`. A corrupt
+  or otherwise unusable `.img` surfaces at `NodeStageVolume`'s `e2fsck`
+  step as a mount error rather than being silently overwritten.
+- Dropped the `fb-<uuid>.json` sidecar. The `.img` is the single source of
+  truth — capacity is `os.Stat().Size()`. Existing sidecars on upgraded
+  deployments are left in place; they are inert and removed on next
+  `DeleteVolume`.
+
 ## [0.1.1] - 2026-05-08
 
 ### Changed

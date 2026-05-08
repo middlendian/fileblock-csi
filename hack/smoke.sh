@@ -86,7 +86,6 @@ CREATE_OUT=$(csc controller new \
 VOL_ID=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
 echo "  created volumeID=$VOL_ID"
 [[ -f "$BACKING/$VOL_ID.img"  ]] || { echo "missing .img"; exit 1; }
-[[ -f "$BACKING/$VOL_ID.json" ]] || { echo "missing .json"; exit 1; }
 
 echo "::: stage on node"
 STAGE="$STATE/staging/$VOL_ID"
@@ -120,7 +119,6 @@ echo "::: unstage + delete"
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE" "$VOL_ID"
 csc controller del "$VOL_ID"
 [[ ! -f "$BACKING/$VOL_ID.img" ]]  || { echo ".img still present"; exit 1; }
-[[ ! -f "$BACKING/$VOL_ID.json" ]] || { echo ".json still present"; exit 1; }
 
 echo "::: orphan loop is reclaimed on plugin restart"
 CREATE_OUT=$(csc controller new \

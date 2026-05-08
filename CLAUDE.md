@@ -13,7 +13,7 @@ breaks `git`, `chmod`, and file locking inside pods.
 cmd/controller/         CSI controller plugin entrypoint
 cmd/node/               CSI node plugin entrypoint
 pkg/driver/             Identity / Controller / Node CSI gRPC servers + bootstrap
-pkg/image/              .img + sidecar JSON CRUD; ext4 fsck + resize2fs helpers
+pkg/image/              .img CRUD; ext4 fsck + resize2fs helpers
 pkg/loop/               losetup wrappers, loop-mappings.json state file, reconciler
 pkg/mount/              mount / bind / unmount / findmnt wrappers
 pkg/exec/               os/exec wrapper with timeout + structured Error
@@ -206,15 +206,19 @@ build path is exercised by plain `make docker` against the top-level
 ## On-disk contract
 
 `pkg/image` is the **only** package that writes to the backing store. Every
-volume is a pair of files in `${backingStorePath}`:
+volume is a single file in `${backingStorePath}`:
 
 ```
 fb-<uuid>.img      sparse ext4 image
-fb-<uuid>.json     {volumeId, capacityBytes, fsType, createdAt}
 ```
 
-The sidecar is written atomically (write to `.tmp`, fsync, rename). Reads are
-lock-free.
+The `.img` is the source of truth. Capacity is read from `os.Stat().Size()`
+(the apparent size we `truncate(2)` to — matches what `losetup` exposes and
+what ext4 sizes itself against). `Create` is idempotent: if the `.img` exists
+at the requested size it is adopted as-is; mismatched on-disk size is
+`AlreadyExists`; if the `.img` is corrupt or otherwise unusable, the failure
+surfaces at `NodeStageVolume`'s `e2fsck` step as a mount error rather than
+being silently re-`mkfs`'d.
 
 Cross-node mutual exclusion is the kubelet's job. fileblock advertises only
 `SINGLE_NODE_WRITER`, so the CSI attach/detach controller serializes

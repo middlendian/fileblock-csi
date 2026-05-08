@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -43,8 +42,6 @@ func (f *fakeImages) Create(_ context.Context, volumeID string, capacityBytes in
 	m := &image.Metadata{
 		VolumeID:      volumeID,
 		CapacityBytes: capacityBytes,
-		FsType:        image.DefaultFs,
-		CreatedAt:     time.Now().UTC(),
 	}
 	f.store[volumeID] = m
 	return m, nil
@@ -94,8 +91,7 @@ func (f *fakeImages) Resize(_ context.Context, volumeID string, capacityBytes in
 	return m, nil
 }
 
-func (f *fakeImages) ImagePath(volumeID string) string   { return f.root + "/" + volumeID + ".img" }
-func (f *fakeImages) SidecarPath(volumeID string) string { return f.root + "/" + volumeID + ".json" }
+func (f *fakeImages) ImagePath(volumeID string) string { return f.root + "/" + volumeID + ".img" }
 
 func mountCap() *csi.VolumeCapability {
 	return &csi.VolumeCapability{
