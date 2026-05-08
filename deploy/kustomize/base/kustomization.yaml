@@ -16,4 +16,4 @@ resources:
 # pulls ghcr.io/middlendian/fileblock-csi:vX.Y.Z, and `?ref=main` pulls :latest.
 images:
   - name: ghcr.io/middlendian/fileblock-csi
-    newTag: v0.1.0
+    newTag: latest
