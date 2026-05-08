@@ -93,20 +93,33 @@ gating tests on root + losetup.
 
 ## Releases
 
-Releases are driven by [GoReleaser](https://goreleaser.com/). A `v*` tag on
-any commit fires `.github/workflows/release.yml`, which:
+A `v*` tag on any commit fires `.github/workflows/release.yml`, which has
+three jobs running in parallel where possible:
 
-1. Extracts the `## [X.Y.Z] - DATE` section from `CHANGELOG.md` and uses it
-   as the GitHub release body.
-2. Builds `cmd/controller` and `cmd/node` for `linux/amd64` and
-   `linux/arm64`, with `pkg/driver.Version` set via `-ldflags` to the tag.
-3. Publishes per-arch images to `ghcr.io/middlendian/fileblock-csi`, then
-   combines them into a multi-arch manifest at
-   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z`. For non-prerelease tags it
-   also pushes `:latest` (`docker_manifests[1].skip_push: auto`).
-4. Creates a GitHub release marked latest, with
-   `fileblock-csi_X.Y.Z_linux_{amd64,arm64}.tar.gz` archives attached for
-   inspection.
+1. **`image` (matrix)** — one job per arch on a native runner
+   (`ubuntu-latest` for `linux/amd64`, `ubuntu-24.04-arm` for `linux/arm64`).
+   Each runs `docker/build-push-action` against the existing top-level
+   `Dockerfile`, builds the binaries inside the container natively (no
+   QEMU), and pushes a per-arch tag like
+   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z-amd64`.
+2. **`manifest`** — `needs: image`. `docker buildx imagetools create`
+   combines the two per-arch tags into the multi-arch manifest at
+   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z`, and (for non-prerelease
+   tags only — anything without `-` in the tag) tags `:latest` the same
+   way.
+3. **`release`** — runs in parallel with `image`. Extracts the
+   `## [X.Y.Z]` section from `CHANGELOG.md` into `release-notes.md`, then
+   runs [GoReleaser](https://goreleaser.com/) (`.goreleaser.yaml`) to
+   build `cmd/controller` and `cmd/node` binaries for both linux arches
+   (with `pkg/driver.Version` set via `-ldflags`), package them as
+   `fileblock-csi_X.Y.Z_linux_{amd64,arm64}.tar.gz`, and create the
+   GitHub release with those archives attached and the CHANGELOG section
+   as the body.
+
+GoReleaser owns binaries + GitHub release; the workflow owns container
+images. Splitting it that way is what lets us keep the image build native
+on each arch — GoReleaser's own `dockers:` integration assumes a single
+runner with QEMU.
 
 ### Cutting a release
 
@@ -124,17 +137,18 @@ user-visible change lands under `## [Unreleased]` as it's merged. To cut
    for non-prereleases), and the GitHub release is published with the
    CHANGELOG section as its body.
 
-If the workflow fails with `No CHANGELOG entry for vX.Y.Z`, you forgot
-step 1 — the workflow refuses to publish a release whose notes would be
-empty. Fix the CHANGELOG, retag (`git tag -d`, `git push :refs/tags/...`,
-re-tag), and push again.
+If the `release` job fails with `No CHANGELOG entry for vX.Y.Z`, you
+forgot step 1 — the workflow refuses to publish a release whose notes
+would be empty. Fix the CHANGELOG, retag (`git tag -d`,
+`git push :refs/tags/...`, re-tag), and push again.
 
 ### Local dry run
 
-`goreleaser release --snapshot --clean --skip=publish` exercises the
-config end-to-end against a fake `vX.Y.Z-SNAPSHOT-<sha>` tag without
-pushing to ghcr or creating a GitHub release. Useful before merging
-changes to `.goreleaser.yaml` or `Dockerfile.goreleaser`.
+`make release-snapshot` runs `goreleaser release --snapshot --clean
+--skip=publish` against a fake `vX.Y.Z-SNAPSHOT-<sha>` tag — exercises
+the binary-and-archive path without pushing or hitting GitHub. The image
+build path is exercised by plain `make docker` against the top-level
+`Dockerfile`.
 
 ## On-disk contract
 

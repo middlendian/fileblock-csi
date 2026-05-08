@@ -41,10 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `debian:bookworm-slim` base with `e2fsprogs` and `util-linux` for
   `mkfs.ext4`, `e2fsck`, `resize2fs`, `losetup`, `mount`, `umount`, and
   `findmnt`.
-- Multi-arch (`linux/amd64`, `linux/arm64`) release pipeline driven by
-  GoReleaser: builds binaries, publishes images to
-  `ghcr.io/middlendian/fileblock-csi`, and creates a GitHub Release with
-  notes drawn from this CHANGELOG.
+- Tag-driven release pipeline. Pushing a `v*` tag publishes a multi-arch
+  (`linux/amd64`, `linux/arm64`) image to
+  `ghcr.io/middlendian/fileblock-csi`, built natively on each arch, and
+  creates a GitHub Release with notes drawn from this file.
 - Test harness:
   - `hack/smoke.sh` — full lifecycle against a temp directory, no cluster.
   - `hack/csi-sanity.sh` — `csi-test` conformance suite, no cluster.

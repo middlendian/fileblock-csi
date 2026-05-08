@@ -39,58 +39,9 @@ archives:
       - README.md
       - CHANGELOG.md
 
-dockers:
-  - id: amd64
-    use: buildx
-    goos: linux
-    goarch: amd64
-    ids: [controller, node]
-    dockerfile: Dockerfile.goreleaser
-    image_templates:
-      - "ghcr.io/middlendian/fileblock-csi:{{ .Version }}-amd64"
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.description=Kubernetes CSI driver providing real ext4 filesystems on shared backing stores"
-      - "--label=org.opencontainers.image.url=https://github.com/middlendian/fileblock-csi"
-      - "--label=org.opencontainers.image.source=https://github.com/middlendian/fileblock-csi"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=GPL-3.0-or-later"
-  - id: arm64
-    use: buildx
-    goos: linux
-    goarch: arm64
-    ids: [controller, node]
-    dockerfile: Dockerfile.goreleaser
-    image_templates:
-      - "ghcr.io/middlendian/fileblock-csi:{{ .Version }}-arm64"
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.description=Kubernetes CSI driver providing real ext4 filesystems on shared backing stores"
-      - "--label=org.opencontainers.image.url=https://github.com/middlendian/fileblock-csi"
-      - "--label=org.opencontainers.image.source=https://github.com/middlendian/fileblock-csi"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=GPL-3.0-or-later"
-
-docker_manifests:
-  - name_template: "ghcr.io/middlendian/fileblock-csi:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/middlendian/fileblock-csi:{{ .Version }}-amd64"
-      - "ghcr.io/middlendian/fileblock-csi:{{ .Version }}-arm64"
-  # `:latest` is only pushed for non-prerelease tags. GoReleaser's `auto`
-  # prerelease detection treats v1.2.3-rc1 as a prerelease and skips the
-  # docker_manifests entry below; v1.2.3 publishes :latest as well.
-  - name_template: "ghcr.io/middlendian/fileblock-csi:latest"
-    skip_push: auto
-    image_templates:
-      - "ghcr.io/middlendian/fileblock-csi:{{ .Version }}-amd64"
-      - "ghcr.io/middlendian/fileblock-csi:{{ .Version }}-arm64"
-
+# Container images are built and pushed by `.github/workflows/release.yml`
+# directly, on native amd64 + arm64 runners (no QEMU). GoReleaser only
+# handles binaries, archives, and the GitHub release here.
 release:
   github:
     owner: middlendian

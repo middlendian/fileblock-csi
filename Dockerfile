@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm AS build
+FROM golang:1.25-trixie AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/middlendian/f
 # Runtime image needs e2fsprogs (mkfs.ext4, e2fsck, resize2fs), util-linux
 # (losetup, mount, umount, findmnt). debian-slim is the smallest image that
 # carries all of these without surprises.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         e2fsprogs util-linux ca-certificates \
