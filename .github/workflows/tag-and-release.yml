@@ -1,27 +1,31 @@
 name: Tag and release
 
-# Triggered by every push to `main`. When the head commit looks like a
-# release PR landing — squash-merged ("release: vX.Y.Z (#N)" as subject)
-# or merge-committed ("release: vX.Y.Z" anywhere in the message body) —
-# this workflow:
-#   1. Creates and pushes the `vX.Y.Z` tag.
+# Triggered when a release PR (head branch `release/vX.Y.Z`) is merged
+# into `main`. The version is read from the head branch name via the
+# pull_request event payload — no commit-message parsing — so squash and
+# merge-commit modes both work without ceremony from the merger.
+#
+# What this workflow does:
+#   1. Creates and pushes the `vX.Y.Z` tag at the merge commit.
 #   2. Calls the reusable `release.yml` workflow to build multi-arch
 #      images and create the GitHub release.
 #
 # Also exposes a `workflow_dispatch` escape hatch for re-running a
 # release manually (e.g. when a CI flake aborted publish, or a release
-# commit sat un-detected and the broken-but-completed run can't be
+# slipped past the trigger and the broken-but-completed run can't be
 # replayed in place).
 #
-# Non-release pushes no-op out at the `detect` step — `is_release` falls
-# to `false` and the downstream jobs skip via `if`.
+# Non-release PR closes no-op via the job-level `if`: only PRs whose
+# head ref starts with `release/v` and that were actually merged kick
+# the rest of the pipeline. Closed-without-merge ends at the no-op.
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v0.1.1) — bypasses commit detection"
+        description: "Release version (e.g. v0.1.1) — bypasses PR detection"
         type: string
         required: true
 
@@ -31,60 +35,50 @@ permissions:
 
 jobs:
   detect:
-    name: Detect release commit
+    name: Detect release PR
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       startsWith(github.event.pull_request.head.ref, 'release/v'))
     outputs:
       version: ${{ steps.detect.outputs.version }}
-      is_release: ${{ steps.detect.outputs.is_release }}
+      sha: ${{ steps.detect.outputs.sha }}
     steps:
-      - uses: actions/checkout@v6
       - id: detect
         env:
-          MSG: ${{ github.event.head_commit.message }}
           DISPATCH_VERSION: ${{ inputs.version }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'
 
-          # workflow_dispatch path: explicit version wins.
           if [ -n "$DISPATCH_VERSION" ]; then
-            echo "version=$DISPATCH_VERSION" >> "$GITHUB_OUTPUT"
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::workflow_dispatch override: version=$DISPATCH_VERSION"
-            exit 0
-          fi
-
-          # Push path. Both squash and merge-commit modes leave the line
-          # `release: vX.Y.Z` somewhere in the message:
-          #   squash    -> subject:   "release: vX.Y.Z (#N)"
-          #   merge-cmt -> subject:   "Merge pull request #N from owner/release/vX.Y.Z"
-          #                body:      "release: vX.Y.Z"
-          # So scan all lines, not just the subject.
-          re='^release:[[:space:]]+(v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?)([[:space:]]+\(#[0-9]+\))?$'
-          version=""
-          while IFS= read -r line; do
-            if [[ "$line" =~ $re ]]; then
-              version="${BASH_REMATCH[1]}"
-              break
-            fi
-          done <<< "$MSG"
-
-          if [ -n "$version" ]; then
-            echo "version=$version" >> "$GITHUB_OUTPUT"
-            echo "is_release=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Detected release commit for $version"
+            version="$DISPATCH_VERSION"
+            sha="${{ github.sha }}"
+            echo "::notice::workflow_dispatch override: version=$version"
           else
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "Head commit message has no 'release: vX.Y.Z' line; skipping."
+            version="${PR_HEAD_REF#release/}"
+            sha="$PR_MERGE_SHA"
+            echo "::notice::Detected release PR: head=$PR_HEAD_REF version=$version"
           fi
+
+          if [[ ! "$version" =~ $re ]]; then
+            echo "::error::version $version does not look like vX.Y.Z[-prerelease]"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   tag:
     name: Create ${{ needs.detect.outputs.version }} tag
     needs: detect
-    if: ${{ needs.detect.outputs.is_release == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.detect.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
       - name: Create and push tag
@@ -108,7 +102,6 @@ jobs:
   release:
     name: Build and publish ${{ needs.detect.outputs.version }}
     needs: [detect, tag]
-    if: ${{ needs.detect.outputs.is_release == 'true' }}
     uses: ./.github/workflows/release.yml
     secrets: inherit
     with:

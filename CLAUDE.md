@@ -82,10 +82,13 @@ GitHub Actions workflows live in `.github/workflows/`:
   push to `main` and via workflow_dispatch. Each variant boots a kind
   cluster, deploys the e2e overlay, and runs `go test -tags=e2e
   ./test/e2e/...`.
-- `tag-and-release.yml` runs on every push to `main`. When the head
-  commit's subject matches `release: vX.Y.Z` (the squash form of a
-  `release/vX.Y.Z` PR), it creates the `vX.Y.Z` tag and calls the
-  reusable `release.yml`. Other pushes no-op.
+- `tag-and-release.yml` runs on `pull_request: closed` against `main`.
+  When the closed PR was merged and its head branch is `release/vX.Y.Z`,
+  it reads the version from the head ref, creates the `vX.Y.Z` tag at
+  the merge commit, and calls the reusable `release.yml`. Closes that
+  weren't merged, or merges of non-release branches, no-op via the
+  job-level `if`. A `workflow_dispatch` escape hatch with an explicit
+  `version` input is also wired up.
 - `release.yml` is a reusable workflow (`workflow_call`) that takes a
   `version` input. It builds the multi-arch image, combines the
   manifest, extracts the `[X.Y.Z]` CHANGELOG section, and creates the
@@ -100,8 +103,9 @@ gating tests on root + losetup.
 ## Releases
 
 Releases are PR-driven. The maintainer opens a `release/vX.Y.Z` PR via
-`hack/cut-release.sh`; merging it to `main` (squash) triggers
-`tag-and-release.yml`, which creates the tag and calls `release.yml` to
+`hack/cut-release.sh`; merging it to `main` (any merge mode) triggers
+`tag-and-release.yml`, which reads the version from the head branch
+name, creates the tag at the merge commit, and calls `release.yml` to
 build and publish.
 
 ### How a release happens, end-to-end
@@ -110,19 +114,19 @@ build and publish.
    creates a `release/vX.Y.Z` branch with one commit on it
    (CHANGELOG promotion + base kustomization `newTag` bump), subject
    `release: vX.Y.Z`, and opens a PR.
-2. **Merge the PR.** Either squash-merge or "create a merge commit"
-   works — both leave a `release: vX.Y.Z` line in the merge commit
-   message (squash puts it in the subject, merge-commit puts it in the
-   body), and `detect` scans the full message.
-3. **`tag-and-release.yml`** fires on the push to `main`:
-   - `detect` job scans the head commit message for a
-     `release: vX.Y.Z` line. If it doesn't find one, the workflow skips
-     the rest. The job also accepts a `workflow_dispatch` with an
-     explicit `version` input — escape hatch for re-running a release
-     manually if a CI flake aborted publish.
-   - `tag` job creates the `vX.Y.Z` tag (using `GITHUB_TOKEN`, allowed by
-     the `v*` tag-protection ruleset for `github-actions[bot]`) and pushes
-     it.
+2. **Merge the PR.** Squash-merge, merge-commit, and rebase-merge all
+   work — the trigger reads the version from the PR's head branch name
+   (`release/vX.Y.Z`), not the commit message, so the merger doesn't
+   have to keep any particular line in the merge commit.
+3. **`tag-and-release.yml`** fires on the `pull_request: closed` event:
+   - `detect` job is gated on `merged == true` and head ref starting
+     with `release/v`. It strips the `release/` prefix to get the
+     version and validates the format. The job also accepts a
+     `workflow_dispatch` with an explicit `version` input — escape hatch
+     for re-running a release manually if a CI flake aborted publish.
+   - `tag` job creates the `vX.Y.Z` tag at `pull_request.merge_commit_sha`
+     (using `GITHUB_TOKEN`, allowed by the `v*` tag-protection ruleset
+     for `github-actions[bot]`) and pushes it.
    - `release` job calls `release.yml` as a reusable workflow with
      `version: vX.Y.Z`.
 4. **`release.yml`** (reusable, `workflow_call`):
@@ -168,8 +172,9 @@ People who want bleeding-edge use the `:dev` image (`make docker`), not
    `make release VERSION=vX.Y.Z` (or `hack/cut-release.sh vX.Y.Z`). The
    script verifies pre-conditions, bumps `newTag`, commits, pushes the
    `release/vX.Y.Z` branch, and opens a PR.
-3. Review the PR. Squash-merge with the default subject
-   `release: vX.Y.Z`.
+3. Review the PR. Merge with whichever mode you prefer — the trigger
+   reads the version from the PR's head branch name, not the merge
+   commit message.
 4. Watch the Actions tab — `tag-and-release.yml` fires, then
    `release.yml`. When green, the multi-arch image is at
    `ghcr.io/middlendian/fileblock-csi:vX.Y.Z` (and `:latest` for
@@ -179,9 +184,9 @@ If the `release` job fails with `No CHANGELOG entry for vX.Y.Z`, the
 CHANGELOG promotion in step 1 was wrong (typo, wrong date format).
 Fix CHANGELOG on `main` via a follow-up PR, delete the broken tag
 (`gh api -X DELETE repos/middlendian/fileblock-csi/git/refs/tags/vX.Y.Z`),
-and re-trigger the release by re-opening and re-merging a release PR
-(or via `gh workflow run tag-and-release.yml` with a fresh release
-commit on `main`).
+and re-trigger the release via
+`gh workflow run tag-and-release.yml -f version=vX.Y.Z` (or the Actions
+UI's "Run workflow" button on the same workflow).
 
 ### Repo configuration this assumes
 
