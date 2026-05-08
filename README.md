@@ -59,9 +59,21 @@ metadata. Nothing else lives on the backing store.
 
 1. **Install the driver**
 
+   Pin to a release:
+
    ```sh
-   kubectl apply -k deploy/kustomize/overlays/example-localdir
+   kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/overlays/example-localdir?ref=v0.1.0'
    ```
+
+   Or follow `main`:
+
+   ```sh
+   kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/overlays/example-localdir?ref=main'
+   ```
+
+   The base kustomization sets the image tag from the ref — `vX.Y.Z` on a
+   release tag, `latest` on `main` — so the same URL with a different
+   `?ref=` selects which version you install.
 
    The example overlay uses `/var/lib/fileblock` on every node. To point at
    your own NFS / SMB / FUSE mount, copy the overlay and patch

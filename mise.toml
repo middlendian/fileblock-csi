@@ -1,0 +1,11 @@
+# Tool versions for fileblock-csi development. Run `mise install` from this
+# directory to provision them. CI installs the same versions via
+# actions/setup-go and the golangci-lint installer; if you bump a version
+# here, also bump the matching env var in `.github/workflows/ci.yml`.
+[tools]
+go = "1.25"
+golangci-lint = "2.5.0"
+# Used by `make release-snapshot` and the release workflow's
+# goreleaser-action (`version: "~> v2"`). Stay on v2 here so local dry-runs
+# match what CI publishes.
+goreleaser = "2"

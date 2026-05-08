@@ -131,6 +131,17 @@ e2e-nfs:
 docker:
 	docker build -t fileblock-csi:$(VERSION) --build-arg VERSION=$(VERSION) .
 
+.PHONY: release-snapshot
+release-snapshot:
+	goreleaser release --snapshot --clean --skip=publish
+
+.PHONY: release
+release:
+ifndef VERSION
+	$(error VERSION not set; usage: make release VERSION=vX.Y.Z)
+endif
+	hack/cut-release.sh $(VERSION)
+
 .PHONY: clean
 clean:
 	rm -rf $(BIN_DIR) dist $(COVER_OUT)

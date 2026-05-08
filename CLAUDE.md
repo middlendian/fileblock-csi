@@ -82,10 +82,95 @@ GitHub Actions workflows live in `.github/workflows/`:
   push to `main` and via workflow_dispatch. Each variant boots a kind
   cluster, deploys the e2e overlay, and runs `go test -tags=e2e
   ./test/e2e/...`.
+- `release.yml` runs on `v*` tag pushes. It logs into `ghcr.io`, extracts
+  the matching section from `CHANGELOG.md` as the GitHub release body,
+  then runs GoReleaser (config in `.goreleaser.yaml`) to publish
+  multi-arch images and create the GitHub release.
 
 Lint config lives in `.golangci.yml`. When adding a shell-out, prefer to
 unit-test the new package via `pkg/exec/exectest.FakeRunner` rather than
 gating tests on root + losetup.
+
+## Releases
+
+A `v*` tag on any commit fires `.github/workflows/release.yml`, which has
+three jobs running in parallel where possible:
+
+1. **`image` (matrix)** — one job per arch on a native runner
+   (`ubuntu-latest` for `linux/amd64`, `ubuntu-24.04-arm` for `linux/arm64`).
+   Each runs `docker/build-push-action` against the existing top-level
+   `Dockerfile`, builds the binaries inside the container natively (no
+   QEMU), and pushes a per-arch tag like
+   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z-amd64`.
+2. **`manifest`** — `needs: image`. `docker buildx imagetools create`
+   combines the two per-arch tags into the multi-arch manifest at
+   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z`, and (for non-prerelease
+   tags only — anything without `-` in the tag) tags `:latest` the same
+   way.
+3. **`release`** — runs in parallel with `image`. Extracts the
+   `## [X.Y.Z]` section from `CHANGELOG.md` into `release-notes.md`, then
+   runs [GoReleaser](https://goreleaser.com/) (`.goreleaser.yaml`) to
+   build `cmd/controller` and `cmd/node` binaries for both linux arches
+   (with `pkg/driver.Version` set via `-ldflags`), package them as
+   `fileblock-csi_X.Y.Z_linux_{amd64,arm64}.tar.gz`, and create the
+   GitHub release with those archives attached and the CHANGELOG section
+   as the body.
+
+GoReleaser owns binaries + GitHub release; the workflow owns container
+images. Splitting it that way is what lets us keep the image build native
+on each arch — GoReleaser's own `dockers:` integration assumes a single
+runner with QEMU.
+
+### Cutting a release
+
+The `CHANGELOG.md` follows
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). Every
+user-visible change lands under `## [Unreleased]` as it's merged.
+
+`deploy/kustomize/base/kustomization.yaml` carries an `images:` override
+whose `newTag` tracks the ref:
+- on `main` it is `latest`,
+- on tag `vX.Y.Z` it is `vX.Y.Z`.
+
+This is what makes `kubectl apply -k
+github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=vX.Y.Z`
+install the matching image. `hack/cut-release.sh` is responsible for
+flipping the tag on the release commit and back to `latest` after.
+
+To cut `vX.Y.Z`:
+
+1. Edit `CHANGELOG.md`: rename `## [Unreleased]` to
+   `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above
+   it, and update the `[Unreleased]` / `[X.Y.Z]` link references at the
+   bottom. Don't commit yet.
+2. From a clean `main` synced with origin, run
+   `make release VERSION=vX.Y.Z`. The script:
+   - Validates the CHANGELOG section exists and the kustomization is
+     currently at `newTag: latest`.
+   - Bumps base kustomization `newTag` to `vX.Y.Z`, commits the
+     CHANGELOG promotion + bump as `release: vX.Y.Z`, and tags that
+     commit.
+   - Bumps `newTag` back to `latest` and commits
+     `deploy: bump kustomization back to :latest after vX.Y.Z`.
+3. Review `git log --oneline -3` and the new tag; push with
+   `git push origin main vX.Y.Z`.
+4. Watch `release.yml` in Actions. When it goes green, the multi-arch
+   image is at `ghcr.io/middlendian/fileblock-csi:vX.Y.Z` (and
+   `:latest` for non-prereleases), and the GitHub release is published
+   with the CHANGELOG section as its body.
+
+If the `release` job fails with `No CHANGELOG entry for vX.Y.Z`, you
+forgot step 1 — the workflow refuses to publish a release whose notes
+would be empty. Fix the CHANGELOG on `main` (a follow-up commit is
+fine), delete and re-create the tag at the new commit, and push.
+
+### Local dry run
+
+`make release-snapshot` runs `goreleaser release --snapshot --clean
+--skip=publish` against a fake `vX.Y.Z-SNAPSHOT-<sha>` tag — exercises
+the binary-and-archive path without pushing or hitting GitHub. The image
+build path is exercised by plain `make docker` against the top-level
+`Dockerfile`.
 
 ## On-disk contract
 
