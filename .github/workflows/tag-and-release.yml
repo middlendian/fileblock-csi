@@ -1,18 +1,29 @@
 name: Tag and release
 
 # Triggered by every push to `main`. When the head commit looks like a
-# squash-merged release PR (subject `release: vX.Y.Z`), this workflow:
-#   1. Creates and pushes the `vX.Y.Z` tag (using GITHUB_TOKEN, which the
-#      `v*` tag-protection ruleset must allow for `github-actions[bot]`).
+# release PR landing — squash-merged ("release: vX.Y.Z (#N)" as subject)
+# or merge-committed ("release: vX.Y.Z" anywhere in the message body) —
+# this workflow:
+#   1. Creates and pushes the `vX.Y.Z` tag.
 #   2. Calls the reusable `release.yml` workflow to build multi-arch
 #      images and create the GitHub release.
 #
-# All other pushes (regular merges, hotfixes, etc.) no-op out at the
-# `detect` step — `is_release` falls to `false` and the downstream jobs
-# skip via `if`.
+# Also exposes a `workflow_dispatch` escape hatch for re-running a
+# release manually (e.g. when a CI flake aborted publish, or a release
+# commit sat un-detected and the broken-but-completed run can't be
+# replayed in place).
+#
+# Non-release pushes no-op out at the `detect` step — `is_release` falls
+# to `false` and the downstream jobs skip via `if`.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.1) — bypasses commit detection"
+        type: string
+        required: true
 
 permissions:
   contents: write   # push tag, create GitHub release
@@ -30,21 +41,40 @@ jobs:
       - id: detect
         env:
           MSG: ${{ github.event.head_commit.message }}
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # Squash-merge of a "release: vX.Y.Z" PR keeps that subject and
-          # appends " (#N)". Plain merge-commit subjects look like "Merge
-          # pull request …". Match only the squash form, the only one we
-          # encourage.
-          first_line="${MSG%%$'\n'*}"
-          if [[ "$first_line" =~ ^release:\ (v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?)(\ \(#[0-9]+\))?$ ]]; then
-            version="${BASH_REMATCH[1]}"
+
+          # workflow_dispatch path: explicit version wins.
+          if [ -n "$DISPATCH_VERSION" ]; then
+            echo "version=$DISPATCH_VERSION" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::workflow_dispatch override: version=$DISPATCH_VERSION"
+            exit 0
+          fi
+
+          # Push path. Both squash and merge-commit modes leave the line
+          # `release: vX.Y.Z` somewhere in the message:
+          #   squash    -> subject:   "release: vX.Y.Z (#N)"
+          #   merge-cmt -> subject:   "Merge pull request #N from owner/release/vX.Y.Z"
+          #                body:      "release: vX.Y.Z"
+          # So scan all lines, not just the subject.
+          re='^release:[[:space:]]+(v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?)([[:space:]]+\(#[0-9]+\))?$'
+          version=""
+          while IFS= read -r line; do
+            if [[ "$line" =~ $re ]]; then
+              version="${BASH_REMATCH[1]}"
+              break
+            fi
+          done <<< "$MSG"
+
+          if [ -n "$version" ]; then
             echo "version=$version" >> "$GITHUB_OUTPUT"
             echo "is_release=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Detected release commit for $version"
           else
             echo "is_release=false" >> "$GITHUB_OUTPUT"
-            echo "Head commit subject is not a release commit (subject: $first_line)"
+            echo "Head commit message has no 'release: vX.Y.Z' line; skipping."
           fi
 
   tag:

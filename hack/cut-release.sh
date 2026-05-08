@@ -105,10 +105,10 @@ Cuts release **$VERSION**.
 
 ## Merge instructions
 
-**Squash-merge** is the right choice. Keep the default subject
-(\`release: $VERSION (#N)\`) — \`tag-and-release.yml\` matches that
-pattern on push to \`main\`, creates the \`$VERSION\` tag, and runs the
-release pipeline.
+Either **squash-merge** or **"create a merge commit"** works.
+\`tag-and-release.yml\` scans the merge commit message for a
+\`release: $VERSION\` line — both merge modes emit one (squash puts it in
+the subject, merge-commit puts it in the body), so either lands the tag.
 
 After merge:
 - Multi-arch image at \`ghcr.io/middlendian/fileblock-csi:$VERSION\` (and
@@ -121,5 +121,5 @@ EOF
 git checkout main
 echo
 echo "Done. Branch \`$BRANCH\` pushed and PR opened."
-echo "Squash-merge it (with the default \`release: $VERSION\` subject)"
-echo "and \`tag-and-release.yml\` will tag and publish the rest."
+echo "Merge it (squash or merge-commit, either is fine) — \`tag-and-release.yml\`"
+echo "will detect the \`release: $VERSION\` line and publish the rest."

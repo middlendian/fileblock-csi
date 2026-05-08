@@ -110,11 +110,16 @@ build and publish.
    creates a `release/vX.Y.Z` branch with one commit on it
    (CHANGELOG promotion + base kustomization `newTag` bump), subject
    `release: vX.Y.Z`, and opens a PR.
-2. **Squash-merge the PR.** Keep the default subject — the squashed
-   commit on `main` will be `release: vX.Y.Z (#N)`.
+2. **Merge the PR.** Either squash-merge or "create a merge commit"
+   works — both leave a `release: vX.Y.Z` line in the merge commit
+   message (squash puts it in the subject, merge-commit puts it in the
+   body), and `detect` scans the full message.
 3. **`tag-and-release.yml`** fires on the push to `main`:
-   - `detect` job parses the head commit subject for the `release: vX.Y.Z`
-     pattern. If it doesn't match, the workflow skips the rest.
+   - `detect` job scans the head commit message for a
+     `release: vX.Y.Z` line. If it doesn't find one, the workflow skips
+     the rest. The job also accepts a `workflow_dispatch` with an
+     explicit `version` input — escape hatch for re-running a release
+     manually if a CI flake aborted publish.
    - `tag` job creates the `vX.Y.Z` tag (using `GITHUB_TOKEN`, allowed by
      the `v*` tag-protection ruleset for `github-actions[bot]`) and pushes
      it.
