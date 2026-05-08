@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`linux/amd64`, `linux/arm64`) image to
   `ghcr.io/middlendian/fileblock-csi`, built natively on each arch, and
   creates a GitHub Release with notes drawn from this file.
+- Install-by-ref: `deploy/kustomize/base/kustomization.yaml` carries an
+  image tag that tracks the git ref — `latest` on `main`, `vX.Y.Z` on
+  release tags. So
+  `kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/overlays/example-localdir?ref=v0.1.0'`
+  installs `:v0.1.0`, and the same URL with `?ref=main` installs `:latest`.
 - Test harness:
   - `hack/smoke.sh` — full lifecycle against a temp directory, no cluster.
   - `hack/csi-sanity.sh` — `csi-test` conformance suite, no cluster.

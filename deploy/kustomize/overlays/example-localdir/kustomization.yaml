@@ -13,6 +13,5 @@ namespace: fileblock-system
 resources:
   - ../../base
 
-images:
-  - name: ghcr.io/middlendian/fileblock-csi
-    newTag: dev
+# Image tag is inherited from base/kustomization.yaml — `latest` on the
+# `main` branch, `vX.Y.Z` on a release tag.

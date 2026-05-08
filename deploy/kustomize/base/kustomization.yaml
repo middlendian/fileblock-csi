@@ -8,3 +8,12 @@ resources:
   - controller-deployment.yaml
   - node-daemonset.yaml
   - storageclass.yaml
+
+# `newTag` is rewritten by hack/cut-release.sh on every release:
+#   main       -> latest
+#   tag vX.Y.Z -> vX.Y.Z
+# So `kubectl apply -k github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=vX.Y.Z`
+# pulls ghcr.io/middlendian/fileblock-csi:vX.Y.Z, and `?ref=main` pulls :latest.
+images:
+  - name: ghcr.io/middlendian/fileblock-csi
+    newTag: latest

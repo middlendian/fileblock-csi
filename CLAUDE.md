@@ -125,22 +125,44 @@ runner with QEMU.
 
 The `CHANGELOG.md` follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). Every
-user-visible change lands under `## [Unreleased]` as it's merged. To cut
-`vX.Y.Z`:
+user-visible change lands under `## [Unreleased]` as it's merged.
 
-1. In a release commit, rename `## [Unreleased]` to
-   `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it,
-   and update the `[Unreleased]` / `[X.Y.Z]` link references at the bottom.
-2. `git tag vX.Y.Z` on that commit, `git push && git push --tags`.
-3. Watch `release.yml` in Actions. When it goes green, the multi-arch
-   image is at `ghcr.io/middlendian/fileblock-csi:vX.Y.Z` (and `:latest`
-   for non-prereleases), and the GitHub release is published with the
-   CHANGELOG section as its body.
+`deploy/kustomize/base/kustomization.yaml` carries an `images:` override
+whose `newTag` tracks the ref:
+- on `main` it is `latest`,
+- on tag `vX.Y.Z` it is `vX.Y.Z`.
+
+This is what makes `kubectl apply -k
+github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=vX.Y.Z`
+install the matching image. `hack/cut-release.sh` is responsible for
+flipping the tag on the release commit and back to `latest` after.
+
+To cut `vX.Y.Z`:
+
+1. Edit `CHANGELOG.md`: rename `## [Unreleased]` to
+   `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above
+   it, and update the `[Unreleased]` / `[X.Y.Z]` link references at the
+   bottom. Don't commit yet.
+2. From a clean `main` synced with origin, run
+   `make release VERSION=vX.Y.Z`. The script:
+   - Validates the CHANGELOG section exists and the kustomization is
+     currently at `newTag: latest`.
+   - Bumps base kustomization `newTag` to `vX.Y.Z`, commits the
+     CHANGELOG promotion + bump as `release: vX.Y.Z`, and tags that
+     commit.
+   - Bumps `newTag` back to `latest` and commits
+     `deploy: bump kustomization back to :latest after vX.Y.Z`.
+3. Review `git log --oneline -3` and the new tag; push with
+   `git push origin main vX.Y.Z`.
+4. Watch `release.yml` in Actions. When it goes green, the multi-arch
+   image is at `ghcr.io/middlendian/fileblock-csi:vX.Y.Z` (and
+   `:latest` for non-prereleases), and the GitHub release is published
+   with the CHANGELOG section as its body.
 
 If the `release` job fails with `No CHANGELOG entry for vX.Y.Z`, you
 forgot step 1 — the workflow refuses to publish a release whose notes
-would be empty. Fix the CHANGELOG, retag (`git tag -d`,
-`git push :refs/tags/...`, re-tag), and push again.
+would be empty. Fix the CHANGELOG on `main` (a follow-up commit is
+fine), delete and re-create the tag at the new commit, and push.
 
 ### Local dry run
 
