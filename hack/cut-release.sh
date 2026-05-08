@@ -2,23 +2,22 @@
 #
 # hack/cut-release.sh vX.Y.Z[-prerelease]
 #
-# Local helper to cut a release. Assumes the maintainer has already edited
+# Cuts a release **as a PR**. Assumes the maintainer has already edited
 # CHANGELOG.md to promote the current `## [Unreleased]` section to
 # `## [X.Y.Z] - YYYY-MM-DD` (and added a fresh empty `## [Unreleased]`
 # above it, plus the `[X.Y.Z]` link reference at the bottom).
 #
 # What this script does:
-#   1. Bumps `deploy/kustomize/base/kustomization.yaml` newTag from
-#      `latest` to vX.Y.Z so a checkout at the tag installs the matching
-#      image.
-#   2. Commits the (CHANGELOG + kustomization) bump as "release: vX.Y.Z"
-#      and tags that commit.
-#   3. Bumps newTag back to `latest` in a follow-up commit so `main`
-#      continues to track latest.
-#   4. Prints the push command — does NOT push.
+#   1. Bumps `deploy/kustomize/base/kustomization.yaml` newTag to `vX.Y.Z`
+#      (overwriting whatever the previous release's tag was).
+#   2. Creates a `release/vX.Y.Z` branch with one commit on it
+#      (CHANGELOG promotion + kustomization bump), subject
+#      `release: vX.Y.Z`.
+#   3. Pushes the branch and opens a PR via `gh pr create`.
 #
-# Re-run safely: if anything fails partway, `git reset --hard origin/main`
-# will undo the local commits, and `git tag -d vX.Y.Z` removes the tag.
+# When that PR is squash-merged to `main`, the squash commit subject is
+# `release: vX.Y.Z (#N)`, which `tag-and-release.yml` detects and uses
+# to create the `vX.Y.Z` tag and run the release pipeline.
 set -euo pipefail
 
 err() { echo "ERROR: $*" >&2; exit 1; }
@@ -34,18 +33,23 @@ SEMVER="${VERSION#v}"
 KUSTOMIZATION="deploy/kustomize/base/kustomization.yaml"
 [ -f "$KUSTOMIZATION" ] || err "$KUSTOMIZATION not found — run from repo root"
 
-# Branch + sync checks.
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-[ "$BRANCH" = "main" ] || err "must be on 'main' (currently on '$BRANCH')"
+BRANCH="release/$VERSION"
+
+# Branch / sync / tag preconditions.
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+[ "$CURRENT_BRANCH" = "main" ] \
+  || err "must be on 'main' (currently on '$CURRENT_BRANCH')"
 git fetch origin main --quiet
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
   || err "local 'main' is not at origin/main — pull/rebase first"
-
-# Tag must not already exist locally or on origin.
 git rev-parse "$VERSION" >/dev/null 2>&1 \
   && err "tag $VERSION already exists locally"
 git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1 \
   && err "tag $VERSION already exists on origin"
+git rev-parse "refs/heads/$BRANCH" >/dev/null 2>&1 \
+  && err "local branch $BRANCH already exists"
+git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1 \
+  && err "remote branch $BRANCH already exists"
 
 # Working tree must be clean except possibly CHANGELOG.md.
 DIRTY_OTHER="$(git status --porcelain | awk '$2 != "CHANGELOG.md" {print}')"
@@ -62,33 +66,60 @@ grep -qE "^## \[$SEMVER\] - [0-9]{4}-[0-9]{2}-[0-9]{2}" CHANGELOG.md \
        (add a fresh empty '## [Unreleased]' above it, and a '[$SEMVER]:' link
        reference at the bottom), then re-run."
 
-# Kustomization base must currently be at newTag: latest (single match).
-LATEST_LINES="$(grep -cE '^[[:space:]]+newTag: latest$' "$KUSTOMIZATION" || true)"
-[ "$LATEST_LINES" = "1" ] \
-  || err "$KUSTOMIZATION does not have exactly one 'newTag: latest' line (found: $LATEST_LINES)"
+# Kustomization must have exactly one newTag line and it must not already
+# be the new version (which would mean a prior run got stuck mid-flight).
+NEWTAG_LINES="$(grep -cE '^[[:space:]]+newTag: ' "$KUSTOMIZATION" || true)"
+[ "$NEWTAG_LINES" = "1" ] \
+  || err "$KUSTOMIZATION must have exactly one 'newTag: …' line (found: $NEWTAG_LINES)"
+CURRENT_TAG="$(awk '/^[[:space:]]+newTag:/ {print $2; exit}' "$KUSTOMIZATION")"
+[ "$CURRENT_TAG" != "$VERSION" ] \
+  || err "$KUSTOMIZATION already has newTag: $VERSION — nothing to bump"
 
-echo "==> Bumping $KUSTOMIZATION newTag: latest -> $VERSION"
-sed -i -E "s|^([[:space:]]+)newTag: latest$|\\1newTag: $VERSION|" "$KUSTOMIZATION"
+echo "==> Creating branch $BRANCH"
+git checkout -b "$BRANCH"
+
+echo "==> Bumping $KUSTOMIZATION newTag: $CURRENT_TAG -> $VERSION"
+sed -i -E "s|^([[:space:]]+)newTag: $CURRENT_TAG\$|\\1newTag: $VERSION|" "$KUSTOMIZATION"
+git diff --quiet -- "$KUSTOMIZATION" \
+  && err "kustomization sed produced no change — check the file by hand"
 
 echo "==> Committing release: $VERSION"
 git add CHANGELOG.md "$KUSTOMIZATION"
 git commit -m "release: $VERSION"
 
-echo "==> Tagging $VERSION"
-git tag -a "$VERSION" -m "$VERSION"
+echo "==> Pushing $BRANCH"
+git push -u origin "$BRANCH"
 
-echo "==> Reverting $KUSTOMIZATION newTag: $VERSION -> latest"
-sed -i -E "s|^([[:space:]]+)newTag: $VERSION\$|\\1newTag: latest|" "$KUSTOMIZATION"
+echo "==> Opening PR"
+gh pr create \
+  --base main \
+  --head "$BRANCH" \
+  --title "release: $VERSION" \
+  --body "$(cat <<EOF
+## Summary
 
-echo "==> Committing back-to-latest"
-git add "$KUSTOMIZATION"
-git commit -m "deploy: bump kustomization back to :latest after $VERSION"
+Cuts release **$VERSION**.
 
+- Promotes \`## [Unreleased]\` → \`## [$SEMVER] - $(date +%Y-%m-%d)\` in \`CHANGELOG.md\`.
+- Bumps \`$KUSTOMIZATION\` \`newTag\` from \`$CURRENT_TAG\` to \`$VERSION\`.
+
+## Merge instructions
+
+**Squash-merge** is the right choice. Keep the default subject
+(\`release: $VERSION (#N)\`) — \`tag-and-release.yml\` matches that
+pattern on push to \`main\`, creates the \`$VERSION\` tag, and runs the
+release pipeline.
+
+After merge:
+- Multi-arch image at \`ghcr.io/middlendian/fileblock-csi:$VERSION\` (and
+  \`:latest\` for non-prereleases) is published.
+- A GitHub release is created with the \`[$SEMVER]\` CHANGELOG section as
+  its body, marked latest.
+EOF
+)"
+
+git checkout main
 echo
-echo "Done. Recent commits:"
-git log --oneline -3
-echo
-echo "Tag:"
-git show --no-patch --format="  %h %s%n  tag $VERSION%n" "$VERSION"
-echo "If everything looks right, push with:"
-echo "  git push origin main $VERSION"
+echo "Done. Branch \`$BRANCH\` pushed and PR opened."
+echo "Squash-merge it (with the default \`release: $VERSION\` subject)"
+echo "and \`tag-and-release.yml\` will tag and publish the rest."

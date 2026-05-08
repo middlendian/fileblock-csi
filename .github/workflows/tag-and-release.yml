@@ -1,0 +1,85 @@
+name: Tag and release
+
+# Triggered by every push to `main`. When the head commit looks like a
+# squash-merged release PR (subject `release: vX.Y.Z`), this workflow:
+#   1. Creates and pushes the `vX.Y.Z` tag (using GITHUB_TOKEN, which the
+#      `v*` tag-protection ruleset must allow for `github-actions[bot]`).
+#   2. Calls the reusable `release.yml` workflow to build multi-arch
+#      images and create the GitHub release.
+#
+# All other pushes (regular merges, hotfixes, etc.) no-op out at the
+# `detect` step — `is_release` falls to `false` and the downstream jobs
+# skip via `if`.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # push tag, create GitHub release
+  packages: write   # push images to ghcr.io
+
+jobs:
+  detect:
+    name: Detect release commit
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      is_release: ${{ steps.detect.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: detect
+        env:
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          # Squash-merge of a "release: vX.Y.Z" PR keeps that subject and
+          # appends " (#N)". Plain merge-commit subjects look like "Merge
+          # pull request …". Match only the squash form, the only one we
+          # encourage.
+          first_line="${MSG%%$'\n'*}"
+          if [[ "$first_line" =~ ^release:\ (v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?)(\ \(#[0-9]+\))?$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Detected release commit for $version"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "Head commit subject is not a release commit (subject: $first_line)"
+          fi
+
+  tag:
+    name: Create ${{ needs.detect.outputs.version }} tag
+    needs: detect
+    if: ${{ needs.detect.outputs.is_release == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Create and push tag
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::tag $VERSION already exists locally; skipping create"
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::tag $VERSION already exists on origin; skipping create"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "$VERSION"
+
+  release:
+    name: Build and publish ${{ needs.detect.outputs.version }}
+    needs: [detect, tag]
+    if: ${{ needs.detect.outputs.is_release == 'true' }}
+    uses: ./.github/workflows/release.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.detect.outputs.version }}

@@ -9,11 +9,13 @@ resources:
   - node-daemonset.yaml
   - storageclass.yaml
 
-# `newTag` is rewritten by hack/cut-release.sh on every release:
-#   main       -> latest
+# `newTag` tracks the most recent release. `hack/cut-release.sh` bumps it
+# to the new vX.Y.Z on every release PR, so:
 #   tag vX.Y.Z -> vX.Y.Z
-# So `kubectl apply -k github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=vX.Y.Z`
-# pulls ghcr.io/middlendian/fileblock-csi:vX.Y.Z, and `?ref=main` pulls :latest.
+#   main       -> vX.Y.Z (same as the latest release)
+# Both `?ref=main` and `?ref=vX.Y.Z` (latest release) resolve to the same
+# multi-arch image. People who want bleeding-edge use the :dev image
+# build, not main.
 images:
   - name: ghcr.io/middlendian/fileblock-csi
-    newTag: latest
+    newTag: v0.1.0
