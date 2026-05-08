@@ -82,10 +82,16 @@ GitHub Actions workflows live in `.github/workflows/`:
   push to `main` and via workflow_dispatch. Each variant boots a kind
   cluster, deploys the e2e overlay, and runs `go test -tags=e2e
   ./test/e2e/...`.
-- `release.yml` runs on `v*` tag pushes. It logs into `ghcr.io`, extracts
-  the matching section from `CHANGELOG.md` as the GitHub release body,
-  then runs GoReleaser (config in `.goreleaser.yaml`) to publish
-  multi-arch images and create the GitHub release.
+- `tag-and-release.yml` runs on every push to `main`. When the head
+  commit's subject matches `release: vX.Y.Z` (the squash form of a
+  `release/vX.Y.Z` PR), it creates the `vX.Y.Z` tag and calls the
+  reusable `release.yml`. Other pushes no-op.
+- `release.yml` is a reusable workflow (`workflow_call`) that takes a
+  `version` input. It builds the multi-arch image, combines the
+  manifest, extracts the `[X.Y.Z]` CHANGELOG section, and creates the
+  GitHub release. Invoked only by `tag-and-release.yml`; not triggered
+  by raw tag pushes (humans can't push `v*` tags — see the tag
+  protection ruleset).
 
 Lint config lives in `.golangci.yml`. When adding a shell-out, prefer to
 unit-test the new package via `pkg/exec/exectest.FakeRunner` rather than
@@ -93,76 +99,96 @@ gating tests on root + losetup.
 
 ## Releases
 
-A `v*` tag on any commit fires `.github/workflows/release.yml`, which has
-three jobs running in parallel where possible:
+Releases are PR-driven. The maintainer opens a `release/vX.Y.Z` PR via
+`hack/cut-release.sh`; merging it to `main` (squash) triggers
+`tag-and-release.yml`, which creates the tag and calls `release.yml` to
+build and publish.
 
-1. **`image` (matrix)** — one job per arch on a native runner
-   (`ubuntu-latest` for `linux/amd64`, `ubuntu-24.04-arm` for `linux/arm64`).
-   Each runs `docker/build-push-action` against the existing top-level
-   `Dockerfile`, builds the binaries inside the container natively (no
-   QEMU), and pushes a per-arch tag like
-   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z-amd64`.
-2. **`manifest`** — `needs: image`. `docker buildx imagetools create`
-   combines the two per-arch tags into the multi-arch manifest at
-   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z`, and (for non-prerelease
-   tags only — anything without `-` in the tag) tags `:latest` the same
-   way.
-3. **`release`** — runs in parallel with `image`. Extracts the
-   `## [X.Y.Z]` section from `CHANGELOG.md` into `release-notes.md`, then
-   runs [GoReleaser](https://goreleaser.com/) (`.goreleaser.yaml`) to
-   build `cmd/controller` and `cmd/node` binaries for both linux arches
-   (with `pkg/driver.Version` set via `-ldflags`), package them as
-   `fileblock-csi_X.Y.Z_linux_{amd64,arm64}.tar.gz`, and create the
-   GitHub release with those archives attached and the CHANGELOG section
-   as the body.
+### How a release happens, end-to-end
 
-GoReleaser owns binaries + GitHub release; the workflow owns container
-images. Splitting it that way is what lets us keep the image build native
-on each arch — GoReleaser's own `dockers:` integration assumes a single
-runner with QEMU.
+1. **`hack/cut-release.sh vX.Y.Z`** (or `make release VERSION=vX.Y.Z`)
+   creates a `release/vX.Y.Z` branch with one commit on it
+   (CHANGELOG promotion + base kustomization `newTag` bump), subject
+   `release: vX.Y.Z`, and opens a PR.
+2. **Squash-merge the PR.** Keep the default subject — the squashed
+   commit on `main` will be `release: vX.Y.Z (#N)`.
+3. **`tag-and-release.yml`** fires on the push to `main`:
+   - `detect` job parses the head commit subject for the `release: vX.Y.Z`
+     pattern. If it doesn't match, the workflow skips the rest.
+   - `tag` job creates the `vX.Y.Z` tag (using `GITHUB_TOKEN`, allowed by
+     the `v*` tag-protection ruleset for `github-actions[bot]`) and pushes
+     it.
+   - `release` job calls `release.yml` as a reusable workflow with
+     `version: vX.Y.Z`.
+4. **`release.yml`** (reusable, `workflow_call`):
+   - `image` matrix builds `linux/amd64` on `ubuntu-latest` and
+     `linux/arm64` on `ubuntu-24.04-arm`, pushing per-arch tags
+     `:vX.Y.Z-amd64` and `:vX.Y.Z-arm64` to GHCR. Native, no QEMU.
+   - `manifest` combines the two via `docker buildx imagetools create`
+     into the multi-arch tag `:vX.Y.Z`, and (for non-prerelease tags
+     only) `:latest`.
+   - `release` extracts the `[X.Y.Z]` section from `CHANGELOG.md` into
+     `$RUNNER_TEMP/release-notes.md` and runs GoReleaser to publish the
+     binary tarballs and the GitHub release with that body, marked
+     latest.
 
-### Cutting a release
+Why the chained-workflow shape: the `v*` tag-protection ruleset blocks
+human tag pushes, and `GITHUB_TOKEN` pushes don't trigger other workflows
+(anti-recursion). Calling `release.yml` directly via `workflow_call` from
+the same workflow that creates the tag sidesteps both constraints
+without needing a PAT or GitHub App.
 
-The `CHANGELOG.md` follows
-[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). Every
-user-visible change lands under `## [Unreleased]` as it's merged.
+### Image-tag policy
 
 `deploy/kustomize/base/kustomization.yaml` carries an `images:` override
-whose `newTag` tracks the ref:
-- on `main` it is `latest`,
-- on tag `vX.Y.Z` it is `vX.Y.Z`.
+whose `newTag` is the **most recent released version**.
+`hack/cut-release.sh` bumps it from the previous release's tag to
+`vX.Y.Z` as part of the release commit. So:
 
-This is what makes `kubectl apply -k
-github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=vX.Y.Z`
-install the matching image. `hack/cut-release.sh` is responsible for
-flipping the tag on the release commit and back to `latest` after.
+- `kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=v0.1.0'`
+  resolves to `:v0.1.0` (immutable, the v0.1.0 source pinned that tag).
+- `kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=main'`
+  resolves to whatever the latest release was at `main`'s current tip.
 
-To cut `vX.Y.Z`:
+People who want bleeding-edge use the `:dev` image (`make docker`), not
+`main`.
+
+### Cutting `vX.Y.Z`
 
 1. Edit `CHANGELOG.md`: rename `## [Unreleased]` to
    `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above
    it, and update the `[Unreleased]` / `[X.Y.Z]` link references at the
    bottom. Don't commit yet.
 2. From a clean `main` synced with origin, run
-   `make release VERSION=vX.Y.Z`. The script:
-   - Validates the CHANGELOG section exists and the kustomization is
-     currently at `newTag: latest`.
-   - Bumps base kustomization `newTag` to `vX.Y.Z`, commits the
-     CHANGELOG promotion + bump as `release: vX.Y.Z`, and tags that
-     commit.
-   - Bumps `newTag` back to `latest` and commits
-     `deploy: bump kustomization back to :latest after vX.Y.Z`.
-3. Review `git log --oneline -3` and the new tag; push with
-   `git push origin main vX.Y.Z`.
-4. Watch `release.yml` in Actions. When it goes green, the multi-arch
-   image is at `ghcr.io/middlendian/fileblock-csi:vX.Y.Z` (and
-   `:latest` for non-prereleases), and the GitHub release is published
-   with the CHANGELOG section as its body.
+   `make release VERSION=vX.Y.Z` (or `hack/cut-release.sh vX.Y.Z`). The
+   script verifies pre-conditions, bumps `newTag`, commits, pushes the
+   `release/vX.Y.Z` branch, and opens a PR.
+3. Review the PR. Squash-merge with the default subject
+   `release: vX.Y.Z`.
+4. Watch the Actions tab — `tag-and-release.yml` fires, then
+   `release.yml`. When green, the multi-arch image is at
+   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z` (and `:latest` for
+   non-prereleases) and the GitHub release is published.
 
-If the `release` job fails with `No CHANGELOG entry for vX.Y.Z`, you
-forgot step 1 — the workflow refuses to publish a release whose notes
-would be empty. Fix the CHANGELOG on `main` (a follow-up commit is
-fine), delete and re-create the tag at the new commit, and push.
+If the `release` job fails with `No CHANGELOG entry for vX.Y.Z`, the
+CHANGELOG promotion in step 1 was wrong (typo, wrong date format).
+Fix CHANGELOG on `main` via a follow-up PR, delete the broken tag
+(`gh api -X DELETE repos/middlendian/fileblock-csi/git/refs/tags/vX.Y.Z`),
+and re-trigger the release by re-opening and re-merging a release PR
+(or via `gh workflow run tag-and-release.yml` with a fresh release
+commit on `main`).
+
+### Repo configuration this assumes
+
+These rules live in the GitHub repo settings (not in this repo's tree),
+and the release flow above relies on them:
+
+- **`main` branch protection**: pull request required to push. Already
+  in place — that's why `cut-release.sh` opens a PR.
+- **`v*` tag protection ruleset**: tag creation/update/delete blocked
+  for everyone except `github-actions[bot]`. This is what stops humans
+  from pushing tags directly; the `tag` job in `tag-and-release.yml` is
+  the only thing allowed to.
 
 ### Local dry run
 

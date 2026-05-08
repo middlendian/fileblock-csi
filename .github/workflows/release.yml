@@ -1,9 +1,17 @@
 name: Release
 
+# Reusable workflow. Called by `tag-and-release.yml` after it auto-creates
+# the `vX.Y.Z` tag from a `release: vX.Y.Z` merge commit on `main`. Not
+# triggered directly by tag pushes — under tag protection, only the
+# `github-actions[bot]` is allowed to push tags, and the auto-tag job in
+# `tag-and-release.yml` is the one that does it.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.0)"
+        type: string
+        required: true
 
 permissions:
   contents: write   # create GitHub release + upload assets
@@ -26,6 +34,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Check out the tag we just created. Default ref would be `main`
+          # (the caller's ref), which points at the same SHA right now,
+          # but pinning to the tag is more explicit.
+          ref: ${{ inputs.version }}
 
       - uses: docker/setup-buildx-action@v4
 
@@ -47,15 +60,15 @@ jobs:
           # we assemble in the next job and confuse simple `imagetools create`.
           provenance: false
           push: true
-          tags: ${{ env.IMAGE }}:${{ github.ref_name }}-${{ matrix.suffix }}
+          tags: ${{ env.IMAGE }}:${{ inputs.version }}-${{ matrix.suffix }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ inputs.version }}
           labels: |
             org.opencontainers.image.title=fileblock-csi
             org.opencontainers.image.description=Kubernetes CSI driver providing real ext4 filesystems on shared backing stores
             org.opencontainers.image.url=https://github.com/middlendian/fileblock-csi
             org.opencontainers.image.source=https://github.com/middlendian/fileblock-csi
-            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.version=${{ inputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=GPL-3.0-or-later
 
@@ -65,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ inputs.version }}
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -84,7 +97,7 @@ jobs:
       # Tag :latest only on non-prerelease tags. SemVer prereleases are
       # detected by the presence of `-` (e.g. v0.1.0-rc1).
       - name: Tag :latest
-        if: ${{ !contains(github.ref_name, '-') }}
+        if: ${{ !contains(inputs.version, '-') }}
         run: |
           docker buildx imagetools create \
             -t "${IMAGE}:latest" \
@@ -98,8 +111,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.version }}
           # GoReleaser needs the full history to compute version metadata.
           fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-go@v6
         with:
@@ -107,31 +122,39 @@ jobs:
           cache: true
 
       - name: Extract release notes from CHANGELOG.md
+        env:
+          # Write outside the worktree — GoReleaser refuses to release with
+          # any untracked files in the tree, and adding to .gitignore would
+          # be an in-source workaround for a CI-only artifact.
+          NOTES: ${{ runner.temp }}/release-notes.md
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          awk -v v="$VERSION" '
+          SEMVER="${VERSION#v}"
+          awk -v v="$SEMVER" '
             /^## \[/ {
               if (printing) exit
               if ($0 ~ "^## \\["v"\\]") { printing = 1; next }
             }
             printing && /^\[.+\]:/ { exit }
             printing { print }
-          ' CHANGELOG.md > release-notes.md
+          ' CHANGELOG.md > "$NOTES"
 
-          if [ ! -s release-notes.md ]; then
-            echo "::error::No CHANGELOG entry for v$VERSION — expected '## [$VERSION]' heading"
+          if [ ! -s "$NOTES" ]; then
+            echo "::error::No CHANGELOG entry for $VERSION — expected '## [$SEMVER]' heading"
             exit 1
           fi
 
           echo "::group::Release notes for $VERSION"
-          cat release-notes.md
+          cat "$NOTES"
           echo "::endgroup::"
 
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean --release-notes=release-notes.md
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Bypass git tag detection — we passed the version explicitly.
+          GORELEASER_CURRENT_TAG: ${{ inputs.version }}
