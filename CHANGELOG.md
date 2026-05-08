@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-08
+
 ### Added
 
 - Initial CSI driver implementation: controller and node plugins backed by sparse
@@ -58,4 +60,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `make check` — single command that runs fmt, vet, lint, tidy-check, race
   test + coverage, build, smoke, and csi-sanity. CI runs the same target.
 
-[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/HEAD...HEAD
+[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/middlendian/fileblock-csi/releases/tag/v0.1.0
