@@ -82,10 +82,59 @@ GitHub Actions workflows live in `.github/workflows/`:
   push to `main` and via workflow_dispatch. Each variant boots a kind
   cluster, deploys the e2e overlay, and runs `go test -tags=e2e
   ./test/e2e/...`.
+- `release.yml` runs on `v*` tag pushes. It logs into `ghcr.io`, extracts
+  the matching section from `CHANGELOG.md` as the GitHub release body,
+  then runs GoReleaser (config in `.goreleaser.yaml`) to publish
+  multi-arch images and create the GitHub release.
 
 Lint config lives in `.golangci.yml`. When adding a shell-out, prefer to
 unit-test the new package via `pkg/exec/exectest.FakeRunner` rather than
 gating tests on root + losetup.
+
+## Releases
+
+Releases are driven by [GoReleaser](https://goreleaser.com/). A `v*` tag on
+any commit fires `.github/workflows/release.yml`, which:
+
+1. Extracts the `## [X.Y.Z] - DATE` section from `CHANGELOG.md` and uses it
+   as the GitHub release body.
+2. Builds `cmd/controller` and `cmd/node` for `linux/amd64` and
+   `linux/arm64`, with `pkg/driver.Version` set via `-ldflags` to the tag.
+3. Publishes per-arch images to `ghcr.io/middlendian/fileblock-csi`, then
+   combines them into a multi-arch manifest at
+   `ghcr.io/middlendian/fileblock-csi:vX.Y.Z`. For non-prerelease tags it
+   also pushes `:latest` (`docker_manifests[1].skip_push: auto`).
+4. Creates a GitHub release marked latest, with
+   `fileblock-csi_X.Y.Z_linux_{amd64,arm64}.tar.gz` archives attached for
+   inspection.
+
+### Cutting a release
+
+The `CHANGELOG.md` follows
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). Every
+user-visible change lands under `## [Unreleased]` as it's merged. To cut
+`vX.Y.Z`:
+
+1. In a release commit, rename `## [Unreleased]` to
+   `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it,
+   and update the `[Unreleased]` / `[X.Y.Z]` link references at the bottom.
+2. `git tag vX.Y.Z` on that commit, `git push && git push --tags`.
+3. Watch `release.yml` in Actions. When it goes green, the multi-arch
+   image is at `ghcr.io/middlendian/fileblock-csi:vX.Y.Z` (and `:latest`
+   for non-prereleases), and the GitHub release is published with the
+   CHANGELOG section as its body.
+
+If the workflow fails with `No CHANGELOG entry for vX.Y.Z`, you forgot
+step 1 — the workflow refuses to publish a release whose notes would be
+empty. Fix the CHANGELOG, retag (`git tag -d`, `git push :refs/tags/...`,
+re-tag), and push again.
+
+### Local dry run
+
+`goreleaser release --snapshot --clean --skip=publish` exercises the
+config end-to-end against a fake `vX.Y.Z-SNAPSHOT-<sha>` tag without
+pushing to ghcr or creating a GitHub release. Useful before merging
+changes to `.goreleaser.yaml` or `Dockerfile.goreleaser`.
 
 ## On-disk contract
 
