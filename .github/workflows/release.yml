@@ -107,6 +107,11 @@ jobs:
           cache: true
 
       - name: Extract release notes from CHANGELOG.md
+        env:
+          # Write outside the worktree — GoReleaser refuses to release with
+          # any untracked files in the tree, and adding to .gitignore would
+          # be an in-source workaround for a CI-only artifact.
+          NOTES: ${{ runner.temp }}/release-notes.md
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -117,21 +122,21 @@ jobs:
             }
             printing && /^\[.+\]:/ { exit }
             printing { print }
-          ' CHANGELOG.md > release-notes.md
+          ' CHANGELOG.md > "$NOTES"
 
-          if [ ! -s release-notes.md ]; then
+          if [ ! -s "$NOTES" ]; then
             echo "::error::No CHANGELOG entry for v$VERSION — expected '## [$VERSION]' heading"
             exit 1
           fi
 
           echo "::group::Release notes for $VERSION"
-          cat release-notes.md
+          cat "$NOTES"
           echo "::endgroup::"
 
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean --release-notes=release-notes.md
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
