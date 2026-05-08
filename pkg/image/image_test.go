@@ -31,17 +31,29 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if meta.CapacityBytes != cap1 || meta.FsType != DefaultFs {
+	if meta.CapacityBytes != cap1 || meta.VolumeID != "fb-test" {
 		t.Fatalf("unexpected metadata %+v", meta)
 	}
-	if _, err := os.Stat(mgr.ImagePath("fb-test")); err != nil {
+	imgPath := mgr.ImagePath("fb-test")
+	st1, err := os.Stat(imgPath)
+	if err != nil {
 		t.Fatalf("image missing: %v", err)
 	}
 
-	// Idempotent Create returns existing.
+	// Idempotent Create adopts the existing .img without rewriting it.
 	meta2, err := mgr.Create(ctx, "fb-test", cap1)
-	if err != nil || meta2.CreatedAt != meta.CreatedAt {
-		t.Fatalf("Create not idempotent: meta2=%+v err=%v", meta2, err)
+	if err != nil {
+		t.Fatalf("Create not idempotent: %v", err)
+	}
+	if meta2.CapacityBytes != cap1 {
+		t.Fatalf("Create returned wrong capacity: %+v", meta2)
+	}
+	st2, err := os.Stat(imgPath)
+	if err != nil {
+		t.Fatalf("image missing after re-Create: %v", err)
+	}
+	if !st2.ModTime().Equal(st1.ModTime()) {
+		t.Fatalf("re-Create rewrote the .img (mtime %v -> %v)", st1.ModTime(), st2.ModTime())
 	}
 
 	// Mismatched capacity is AlreadyExists.
@@ -65,7 +77,14 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("Resize grow: %v", err)
 	}
 	if resized.CapacityBytes != cap2 {
-		t.Fatalf("Resize did not update sidecar: %+v", resized)
+		t.Fatalf("Resize did not update size: %+v", resized)
+	}
+	stResized, err := os.Stat(imgPath)
+	if err != nil {
+		t.Fatalf("image missing after Resize: %v", err)
+	}
+	if stResized.Size() != cap2 {
+		t.Fatalf("on-disk size %d != %d", stResized.Size(), cap2)
 	}
 
 	// Resize refuses to shrink.
@@ -79,6 +98,85 @@ func TestRoundTrip(t *testing.T) {
 	// Idempotent delete.
 	if err := mgr.Delete(ctx, "fb-test"); err != nil {
 		t.Fatalf("Delete not idempotent: %v", err)
+	}
+}
+
+// TestCreateAdoptsExistingImage verifies the idempotency contract: if a
+// .img with the requested size already exists, Create returns it as-is and
+// does not re-run mkfs (which would erase the filesystem). The fake runner
+// will fail the test if mkfs.ext4 is invoked.
+func TestCreateAdoptsExistingImage(t *testing.T) {
+	root := t.TempDir()
+	const size = 4 * 1024 * 1024
+	imgPath := root + "/fb-pre.img"
+	f, err := os.OpenFile(imgPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatalf("pre-create: %v", err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	f.Close()
+
+	fake := exectest.New() // any Run call will fail with "unexpected call"
+	mgr, err := New(root, fake)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	meta, err := mgr.Create(context.Background(), "fb-pre", size)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if meta.CapacityBytes != size || meta.VolumeID != "fb-pre" {
+		t.Fatalf("unexpected metadata %+v", meta)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("Create should not shell out when adopting; got %v", fake.Calls)
+	}
+}
+
+// TestCreateMismatchOnDiskSize verifies that an existing .img whose size
+// disagrees with the requested capacity surfaces as CapacityMismatchError —
+// no silent re-mkfs (which would wipe the filesystem).
+func TestCreateMismatchOnDiskSize(t *testing.T) {
+	root := t.TempDir()
+	imgPath := root + "/fb-mm.img"
+	f, err := os.OpenFile(imgPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatalf("pre-create: %v", err)
+	}
+	if err := f.Truncate(4 * 1024 * 1024); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	f.Close()
+
+	fake := exectest.New()
+	mgr, err := New(root, fake)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = mgr.Create(context.Background(), "fb-mm", 8*1024*1024)
+	var mm *CapacityMismatchError
+	if !errors.As(err, &mm) {
+		t.Fatalf("want CapacityMismatchError, got %T: %v", err, err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("mismatch should not shell out; got %v", fake.Calls)
+	}
+}
+
+// TestGetMissingImage: Get on an absent volume returns a fs.ErrNotExist
+// so the controller can tell apart "not provisioned" from other errors.
+func TestGetMissingImage(t *testing.T) {
+	root := t.TempDir()
+	mgr, err := New(root, exectest.New())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = mgr.Get(context.Background(), "fb-missing")
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("want ErrNotExist, got %v", err)
 	}
 }
 

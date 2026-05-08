@@ -1,37 +1,31 @@
 // Package image owns the on-disk contract for a fileblock volume: a sparse
-// ext4 file at ${backingStore}/${volumeID}.img and a sidecar metadata file at
-// ${backingStore}/${volumeID}.json. Nothing else in the driver writes to the
-// backing store.
+// ext4 file at ${backingStore}/${volumeID}.img. The .img is the single source
+// of truth — its apparent size (st_size) is the volume capacity. Nothing else
+// in the driver writes to the backing store.
 package image
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 )
 
 const (
-	ImageExt    = ".img"
-	SidecarExt  = ".json"
-	DefaultFs   = "ext4"
-	sidecarPerm = 0o644
+	ImageExt  = ".img"
+	DefaultFs = "ext4"
 )
 
-// Metadata is persisted to ${volumeID}.json. Schema is intentionally tiny —
-// k8s remains the source of truth for everything except local sanity.
+// Metadata describes a volume to callers. It is derived on read from the
+// .img file's name and stat — there is no separate persisted metadata.
 type Metadata struct {
-	VolumeID      string    `json:"volumeId"`
-	CapacityBytes int64     `json:"capacityBytes"`
-	FsType        string    `json:"fsType"`
-	CreatedAt     time.Time `json:"createdAt"`
+	VolumeID      string
+	CapacityBytes int64
 }
 
 // Manager is the image-file CRUD interface. Tests substitute a fake.
@@ -42,7 +36,6 @@ type Manager interface {
 	List(ctx context.Context) ([]*Metadata, error)
 	Resize(ctx context.Context, volumeID string, capacityBytes int64) (*Metadata, error)
 	ImagePath(volumeID string) string
-	SidecarPath(volumeID string) string
 }
 
 type fsManager struct {
@@ -67,13 +60,10 @@ func (m *fsManager) ImagePath(volumeID string) string {
 	return filepath.Join(m.root, volumeID+ImageExt)
 }
 
-func (m *fsManager) SidecarPath(volumeID string) string {
-	return filepath.Join(m.root, volumeID+SidecarExt)
-}
-
-// Create is idempotent. If both files already exist with the requested
-// capacity, the existing metadata is returned. Mismatched capacity is an
-// error (CSI AlreadyExists semantics; the caller maps it).
+// Create is idempotent. If the .img already exists with the requested
+// capacity it is adopted as-is. Mismatched on-disk size is AlreadyExists
+// (the caller maps it). If the .img is corrupt or otherwise unusable the
+// problem surfaces at NodeStageVolume's fsck — that is the mount error.
 func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes int64) (*Metadata, error) {
 	if err := validateVolumeID(volumeID); err != nil {
 		return nil, err
@@ -82,22 +72,18 @@ func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes i
 		return nil, fmt.Errorf("capacityBytes must be > 0")
 	}
 	imgPath := m.ImagePath(volumeID)
-	sidePath := m.SidecarPath(volumeID)
 
-	if existing, err := readSidecar(sidePath); err == nil {
-		if existing.CapacityBytes != capacityBytes {
+	if st, err := os.Stat(imgPath); err == nil {
+		if st.Size() != capacityBytes {
 			return nil, &CapacityMismatchError{
 				Requested: capacityBytes,
-				Existing:  existing.CapacityBytes,
+				Existing:  st.Size(),
 			}
 		}
-		return existing, nil
+		return &Metadata{VolumeID: volumeID, CapacityBytes: st.Size()}, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
+		return nil, fmt.Errorf("stat %s: %w", imgPath, err)
 	}
-
-	// Cleanup partial state if image exists without a sidecar.
-	_ = os.Remove(imgPath)
 
 	if err := truncateSparse(imgPath, capacityBytes); err != nil {
 		return nil, err
@@ -109,30 +95,20 @@ func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes i
 		_ = os.Remove(imgPath)
 		return nil, fmt.Errorf("mkfs.ext4 %s: %w", imgPath, err)
 	}
-	meta := &Metadata{
-		VolumeID:      volumeID,
-		CapacityBytes: capacityBytes,
-		FsType:        DefaultFs,
-		CreatedAt:     time.Now().UTC(),
-	}
-	if err := writeSidecarAtomic(sidePath, meta); err != nil {
-		_ = os.Remove(imgPath)
-		return nil, err
-	}
-	return meta, nil
+	return &Metadata{VolumeID: volumeID, CapacityBytes: capacityBytes}, nil
 }
 
 func (m *fsManager) Delete(ctx context.Context, volumeID string) error {
 	if err := validateVolumeID(volumeID); err != nil {
 		return err
 	}
-	imgErr := os.Remove(m.ImagePath(volumeID))
-	sideErr := os.Remove(m.SidecarPath(volumeID))
-	for _, e := range []error{imgErr, sideErr} {
-		if e != nil && !errors.Is(e, fs.ErrNotExist) {
-			return e
-		}
+	if err := os.Remove(m.ImagePath(volumeID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
+	// Pre-sidecar-removal deployments may still have a same-named .json
+	// next to the .img. Best-effort sweep so a Create→Delete cycle leaves
+	// nothing behind. Failures are ignored.
+	_ = os.Remove(filepath.Join(m.root, volumeID+".json"))
 	return nil
 }
 
@@ -140,7 +116,11 @@ func (m *fsManager) Get(ctx context.Context, volumeID string) (*Metadata, error)
 	if err := validateVolumeID(volumeID); err != nil {
 		return nil, err
 	}
-	return readSidecar(m.SidecarPath(volumeID))
+	st, err := os.Stat(m.ImagePath(volumeID))
+	if err != nil {
+		return nil, err
+	}
+	return &Metadata{VolumeID: volumeID, CapacityBytes: st.Size()}, nil
 }
 
 func (m *fsManager) List(ctx context.Context) ([]*Metadata, error) {
@@ -150,19 +130,20 @@ func (m *fsManager) List(ctx context.Context) ([]*Metadata, error) {
 	}
 	var out []*Metadata
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), SidecarExt) {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ImageExt) {
 			continue
 		}
-		meta, err := readSidecar(filepath.Join(m.root, e.Name()))
+		volumeID := strings.TrimSuffix(e.Name(), ImageExt)
+		st, err := os.Stat(filepath.Join(m.root, e.Name()))
 		if err != nil {
-			continue // skip malformed sidecars rather than failing the list
+			continue // race with Delete; skip rather than fail the list
 		}
-		out = append(out, meta)
+		out = append(out, &Metadata{VolumeID: volumeID, CapacityBytes: st.Size()})
 	}
 	return out, nil
 }
 
-// Resize implements offline expand: truncate the file, update the sidecar.
+// Resize implements offline expand: truncate the .img upward.
 // resize2fs is run by the node plugin on next stage (it owns the loop device).
 // The CSI external-resizer is responsible for waiting until the volume is
 // unpublished before calling ControllerExpandVolume; we don't double-check.
@@ -181,11 +162,7 @@ func (m *fsManager) Resize(ctx context.Context, volumeID string, capacityBytes i
 	if err := truncateSparse(m.ImagePath(volumeID), capacityBytes); err != nil {
 		return nil, err
 	}
-	meta.CapacityBytes = capacityBytes
-	if err := writeSidecarAtomic(m.SidecarPath(volumeID), meta); err != nil {
-		return nil, err
-	}
-	return meta, nil
+	return &Metadata{VolumeID: volumeID, CapacityBytes: capacityBytes}, nil
 }
 
 func truncateSparse(path string, size int64) error {
@@ -196,34 +173,6 @@ func truncateSparse(path string, size int64) error {
 	defer f.Close()
 	if err := f.Truncate(size); err != nil {
 		return fmt.Errorf("truncate %s: %w", path, err)
-	}
-	return nil
-}
-
-func readSidecar(path string) (*Metadata, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var m Metadata
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("parse sidecar %s: %w", path, err)
-	}
-	return &m, nil
-}
-
-func writeSidecarAtomic(path string, m *Metadata) error {
-	tmp := path + ".tmp"
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tmp, b, sidecarPerm); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
 	}
 	return nil
 }
