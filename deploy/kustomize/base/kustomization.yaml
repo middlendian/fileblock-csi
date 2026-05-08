@@ -18,4 +18,4 @@ resources:
 # build, not main.
 images:
   - name: ghcr.io/middlendian/fileblock-csi
-    newTag: v0.1.1
+    newTag: v0.2.0
