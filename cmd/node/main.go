@@ -15,6 +15,7 @@ import (
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
+	"github.com/middlendian/fileblock-csi/pkg/store"
 )
 
 func main() {
@@ -56,8 +57,17 @@ func main() {
 		log.Warn("--backing-store not set; skipping startup reconciliation")
 	}
 
+	storesRoot := "/var/lib/fileblock/stores"
+	if err := os.MkdirAll(storesRoot, 0o755); err != nil {
+		log.Error("create stores root", "err", err)
+		os.Exit(2)
+	}
+	registry := store.NewRegistry(storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
+	_ = topologyKey
+	_ = topologyValue
+
 	identity := driver.NewIdentityServer(false)
-	node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, *topologyKey, *topologyValue)
+	node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, registry)
 	srv := driver.NewServer(*endpoint, log, identity, nil, node)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
