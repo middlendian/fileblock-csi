@@ -55,6 +55,8 @@ prepare_backing_nfs() {
   require findmnt
   rm -rf "$WORK"
   mkdir -p "$NFS_EXPORT" "$BACKING_HOST"
+  # Create per-store subdirectories for TestTwoStores
+  mkdir -p "$WORK/a" "$WORK/b"
 
   if ! command -v exportfs >/dev/null; then
     log "installing nfs-kernel-server (one-shot)"
