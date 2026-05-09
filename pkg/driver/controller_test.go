@@ -135,14 +135,6 @@ func nfsParams() map[string]string {
 	}
 }
 
-// localParams returns minimal valid local StorageClass parameters.
-func localParams() map[string]string {
-	return map[string]string{
-		store.ParamType:      "local",
-		store.ParamLocalPath: "/srv/data",
-	}
-}
-
 func TestControllerGetCapabilities(t *testing.T) {
 	c, _ := newTestServer(t)
 	resp, err := c.ControllerGetCapabilities(context.Background(), nil)
