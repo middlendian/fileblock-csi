@@ -17,7 +17,8 @@
 #   make smoke           # local end-to-end (requires root, loop devices)
 #   make sanity          # csi-sanity (requires root, loop devices, csi-sanity)
 #   make e2e             # kind + go test ./test/e2e (local backing store)
-#   make e2e-nfs         # kind + go test ./test/e2e (NFSv3 backing store)
+#   make e2e-nfs         # kind + go test ./test/e2e (NFS backing store, NFSv4.1)
+#   make e2e-nfs3        # same as e2e-nfs with NFS_VERSION=3
 #   make docker          # build the container image
 #   make clean           # remove ./bin and ./dist
 
@@ -126,6 +127,10 @@ e2e:
 .PHONY: e2e-nfs
 e2e-nfs:
 	BACKING_KIND=nfs hack/e2e.sh
+
+.PHONY: e2e-nfs3
+e2e-nfs3:
+	NFS_VERSION=3 $(MAKE) e2e-nfs
 
 .PHONY: docker
 docker:

@@ -27,6 +27,8 @@ WORK="${WORK:-/tmp/fileblock-e2e}"
 IMAGE="${IMAGE:-fileblock-csi:e2e}"
 KEEP="${KEEP:-0}"
 BACKING_KIND="${BACKING_KIND:-local}"
+NFS_VERSION="${NFS_VERSION:-4.1}"
+export NFS_VERSION
 SUDO="${SUDO:-sudo}"
 
 BACKING_HOST="$WORK/backing"
@@ -111,8 +113,8 @@ prepare_backing_nfs() {
     exit 1
   fi
 
-  log "mounting export at $BACKING_HOST as NFSv3"
-  $SUDO mount -t nfs -o vers=3,lock,hard \
+  log "mounting export at $BACKING_HOST as NFSv${NFS_VERSION}"
+  $SUDO mount -t nfs -o "vers=${NFS_VERSION},lock,hard" \
     127.0.0.1:"$NFS_EXPORT" "$BACKING_HOST"
   $SUDO chmod 0777 "$BACKING_HOST"
 
@@ -120,7 +122,7 @@ prepare_backing_nfs() {
     echo "expected $BACKING_HOST to be mounted as nfs, got: $(findmnt -no FSTYPE "$BACKING_HOST")" >&2
     exit 1
   fi
-  log "backing store is $(findmnt -no FSTYPE "$BACKING_HOST") (vers=3)"
+  log "backing store is $(findmnt -no FSTYPE "$BACKING_HOST") (vers=${NFS_VERSION})"
 }
 
 cleanup() {
@@ -165,6 +167,14 @@ kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 log "applying e2e overlay"
 kubectl apply -k "$ROOT/deploy/kustomize/overlays/e2e"
+# For NFS backing-store mode, replace the local SC with a driver-NFS SC so the
+# driver mounts the export itself (in addition to the host NFSv3 mount used by
+# the backing-store path). This validates the driver's NFS mounter code path.
+if [[ "$BACKING_KIND" == "nfs" ]]; then
+  log "applying NFS StorageClass (nfsvers=${NFS_VERSION})"
+  envsubst < "$ROOT/deploy/kustomize/overlays/e2e/storageclass-nfs.yaml.tpl" \
+    | kubectl apply -f -
+fi
 
 # Inline diagnostics on rollout failure: when something doesn't come up,
 # print the full pod and event state immediately so the CI log alone is
