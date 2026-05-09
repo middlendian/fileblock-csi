@@ -103,6 +103,18 @@ metadata. Nothing else lives on the backing store.
    volumeBindingMode: WaitForFirstConsumer
    ```
 
+   **Local SCs require a hostPath overlay patch.** The base manifests do not
+   mount any host paths beyond `/var/lib/kubelet` and `/dev`. When you use a
+   `local`-type StorageClass, `LocalMounter` will bind-mount
+   `backingStore.local.path` from the host — but that path must first be
+   visible inside the controller and node pods' mount namespaces. Add a
+   hostPath patch for both the Deployment and the DaemonSet that mounts the
+   same path through. See
+   `deploy/kustomize/overlays/example-localdir/host-source-patch-controller.yaml`
+   and `host-source-patch-node.yaml` for the canonical reference; the
+   `example-localdir` kustomization wires them in. NFS-type SCs do **not**
+   need such a patch — they mount the export themselves at runtime.
+
    Both NFSv3 and NFSv4 are supported. Use `nfsvers=3` in `mountOptions`
    for v3 servers; `nfsvers=4.1` (or omit) for v4.
 
