@@ -42,6 +42,7 @@ SUDO="${SUDO:-sudo}"
 
 BACKING_HOST="$WORK/backing"
 NFS_EXPORT="$WORK/export"
+export NFS_EXPORT
 
 log() { printf '::: %s\n' "$*"; }
 
