@@ -2,15 +2,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fileblock-controller
-  namespace: fileblock-system
 spec:
   template:
     spec:
       containers:
         - name: fileblock-controller
+          image: ghcr.io/middlendian/fileblock-csi:e2e
           imagePullPolicy: IfNotPresent
-          args:
-            - --endpoint=unix:///csi/csi.sock
-            - --backing-store=/var/lib/fileblock
-            - --topology-key=fileblock.csi/backing-store
-            - --log-level=debug
