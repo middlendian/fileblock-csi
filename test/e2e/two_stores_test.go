@@ -77,6 +77,7 @@ provisioner: fileblock.csi
 parameters:
   backingStore.type: local
   backingStore.local.path: %s
+  backingStore.local.shared: "true"
 reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer

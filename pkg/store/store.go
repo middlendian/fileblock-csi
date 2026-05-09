@@ -31,7 +31,10 @@ type Config struct {
 	NFSMountOptions string
 
 	// Local-only.
-	LocalPath string
+	LocalPath   string
+	LocalShared bool // true if local.path is shared across nodes (e.g. via OS-level
+	// shared FS or kind extraMount); the controller then advertises
+	// this PV as schedulable on any node, like NFS-type.
 }
 
 // Canonical returns a stable byte representation of the config used as

@@ -114,10 +114,19 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 }
 
 // topologyForCfg returns AccessibleTopology that the external-provisioner
-// will honor: empty for nfs (any node), pinned to the provisioner's
-// preferred segment for local (matches today's per-node behavior).
+// will honor:
+//   - nfs: empty (any node may stage).
+//   - local with backingStore.local.shared=true: empty (operator declares
+//     the path is shared across nodes via OS-level shared FS or kind
+//     extraMount; kubelet's SINGLE_NODE_WRITER serialization handles
+//     cross-node mutual exclusion exactly like the NFS case).
+//   - local (default, unshared): pinned to the provisioner's preferred
+//     segment (per-node behavior — the path only exists on one node).
 func topologyForCfg(cfg store.Config, req *csi.TopologyRequirement) []*csi.Topology {
 	if cfg.Type == store.TypeNFS {
+		return nil
+	}
+	if cfg.Type == store.TypeLocal && cfg.LocalShared {
 		return nil
 	}
 	if req == nil {

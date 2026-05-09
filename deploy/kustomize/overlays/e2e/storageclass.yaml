@@ -6,6 +6,12 @@ provisioner: fileblock.csi
 parameters:
   backingStore.type: local
   backingStore.local.path: /srv/fileblock-source
+  # The kind config bind-mounts the same host directory at
+  # /srv/fileblock-source on every kind node, so this "local" path is
+  # actually shared across nodes. Declare that to the controller so PVs
+  # are advertised as schedulable on any node — needed for the
+  # cross-node takeover test.
+  backingStore.local.shared: "true"
 reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer

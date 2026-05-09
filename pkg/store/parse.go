@@ -8,6 +8,7 @@ const (
 	ParamNFSPath         = "backingStore.nfs.path"
 	ParamNFSMountOptions = "backingStore.nfs.mountOptions"
 	ParamLocalPath       = "backingStore.local.path"
+	ParamLocalShared     = "backingStore.local.shared"
 
 	VolumeContextStoreID = "storeID"
 )
@@ -33,7 +34,11 @@ func ConfigFromParams(params map[string]string) (Config, error) {
 		}
 		return c, nil
 	case TypeLocal:
-		c := Config{Type: TypeLocal, LocalPath: params[ParamLocalPath]}
+		c := Config{
+			Type:        TypeLocal,
+			LocalPath:   params[ParamLocalPath],
+			LocalShared: params[ParamLocalShared] == "true",
+		}
 		if c.LocalPath == "" {
 			return Config{}, fmt.Errorf("%s is required when %s=local", ParamLocalPath, ParamType)
 		}
@@ -62,6 +67,9 @@ func (c Config) ToVolumeContext() map[string]string {
 		}
 	case TypeLocal:
 		vc[ParamLocalPath] = c.LocalPath
+		if c.LocalShared {
+			vc[ParamLocalShared] = "true"
+		}
 	}
 	return vc
 }
