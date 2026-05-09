@@ -115,8 +115,23 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
    `example-localdir` kustomization wires them in. NFS-type SCs do **not**
    need such a patch — they mount the export themselves at runtime.
 
-   Both NFSv3 and NFSv4 are supported. Use `nfsvers=3` in `mountOptions`
-   for v3 servers; `nfsvers=4.1` (or omit) for v4.
+   Both NFSv3 and NFSv4 are supported, but **prefer NFSv4 where the
+   server speaks it**. NFSv4 has no NLM/statd/portmapper to negotiate
+   and no privileged-port binds — `mount.nfs` succeeds immediately with
+   just `nfsvers=4.1` in `mountOptions`.
+
+   For NFSv3 servers, you **must** add `nolock` to `mountOptions`:
+
+   ```yaml
+   backingStore.nfs.mountOptions: "nfsvers=3,hard,timeo=600,nolock"
+   ```
+
+   fileblock's cross-node mutual exclusion is CSI's `SINGLE_NODE_WRITER`
+   serialization, not NFS-level file locks (the `.img` is opened by
+   exactly one node's loop device at a time). The client-side lock
+   manager (`rpc.statd`) is therefore not needed and isn't running in
+   the driver pod — without `nolock`, `mount.nfs` refuses with
+   "rpc.statd is not running but is required for remote locking".
 
    Pre-built example overlays live at:
    - `deploy/kustomize/overlays/example-localdir/`

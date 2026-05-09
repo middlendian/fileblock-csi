@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mount.nfs`, and CreateVolume returned `exit -1: signal: killed`.
   Matches csi-driver-nfs.
 
+### Documentation
+
+- README now spells out the NFSv3 `nolock` requirement: fileblock
+  doesn't depend on NFS-level file locks (CSI's `SINGLE_NODE_WRITER`
+  + the loop device's exclusive open are what enforce cross-node
+  mutual exclusion), so the client-side `rpc.statd` daemon — which
+  the driver pod doesn't run — isn't needed. Without `nolock`,
+  `mount.nfs` refuses with "rpc.statd is not running but is required
+  for remote locking". README also recommends NFSv4 where the
+  server speaks it: no NLM/statd/portmapper to negotiate.
+- `deploy/kustomize/overlays/example-nfs-shared/storageclass.yaml`
+  documents the v3-vs-v4 mountOptions choice inline.
+
 ### Internal
 
 - `deploy/manifests_test.go` adds `TestSidecarTimeouts` asserting
