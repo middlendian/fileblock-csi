@@ -22,9 +22,7 @@ func main() {
 	endpoint := flag.String("endpoint", "unix:///csi/csi.sock", "CSI endpoint (unix:// or tcp://)")
 	nodeID := flag.String("node-id", os.Getenv("NODE_NAME"), "node identifier; defaults to $NODE_NAME")
 	stateDir := flag.String("state-dir", "/var/lib/kubelet/plugins/fileblock.csi", "directory for the loop-mappings state file")
-	backingStore := flag.String("backing-store", "", "directory where .img files live; used only for reconciliation")
-	topologyKey := flag.String("topology-key", "", "topology segment key advertised in NodeGetInfo (default fileblock.csi/node)")
-	topologyValue := flag.String("topology-value", "", "topology segment value (default --node-id); set the same on every node sharing a backing store")
+	storesRoot := flag.String("stores-root", "/var/lib/fileblock/stores", "directory under which each backing store is mounted at <id>/")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
@@ -38,6 +36,10 @@ func main() {
 		log.Error("create state dir", "err", err)
 		os.Exit(2)
 	}
+	if err := os.MkdirAll(*storesRoot, 0o755); err != nil {
+		log.Error("create stores root", "err", err)
+		os.Exit(2)
+	}
 
 	exec := fbexec.New(0)
 	mnt := mount.New(exec)
@@ -48,23 +50,14 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *backingStore != "" {
-		rec := loop.NewReconciler(state, losetup, *backingStore)
-		if err := rec.Reconcile(context.Background()); err != nil {
-			log.Warn("reconcile failed at startup", "err", err)
-		}
-	} else {
-		log.Warn("--backing-store not set; skipping startup reconciliation")
+	// Reconcile any orphan loop devices anywhere under storesRoot. The
+	// reconciler's prefix check handles all per-store subdirs uniformly.
+	rec := loop.NewReconciler(state, losetup, *storesRoot)
+	if err := rec.Reconcile(context.Background()); err != nil {
+		log.Warn("reconcile failed at startup", "err", err)
 	}
 
-	storesRoot := "/var/lib/fileblock/stores"
-	if err := os.MkdirAll(storesRoot, 0o755); err != nil {
-		log.Error("create stores root", "err", err)
-		os.Exit(2)
-	}
-	registry := store.NewRegistry(storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
-	_ = topologyKey
-	_ = topologyValue
+	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
 
 	identity := driver.NewIdentityServer(false)
 	node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, registry)
