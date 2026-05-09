@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-09
+
+### Breaking
+
+- StorageClass schema changed. The `backingStorePath` parameter is removed.
+  New required parameters: `backingStore.type` (`nfs` | `local`),
+  `backingStore.nfs.server`, `backingStore.nfs.path`,
+  `backingStore.nfs.mountOptions` (optional), `backingStore.local.path`.
+  See README and `deploy/kustomize/overlays/example-{nfs-shared,localdir}`
+  for examples.
+- Binary flags removed: `--backing-store`, `--topology-key`,
+  `--topology-value`. Both binaries now accept `--stores-root`
+  (default `/var/lib/fileblock/stores`).
+- Controller pod requires `SYS_ADMIN` capability (added by base
+  manifests). `privileged: true` is a tested fallback if `SYS_ADMIN`
+  alone is rejected by the host's LSM.
+- Container image now includes `nfs-common` for in-driver NFS
+  mounting (NFSv3 and NFSv4 both supported via the generic
+  `mount.nfs` helper).
+- `external-provisioner` sidecar no longer runs with
+  `--strict-topology`. NFS-backed PVs are universally schedulable;
+  local-backed PVs pin to the provisioner's preferred node.
+- `ListVolumes` no longer returns per-volume `VolumeContext`
+  (operationally low-impact; consumers that depended on it must
+  read PV state via the Kubernetes API).
+- v0.2.0 PVs cannot be staged by v0.3.0 (volume context shape
+  changed). Migration runbook in the design spec
+  (`docs/superpowers/specs/2026-05-09-storageclass-driven-config-design.md`).
+
+### Added
+
+- `pkg/store` package: `Config`, `ID`, `Mounter` interface with
+  NFS and local impls, `Registry` for per-process mount caching.
+- Two SCs against distinct backing stores work in a single driver
+  install — no manifest forking required.
+- e2e matrix covers NFSv3 and NFSv4.1 against the driver-mounted
+  store; new `TestTwoStores` exercises multi-store scheduling.
+
+### Internal
+
+- `pkg/loop`'s reconciler now takes `/var/lib/fileblock/stores` as
+  its `backingStorePath` (parent of all per-store dirs); orphan-loop
+  cleanup spans every store. No code change inside `pkg/loop`.
+
 ## [0.2.0] - 2026-05-08
 
 ### Changed
@@ -84,7 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `make check` — single command that runs fmt, vet, lint, tidy-check, race
   test + coverage, build, smoke, and csi-sanity. CI runs the same target.
 
-[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/middlendian/fileblock-csi/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/middlendian/fileblock-csi/releases/tag/v0.2.0
 [0.1.1]: https://github.com/middlendian/fileblock-csi/releases/tag/v0.1.1
 [0.1.0]: https://github.com/middlendian/fileblock-csi/releases/tag/v0.1.0
