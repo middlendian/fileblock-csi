@@ -623,6 +623,8 @@ git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "stor
 - Create: `pkg/store/mounter_local.go`
 - Create: `pkg/store/mounter_local_test.go`
 
+`LocalMounter` delegates to `pkg/mount.Mounter.BindMount`, which is the same path `NodePublishVolume` already uses. That keeps the bind-mount mechanics in one place; this mounter is a thin adapter.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `pkg/store/mounter_local_test.go`:
@@ -636,17 +638,19 @@ import (
 	"testing"
 
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
+	"github.com/middlendian/fileblock-csi/pkg/mount"
 )
 
 func TestLocalMounterBindMounts(t *testing.T) {
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	m := NewLocalMounter(fake)
+	m := NewLocalMounter(mount.New(fake))
 	cfg := Config{Type: TypeLocal, LocalPath: "/srv/data"}
 	if err := m.Mount(context.Background(), "/var/lib/fileblock/stores/abc", cfg); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	// Expect a single mount --bind /srv/data /var/lib/fileblock/stores/abc.
+	// pkg/mount.BindMount calls `mount --bind <src> <target>` with no
+	// readOnly remount when readOnly=false. Expect exactly one call.
 	if len(fake.Calls) != 1 {
 		t.Fatalf("expected 1 call, got %d: %+v", len(fake.Calls), fake.Calls)
 	}
@@ -660,7 +664,7 @@ func TestLocalMounterBindMounts(t *testing.T) {
 }
 
 func TestLocalMounterRejectsNonLocalConfig(t *testing.T) {
-	m := NewLocalMounter(exectest.New())
+	m := NewLocalMounter(mount.New(exectest.New()))
 	cfg := Config{Type: TypeNFS}
 	err := m.Mount(context.Background(), "/x", cfg)
 	if err == nil {
@@ -669,7 +673,7 @@ func TestLocalMounterRejectsNonLocalConfig(t *testing.T) {
 }
 
 func TestLocalMounterRejectsEmptyLocalPath(t *testing.T) {
-	m := NewLocalMounter(exectest.New())
+	m := NewLocalMounter(mount.New(exectest.New()))
 	cfg := Config{Type: TypeLocal}
 	err := m.Mount(context.Background(), "/x", cfg)
 	if err == nil {
@@ -680,7 +684,7 @@ func TestLocalMounterRejectsEmptyLocalPath(t *testing.T) {
 func TestLocalMounterSurfacesExecError(t *testing.T) {
 	fake := exectest.New()
 	fake.SetDefault("permission denied", errors.New("exit 32"))
-	m := NewLocalMounter(fake)
+	m := NewLocalMounter(mount.New(fake))
 	cfg := Config{Type: TypeLocal, LocalPath: "/srv/data"}
 	err := m.Mount(context.Background(), "/x", cfg)
 	if err == nil {
@@ -717,18 +721,22 @@ import (
 	"context"
 	"fmt"
 
-	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
+	"github.com/middlendian/fileblock-csi/pkg/mount"
 )
 
-// LocalMounter bind-mounts a host directory into the per-store target.
-// It exists so that example-localdir overlays and kind-based tests work
-// the same way as production NFS — through Registry.Get.
+// LocalMounter bind-mounts a host directory into the per-store target
+// via pkg/mount.Mounter.BindMount — the same code path NodePublishVolume
+// uses. The host directory must be visible inside the driver pod's
+// mount namespace; with the default emptyDir cache mount, operators
+// adding type=local SCs need to add a hostPath patch on the controller
+// Deployment and node DaemonSet to surface that source dir into the
+// pod (see README "Local backing-store: required overlay").
 type LocalMounter struct {
-	exec fbexec.Runner
+	mnt *mount.Mounter
 }
 
-func NewLocalMounter(r fbexec.Runner) *LocalMounter {
-	return &LocalMounter{exec: r}
+func NewLocalMounter(m *mount.Mounter) *LocalMounter {
+	return &LocalMounter{mnt: m}
 }
 
 func (m *LocalMounter) Mount(ctx context.Context, target string, cfg Config) error {
@@ -738,10 +746,7 @@ func (m *LocalMounter) Mount(ctx context.Context, target string, cfg Config) err
 	if cfg.LocalPath == "" {
 		return fmt.Errorf("LocalMounter: cfg.LocalPath is empty")
 	}
-	if _, err := m.exec.Run(ctx, "mount", "--bind", cfg.LocalPath, target); err != nil {
-		return fmt.Errorf("bind mount %s -> %s: %w", cfg.LocalPath, target, err)
-	}
-	return nil
+	return m.mnt.BindMount(ctx, cfg.LocalPath, target, false)
 }
 ```
 
@@ -943,8 +948,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
@@ -954,7 +961,7 @@ func TestRegistryGetMountsOnce(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(fake))
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	p1, err := reg.Get(context.Background(), cfg)
@@ -986,7 +993,7 @@ func TestRegistryDistinctConfigsMountSeparately(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(fake))
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
 	a := Config{Type: TypeNFS, NFSServer: "s1", NFSPath: "/p"}
 	b := Config{Type: TypeNFS, NFSServer: "s2", NFSPath: "/p"}
 	pa, _ := reg.Get(context.Background(), a)
@@ -1000,7 +1007,7 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(fake))
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	var wg sync.WaitGroup
@@ -1028,35 +1035,50 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 func TestRegistryRejectsUnknownType(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(fake))
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
 	_, err := reg.Get(context.Background(), Config{Type: "smb"})
 	if err == nil {
 		t.Fatal("expected error for unknown type")
 	}
 }
 
-func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
+func TestRegistryConfigByStoreID(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	// First call fails, second succeeds.
-	calls := 0
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	if _, ok := reg.ConfigByStoreID(cfg.ID()); ok {
+		t.Fatal("ConfigByStoreID returned true before any Get")
+	}
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reg.ConfigByStoreID(cfg.ID())
+	if !ok {
+		t.Fatal("ConfigByStoreID returned false after Get")
+	}
+	if got != cfg {
+		t.Errorf("config mismatch: got %+v, want %+v", got, cfg)
+	}
+}
+
+func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	// FakeRunner.Func runs in place of the rules table when set. It must
+	// not touch fake.Calls — FakeRunner.Run already records the call
+	// under its own mutex before invoking Func.
+	var calls atomic.Int32
 	fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
-		calls++
-		if calls == 1 {
-			return "boom", &exectest.FakeRunner{}.Default.Err // any non-nil error
+		n := calls.Add(1)
+		if n == 1 {
+			return "boom", errors.New("mount failed")
 		}
 		return "", nil
 	}
-	// Re-set Func with proper non-nil error on first call.
-	fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
-		fake.Calls = append(fake.Calls, exectest.Call{Name: name, Args: append([]string(nil), args...)})
-		if name == "mount.nfs" && len(fake.Calls) == 1 {
-			return "boom", &mountErr{}
-		}
-		return "", nil
-	}
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(fake))
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	if _, err := reg.Get(context.Background(), cfg); err == nil {
@@ -1065,11 +1087,10 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 	if _, err := reg.Get(context.Background(), cfg); err != nil {
 		t.Fatalf("expected second Get to succeed, got %v", err)
 	}
+	if calls.Load() != 2 {
+		t.Errorf("mount called %d times, want 2 (first failed, second retried)", calls.Load())
+	}
 }
-
-type mountErr struct{}
-
-func (mountErr) Error() string { return "mount failed" }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1095,7 +1116,7 @@ import (
 // Registry mounts each unique store config once per process and hands
 // out the resulting paths. Concurrency: per-storeID Mutex prevents two
 // callers from racing into Mount; the global mu only guards the mounted
-// map and the per-store mutex map.
+// map and the per-store mutex/config maps.
 type Registry struct {
 	root      string
 	nfsM      Mounter
@@ -1103,6 +1124,7 @@ type Registry struct {
 
 	mu       sync.Mutex
 	mounted  map[string]string         // storeID -> mounted path
+	configs  map[string]Config         // storeID -> Config that produced this storeID
 	storeMu  map[string]*sync.Mutex    // storeID -> per-store lock
 }
 
@@ -1114,13 +1136,16 @@ func NewRegistry(root string, nfs Mounter, local Mounter) *Registry {
 		nfsM:    nfs,
 		localM:  local,
 		mounted: map[string]string{},
+		configs: map[string]Config{},
 		storeMu: map[string]*sync.Mutex{},
 	}
 }
 
 // Get ensures cfg's source is mounted under <root>/<storeID>/ and
 // returns that path. Idempotent: subsequent calls with the same cfg fast
-// path on the cached mount.
+// path on the cached mount. Also caches cfg keyed by storeID so callers
+// that hold only a storeID (controller's DeleteVolume / Expand path) can
+// resolve back to a Config via ConfigByStoreID.
 func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
 	id := cfg.ID()
 	storeMu := r.lockStore(id)
@@ -1148,8 +1173,21 @@ func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
 
 	r.mu.Lock()
 	r.mounted[id] = target
+	r.configs[id] = cfg
 	r.mu.Unlock()
 	return target, nil
+}
+
+// ConfigByStoreID returns the Config that produced the given storeID,
+// if this Registry has seen it (i.e. Get(cfg) where cfg.ID() == id has
+// previously succeeded in this process). Used by the controller to
+// resolve DeleteVolume and ControllerExpandVolume — both of which carry
+// only a volumeID, with the storeID encoded in the volumeID prefix.
+func (r *Registry) ConfigByStoreID(id string) (Config, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cfg, ok := r.configs[id]
+	return cfg, ok
 }
 
 func (r *Registry) lockStore(id string) *sync.Mutex {
@@ -1222,7 +1260,7 @@ func newTestRegistry(t *testing.T) *store.Registry {
 	t.Helper()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	return store.NewRegistry(t.TempDir(), store.NewNFSMounter(fake), store.NewLocalMounter(fake))
+	return store.NewRegistry(t.TempDir(), store.NewNFSMounter(fake), store.NewLocalMounter(mount.New(fake)))
 }
 ```
 
@@ -1327,7 +1365,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 	}
 
-	volumeID, err := volumeIDFromName(req.GetName())
+	volumeID, err := volumeIDFromName(cfg, req.GetName())
 	if err != nil {
 		return nil, err
 	}
@@ -1373,73 +1411,79 @@ func topologyForCfg(cfg store.Config, req *csi.TopologyRequirement) []*csi.Topol
 }
 ```
 
-Update `DeleteVolume`, `ValidateVolumeCapabilities`, `ListVolumes`, `ControllerExpandVolume` — they previously used `c.images`, which is gone. They now need a path to operate on. Two pragmatic shapes:
+Update `DeleteVolume`, `ValidateVolumeCapabilities`, `ControllerExpandVolume`, `ListVolumes` — they previously used `c.images`, which is gone. The CSI spec doesn't give them `parameters`, only `volume_id`. To resolve the right store, **encode `storeID` in the volumeID** so the volumeID is self-locating.
 
-- **`DeleteVolume`, `ControllerExpandVolume`, `ValidateVolumeCapabilities`:** the volume context isn't available on these RPCs (CSI spec). The CSI spec gives `secrets` but not parameters. The only durable way to know which store a volume belongs to is the `secrets`/`parameters` map on the request, which is only present for `ControllerExpandVolume.Secrets` (not the params we need). For a hard-cutover v0.3.0, simplify: walk all known mounted stores and find the volume by ID. Implement an `imageManagerForVolume` helper that scans `Registry.MountedPaths()` and returns the first manager whose `Get(volumeID)` succeeds.
+**volumeID layout:** `fb-<storeID>-<name>` where `<storeID>` is the 12-char hex hash. The controller parses the storeID back out, looks up the Config in `Registry.ConfigByStoreID`, calls `Registry.Get(cfg)` to ensure the store is mounted, and constructs `image.Manager` against that path. Two SCs against distinct backing stores cannot collide on volumeID; SCs against the same backing store (same storeID) coexist correctly because `image.Create` is idempotent on `(volumeID, capacity)`.
 
-- **`ListVolumes`:** iterate over all currently-mounted stores and concatenate.
+**Limitation, documented in CHANGELOG:** if the controller pod restarts between `CreateVolume` and a later `DeleteVolume` / `ControllerExpandVolume` for the same volume, `Registry.ConfigByStoreID` returns `false` until something re-registers the Config (e.g. a `CreateVolume` against the same SC). external-provisioner retries `DeleteVolume` indefinitely, so the operation eventually succeeds; document the symptom (PVC stuck in `Released` until the next reconcile) and the recovery (restart provisioner sidecar, or create a no-op PVC against the same SC).
 
-These require a minor `Registry` addition: a `MountedPaths() []string` accessor.
-
-Add to `pkg/store/registry.go`:
+Update `volumeIDFromName` to take a Config:
 
 ```go
-// MountedPaths returns the absolute paths of every store currently
-// mounted by this Registry. Order is unspecified.
-func (r *Registry) MountedPaths() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]string, 0, len(r.mounted))
-	for _, p := range r.mounted {
-		out = append(out, p)
+// volumeIDFromName produces the on-disk volume ID for a given CSI request
+// name. The mapping is deterministic on (cfg, name): the same name +
+// same backing store always yields the same ID, so a retried CreateVolume
+// call lands on the existing image instead of minting a fresh one. The
+// "fb-<storeID>-" prefix lets DeleteVolume / Expand resolve the
+// volumeID's home store without parameters in the request.
+func volumeIDFromName(cfg store.Config, name string) (string, error) {
+	if strings.ContainsAny(name, "/\\\x00-") {
+		return "", status.Errorf(codes.InvalidArgument, "name %q contains invalid characters", name)
 	}
-	return out
+	return "fb-" + cfg.ID() + "-" + name, nil
+}
+
+// parseStoreIDFromVolumeID extracts the 12-char storeID from a volumeID
+// produced by volumeIDFromName.
+func parseStoreIDFromVolumeID(volumeID string) (string, error) {
+	const prefix = "fb-"
+	if !strings.HasPrefix(volumeID, prefix) {
+		return "", status.Errorf(codes.InvalidArgument, "volumeID %q is not in fb-<storeID>-<name> form", volumeID)
+	}
+	rest := volumeID[len(prefix):]
+	if len(rest) < 13 || rest[12] != '-' {
+		return "", status.Errorf(codes.InvalidArgument, "volumeID %q has malformed storeID segment", volumeID)
+	}
+	return rest[:12], nil
 }
 ```
 
-Add a unit test in `registry_test.go`:
+Note the addition of `'-'` to the disallowed-name characters: the volumeID format uses `-` as the storeID separator, so allowing `-` in `name` would create ambiguity. v0.2.0 allowed `-` in names; the tightening is acknowledged in the CHANGELOG breaking section.
+
+Update `CreateVolume` to pass `cfg` to `volumeIDFromName(cfg, req.GetName())`.
+
+Add a `imageManagerForVolumeID` helper:
 
 ```go
-func TestRegistryMountedPathsReflectsGets(t *testing.T) {
-	root := t.TempDir()
-	fake := exectest.New()
-	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(fake))
-	if len(reg.MountedPaths()) != 0 {
-		t.Errorf("initial = %v", reg.MountedPaths())
+// imageManagerForVolumeID resolves a volumeID's home store and returns
+// an image.Manager over its mounted path. Returns NotFound if the
+// store has not been seen by this controller process (typical after a
+// controller-pod restart before CreateVolume re-populates the Registry
+// for that storeID — see CHANGELOG migration note).
+func (c *ControllerServer) imageManagerForVolumeID(ctx context.Context, volumeID string) (image.Manager, error) {
+	storeID, err := parseStoreIDFromVolumeID(volumeID)
+	if err != nil {
+		return nil, err
 	}
-	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
-	if _, err := reg.Get(context.Background(), cfg); err != nil {
-		t.Fatal(err)
+	cfg, ok := c.registry.ConfigByStoreID(storeID)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "store %s for volume %s is not mounted on this controller; retry after the SC is in use", storeID, volumeID)
 	}
-	got := reg.MountedPaths()
-	if len(got) != 1 {
-		t.Errorf("after one Get, paths = %v", got)
+	path, err := c.registry.Get(ctx, cfg)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "remount backing store %s: %v", storeID, err)
 	}
+	return c.newImages(path, c.exec)
 }
 ```
 
-In `controller.go`, add the helper:
+Use it in:
 
-```go
-// imageManagerForVolume scans every currently-mounted store for a volume
-// matching volumeID. The first match wins. Returns NotFound if no store
-// has the volume.
-func (c *ControllerServer) imageManagerForVolume(ctx context.Context, volumeID string) (image.Manager, error) {
-	for _, path := range c.registry.MountedPaths() {
-		m, err := c.newImages(path, c.exec)
-		if err != nil {
-			continue
-		}
-		if _, err := m.Get(ctx, volumeID); err == nil {
-			return m, nil
-		}
-	}
-	return nil, status.Errorf(codes.NotFound, "volume %s not found in any mounted store", volumeID)
-}
-```
+- **`DeleteVolume`:** `m, err := c.imageManagerForVolumeID(ctx, req.GetVolumeId()); ... m.Delete(ctx, volumeID)`.
+- **`ValidateVolumeCapabilities`:** `m, err := c.imageManagerForVolumeID(...); ... m.Get(ctx, volumeID)` (the existing logic, now per-store).
+- **`ControllerExpandVolume`:** same — `m, err := c.imageManagerForVolumeID(...); m.Resize(ctx, volumeID, r.RequiredBytes)`.
 
-Use it in `DeleteVolume`, `ValidateVolumeCapabilities`, `ControllerExpandVolume`. For `ListVolumes`, iterate paths:
+For `ListVolumes`, iterate `MountedPaths()`:
 
 ```go
 func (c *ControllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
@@ -1469,7 +1513,25 @@ func (c *ControllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumes
 }
 ```
 
-(Note: `VolumeContext` is omitted on `ListVolumes` entries because the controller no longer holds a per-volume cfg; it would have to read it back from disk, which is out of scope. This is a v0.3.0 behavior tweak — document in CHANGELOG.)
+`MountedPaths()` is added on the Registry alongside `ConfigByStoreID`:
+
+```go
+// MountedPaths returns the absolute paths of every store currently
+// mounted by this Registry. Order is unspecified.
+func (r *Registry) MountedPaths() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.mounted))
+	for _, p := range r.mounted {
+		out = append(out, p)
+	}
+	return out
+}
+```
+
+(Add a small test in `registry_test.go` mirroring `TestRegistryConfigByStoreID`.)
+
+`VolumeContext` is omitted on `ListVolumes` entries because the controller no longer holds a per-volume cfg; v0.2.0 behavior change documented in CHANGELOG.
 
 - [ ] **Step 4: Run tests to verify the controller still compiles and existing tests pass**
 
@@ -1505,7 +1567,7 @@ func TestCreateVolumeNFSReturnsEmptyTopology(t *testing.T) {
 	imgFac := func(path string, _ fbexec.Runner) (image.Manager, error) {
 		return newFakeImages(), nil
 	}
-	c := &ControllerServer{registry: reg, exec: nil, newImages: imgFac}
+	c := NewControllerServer(reg, nil); c.newImages = imgFac
 
 	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name: "v1",
@@ -1532,7 +1594,7 @@ func TestCreateVolumeLocalPinsToPreferredNode(t *testing.T) {
 	imgFac := func(path string, _ fbexec.Runner) (image.Manager, error) {
 		return newFakeImages(), nil
 	}
-	c := &ControllerServer{registry: reg, exec: nil, newImages: imgFac}
+	c := NewControllerServer(reg, nil); c.newImages = imgFac
 
 	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name: "v1",
@@ -1558,7 +1620,7 @@ func TestCreateVolumeLocalPinsToPreferredNode(t *testing.T) {
 
 func TestCreateVolumeMissingTypeIsInvalidArgument(t *testing.T) {
 	reg := newTestRegistry(t)
-	c := &ControllerServer{registry: reg, exec: nil, newImages: func(string, fbexec.Runner) (image.Manager, error) { return newFakeImages(), nil }}
+	c := NewControllerServer(reg, nil); c.newImages = func(string, fbexec.Runner) (image.Manager, error) { return newFakeImages(), nil }
 	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "v1",
 		Parameters:         map[string]string{},
@@ -1594,6 +1656,59 @@ Expected: PASS — all rewritten controller tests.
 ```bash
 git add pkg/driver/controller_test.go
 git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "controller: tests cover nfs/local CreateVolume topology branches"
+```
+
+### Task 3.3: Patch `cmd/controller/main.go` so the project still builds
+
+A *placeholder* update keeping the codebase buildable between Chunk 3 and Chunk 5. The full flag cleanup happens in Chunk 5 Task 5.1; this patch only swaps the constructor to the new signature so `go build ./...` succeeds at every commit boundary.
+
+**Files:**
+- Modify: `cmd/controller/main.go`
+
+- [ ] **Step 1: Replace the controller construction block**
+
+Find:
+```go
+exec := fbexec.New(0)
+images, err := image.New(*backingStore, exec)
+if err != nil {
+	log.Error("open backing store", "err", err)
+	os.Exit(2)
+}
+
+identity := driver.NewIdentityServer(true)
+controller := driver.NewControllerServer(images, *backingStore, *topologyKey)
+```
+
+Replace with:
+```go
+exec := fbexec.New(0)
+mnt := mount.New(exec)
+storesRoot := "/var/lib/fileblock/stores"
+if err := os.MkdirAll(storesRoot, 0o755); err != nil {
+	log.Error("create stores root", "err", err)
+	os.Exit(2)
+}
+registry := store.NewRegistry(storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
+_ = backingStore // unused until Chunk 5 removes the flag
+_ = topologyKey  // unused until Chunk 5 removes the flag
+
+identity := driver.NewIdentityServer(true)
+controller := driver.NewControllerServer(registry, exec)
+```
+
+Add imports `"github.com/middlendian/fileblock-csi/pkg/store"` and `"github.com/middlendian/fileblock-csi/pkg/mount"`. Drop the `pkg/image` import.
+
+- [ ] **Step 2: Build**
+
+Run: `go build ./...`
+Expected: succeeds.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add cmd/controller/main.go
+git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "cmd/controller: swap to store.Registry constructor (flags cleanup deferred)"
 ```
 
 ---
@@ -1740,7 +1855,7 @@ func newTestNodeRegistry(t *testing.T) *store.Registry {
 	t.Helper()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	return store.NewRegistry(t.TempDir(), store.NewNFSMounter(fake), store.NewLocalMounter(fake))
+	return store.NewRegistry(t.TempDir(), store.NewNFSMounter(fake), store.NewLocalMounter(mount.New(fake)))
 }
 ```
 
@@ -1796,6 +1911,50 @@ git add pkg/driver/node_test.go
 git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "node: tests for new constructor, single-segment topology, Stage validation"
 ```
 
+### Task 4.3: Patch `cmd/node/main.go` so the project still builds
+
+Mirror of Task 3.3 for the node binary. Placeholder; full cleanup is in Task 5.2.
+
+**Files:**
+- Modify: `cmd/node/main.go`
+
+- [ ] **Step 1: Replace the node-construction block**
+
+Find:
+```go
+identity := driver.NewIdentityServer(false)
+node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, *topologyKey, *topologyValue)
+```
+
+Replace with:
+```go
+storesRoot := "/var/lib/fileblock/stores"
+if err := os.MkdirAll(storesRoot, 0o755); err != nil {
+	log.Error("create stores root", "err", err)
+	os.Exit(2)
+}
+registry := store.NewRegistry(storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
+_ = topologyKey
+_ = topologyValue
+
+identity := driver.NewIdentityServer(false)
+node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, registry)
+```
+
+Add `"github.com/middlendian/fileblock-csi/pkg/store"` to imports.
+
+- [ ] **Step 2: Build**
+
+Run: `go build ./...`
+Expected: succeeds.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add cmd/node/main.go
+git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "cmd/node: swap to store.Registry constructor (flags cleanup deferred)"
+```
+
 ---
 
 ## Chunk 5: Binary entrypoints and reconciler
@@ -1826,7 +1985,8 @@ func main() {
 	}
 
 	exec := fbexec.New(0)
-	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(exec))
+	mnt := mount.New(exec)
+	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
 
 	identity := driver.NewIdentityServer(true)
 	controller := driver.NewControllerServer(registry, exec)
@@ -1904,7 +2064,7 @@ func main() {
 		log.Warn("reconcile failed at startup", "err", err)
 	}
 
-	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(exec))
+	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
 
 	identity := driver.NewIdentityServer(false)
 	node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, registry)
@@ -1933,7 +2093,125 @@ git add cmd/node/main.go
 git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "cmd/node: drop --backing-store/--topology-* flags; wire store.Registry; reconcile via storesRoot"
 ```
 
-### Task 5.3: Run the full unit-test gate
+### Task 5.3: Add `Registry.AdoptExisting` for the hostPath cache variant
+
+The spec at "Reconcile on plugin restart" requires the Registry to scan its root on init and adopt any pre-existing per-store mounts. Under the recommended `emptyDir` cache (Chunk 6) this is always a no-op, but the spec keeps it for the supported `hostPath: DirectoryOrCreate` cache variant where mount state must survive driver-pod restarts.
+
+**Files:**
+- Modify: `pkg/store/registry.go`
+- Modify: `pkg/store/registry_test.go`
+- Modify: `cmd/node/main.go`
+- Modify: `cmd/controller/main.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `pkg/store/registry_test.go`:
+
+```go
+func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	if err := reg.AdoptExisting(); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	if len(reg.MountedPaths()) != 0 {
+		t.Errorf("expected empty mounted set, got %v", reg.MountedPaths())
+	}
+}
+
+func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "abc123def456"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := exectest.New()
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	if err := reg.AdoptExisting(); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	got := reg.MountedPaths()
+	if len(got) != 1 || got[0] != filepath.Join(root, "abc123def456") {
+		t.Errorf("MountedPaths = %v", got)
+	}
+}
+```
+
+Add `"os"` and `"path/filepath"` to the existing import block (the test file already has `path/filepath`; just add `os`).
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./pkg/store/... -run TestRegistryAdoptExisting`
+Expected: FAIL — `AdoptExisting` undefined.
+
+- [ ] **Step 3: Implement**
+
+Add to `pkg/store/registry.go`:
+
+```go
+// AdoptExisting walks r.root and treats every immediate subdirectory as
+// a previously-mounted store, populating the mounted-paths cache so
+// MountedPaths() / DeleteVolume / etc. can find them. It does NOT
+// re-mount anything — the directory is assumed to still hold a live
+// mount (true under hostPath caches that survive pod restarts).
+//
+// Caveats:
+//   - Cannot reconstruct the full Config for adopted stores; only the
+//     storeID is recovered (from the directory name). DeleteVolume
+//     against an adopted-but-not-Get-ed store will return NotFound from
+//     ConfigByStoreID. After the next CreateVolume against the SC,
+//     the Config is registered and Delete works.
+//   - Under emptyDir (the recommended cache shape) the directory is
+//     empty after restart, so this is always a no-op.
+func (r *Registry) AdoptExisting() error {
+	entries, err := os.ReadDir(r.root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read stores root %s: %w", r.root, err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := e.Name()
+		r.mounted[id] = filepath.Join(r.root, id)
+	}
+	return nil
+}
+```
+
+Add `"os"` to `pkg/store/registry.go`'s import block.
+
+- [ ] **Step 4: Run tests**
+
+Run: `go test ./pkg/store/... -v`
+Expected: PASS — both new tests.
+
+- [ ] **Step 5: Wire into the binaries**
+
+In `cmd/node/main.go`, immediately after `registry := store.NewRegistry(...)`, add:
+
+```go
+if err := registry.AdoptExisting(); err != nil {
+	log.Warn("adopt existing stores failed at startup", "err", err)
+}
+```
+
+Same change in `cmd/controller/main.go` after the registry is created.
+
+- [ ] **Step 6: Build + commit**
+
+```bash
+go build ./...
+git add pkg/store/registry.go pkg/store/registry_test.go cmd/node/main.go cmd/controller/main.go
+git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "store: AdoptExisting for hostPath cache variant; wire into both binaries"
+```
+
+### Task 5.4: Run the full unit-test gate
 
 - [ ] **Step 1: Confirm everything still builds and tests pass under -race**
 
@@ -2048,6 +2326,52 @@ git add deploy/kustomize/base/controller-deployment.yaml
 git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "deploy: controller now mounts backing stores itself; SYS_ADMIN cap; drop --strict-topology"
 ```
 
+- [ ] **Step 4 (REQUIRED): Verify `SYS_ADMIN`-only is sufficient on a real cluster**
+
+Spec promotes this from "open question" to a required implementation step. On a kind cluster (or whichever cluster you have), apply the new manifests and exercise an NFS mount end to end:
+
+```bash
+# 1. Bring up the test stack (kind-based works; the real homelab works too).
+kubectl apply -k deploy/kustomize/overlays/example-nfs-shared/
+kubectl wait -n fileblock-system --for=condition=Ready pod -l app=fileblock-controller --timeout=120s
+
+# 2. Create a PVC and Pod that reference the new SC.
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: pvc-syscheck, namespace: default}
+spec:
+  storageClassName: fileblock-nfs-shared
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 64Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: syscheck, namespace: default}
+spec:
+  containers:
+    - name: c
+      image: alpine:3.21
+      command: [sh, -c, 'echo ok > /data/x && cat /data/x && sleep 3600']
+      volumeMounts: [{name: d, mountPath: /data}]
+  volumes: [{name: d, persistentVolumeClaim: {claimName: pvc-syscheck}}]
+EOF
+kubectl wait pod/syscheck --for=condition=Ready --timeout=120s
+```
+
+If the controller pod logs `mount.nfs ...: Operation not permitted` (EPERM), the host's LSM denies mount syscalls from a `SYS_ADMIN`-but-not-`privileged` container. **Escalate the controller container to `privileged: true`** (replace the `securityContext` block in `controller-deployment.yaml` with `securityContext: {privileged: true}`) and re-run. The spec accepts this fallback explicitly.
+
+If everything works, no further change. Document in CHANGELOG which form was needed (e.g., "controller runs with `securityContext: {capabilities: {add: [SYS_ADMIN]}}`; if this is rejected by your host's LSM, set `privileged: true` instead").
+
+- [ ] **Step 5: Commit any escalation, if needed**
+
+```bash
+git add deploy/kustomize/base/controller-deployment.yaml
+git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "deploy: controller requires privileged: true on this host (LSM rejected SYS_ADMIN-only)"
+```
+
+(If `SYS_ADMIN` was sufficient, this commit is omitted.)
+
 ### Task 6.3: `node-daemonset.yaml`
 
 **Files:**
@@ -2070,9 +2394,8 @@ Edits:
    ```yaml
    - name: stores
      mountPath: /var/lib/fileblock/stores
-     mountPropagation: Bidirectional
    ```
-   (`Bidirectional` because the kubelet may need to see mounts the driver creates inside the stores dir; keep parity with the existing kubelet-dir `Bidirectional`.)
+   No `mountPropagation` — `emptyDir` is pod-private; the kubelet doesn't need to see per-store NFS mounts. The kubelet's view of the *staging* mount (under `/var/lib/kubelet/...`) is already covered by the existing `kubelet-dir` Bidirectional volumeMount, which is unchanged.
 3. In `volumes`, replace `backing-store` with:
    ```yaml
    - name: stores
@@ -2165,13 +2488,57 @@ kind: Kustomization
 # and trivial dev setups. Replace `backingStore.local.path` with the host
 # directory the driver should manage; it must exist on every node where
 # the DaemonSet runs.
+#
+# Local-type also requires that the host directory be visible inside the
+# driver pods' mount namespaces — the LocalMounter bind-mounts it into
+# /var/lib/fileblock/stores/<id>/. The base manifests do not mount any
+# host paths beyond /var/lib/kubelet and /dev. This overlay ships a
+# minimal patch (host-source-patch.yaml) that adds a hostPath volume
+# matching `backingStore.local.path`, mounted at the same path inside
+# the controller and node pods. NFS-type SCs do NOT need such a patch —
+# they're zero-overlay by design.
 
 namespace: fileblock-system
 
 resources:
   - ../../base
   - storageclass.yaml
+
+patches:
+  - path: host-source-patch.yaml
+    target:
+      kind: Deployment
+      name: fileblock-controller
+  - path: host-source-patch.yaml
+    target:
+      kind: DaemonSet
+      name: fileblock-node
 ```
+
+And create `deploy/kustomize/overlays/example-localdir/host-source-patch.yaml`:
+
+```yaml
+# Surfaces /var/lib/fileblock-localdir from the host into the driver
+# pods so the LocalMounter's bind-mount target has a real source. Same
+# patch shape works for Deployment and DaemonSet because both have a
+# single primary container; kustomize matches the patch to whichever
+# kind/name target it's applied to.
+spec:
+  template:
+    spec:
+      containers:
+        - name: fileblock-controller   # overridden per target via Kustomize patch matching
+          volumeMounts:
+            - name: host-source
+              mountPath: /var/lib/fileblock-localdir
+      volumes:
+        - name: host-source
+          hostPath:
+            path: /var/lib/fileblock-localdir
+            type: DirectoryOrCreate
+```
+
+> **Note on container-name matching.** Kustomize's strategic-merge patch matches container by `name`. For the DaemonSet target the container is `fileblock-node`, not `fileblock-controller`. The simplest way is to ship two separate patch files (`host-source-patch-controller.yaml` and `host-source-patch-node.yaml`) that differ only in the container name. The implementer should split into two files; this single-file shape is illustrative.
 
 Delete any existing patches:
 
@@ -2448,22 +2815,47 @@ cat hack/e2e.sh
 grep -n 'e2e-nfs' Makefile
 ```
 
-- [ ] **Step 2: Parameterize the SC mountOptions on a `NFS_VERSION` env**
+- [ ] **Step 2: Parameterize the SC `mountOptions` via `envsubst`**
 
-Set `NFS_VERSION=4.1` as default. The Makefile target gains a `make e2e-nfs3` variant that exports `NFS_VERSION=3`. The SC fixture templates `backingStore.nfs.mountOptions: "nfsvers=${NFS_VERSION},hard,timeo=600"` from the env at apply time (or the harness uses two distinct overlay subdirs — implementation choice).
+In `hack/e2e.sh`, replace any direct `kubectl apply -f .../storageclass.yaml` against the e2e-nfs overlay's SC with a templated apply:
+
+```sh
+NFS_VERSION="${NFS_VERSION:-4.1}"
+export NFS_VERSION
+envsubst < deploy/kustomize/overlays/e2e/storageclass.yaml.tpl \
+    | kubectl apply -f -
+```
+
+Rename the e2e overlay's `storageclass.yaml` (NFS variant only) to `storageclass.yaml.tpl` and replace the literal `nfsvers=4.1` with `nfsvers=${NFS_VERSION}`:
+
+```yaml
+parameters:
+  backingStore.type: nfs
+  backingStore.nfs.server: ...
+  backingStore.nfs.path: ...
+  backingStore.nfs.mountOptions: "nfsvers=${NFS_VERSION},hard,timeo=600"
+```
+
+In `Makefile`, add an `e2e-nfs3` target:
+
+```makefile
+e2e-nfs3:
+	NFS_VERSION=3 $(MAKE) e2e-nfs
+```
 
 - [ ] **Step 3: Run both**
 
 ```bash
 make e2e-nfs           # default 4.1
-NFS_VERSION=3 make e2e-nfs   # or `make e2e-nfs3` after Makefile edit
+make e2e-nfs3          # uses NFS_VERSION=3
 ```
 Expected: PASS for both. The exec-bit + chmod + flock assertions in `test/e2e/...` must run against the driver-mounted store in both cases.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add hack/e2e.sh Makefile
+git add hack/e2e.sh Makefile deploy/kustomize/overlays/e2e/storageclass.yaml.tpl
+git rm deploy/kustomize/overlays/e2e/storageclass.yaml || true   # if it was the NFS variant
 git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "e2e: matrix NFSv3 and NFSv4.1 against driver-mounted store"
 ```
 
@@ -2476,11 +2868,11 @@ git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "e2e:
 
 The test creates two SCs pointing at distinct paths on the same NFS server (or two distinct local paths for the local variant), creates one PVC + Pod from each, and asserts:
 
-1. Both Pods reach Running.
-2. The two `.img` files land under distinct `/var/lib/fileblock/stores/<id>/` paths inside the node DaemonSet pod (verified via `kubectl exec ... -- ls /var/lib/fileblock/stores/`).
-3. The two store IDs are distinct.
+1. Both Pods reach `Running`.
+2. The two PVs report distinct `volumeHandle` prefixes (`fb-<storeIDA>-...` vs `fb-<storeIDB>-...`).
+3. Inside the **node DaemonSet pod that staged each PV**, the matching store dir exists and contains exactly one `fb-*.img` file.
 
-Skeleton:
+Skeleton (helpers `applySC`, `applyPVCAndPod`, `waitRunning`, `scYAML`, `mustClientset` reuse existing harness conventions in `test/e2e/`; `execInDaemonSetOn` is a thin helper to be added):
 
 ```go
 //go:build e2e
@@ -2489,35 +2881,118 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestTwoStores(t *testing.T) {
 	ctx := context.Background()
 	clientset, _ := mustClientset(t)
 
-	// SC A — first path
-	applySC(t, ctx, clientset, scYAML("fileblock-store-a", "/exports/store-a"))
-	// SC B — second path
-	applySC(t, ctx, clientset, scYAML("fileblock-store-b", "/exports/store-b"))
+	applySC(t, ctx, clientset, scYAML("fileblock-store-a", "local", "/tmp/fileblock-e2e/a"))
+	applySC(t, ctx, clientset, scYAML("fileblock-store-b", "local", "/tmp/fileblock-e2e/b"))
 
-	// PVC + Pod A
 	applyPVCAndPod(t, ctx, clientset, "pod-a", "pvc-a", "fileblock-store-a")
 	applyPVCAndPod(t, ctx, clientset, "pod-b", "pvc-b", "fileblock-store-b")
-
 	waitRunning(t, ctx, clientset, "pod-a")
 	waitRunning(t, ctx, clientset, "pod-b")
 
-	out := mustExecOnNode(t, ctx, clientset, "ls /var/lib/fileblock/stores/")
-	dirs := strings.Fields(out)
-	if len(dirs) != 2 {
-		t.Errorf("expected 2 store dirs, got %v: %v", len(dirs), dirs)
+	// 1. Distinct storeID prefixes on the two volumeHandles.
+	pvA := pvForPVC(t, ctx, clientset, "pvc-a")
+	pvB := pvForPVC(t, ctx, clientset, "pvc-b")
+	idA := mustParseStoreID(t, pvA.Spec.CSI.VolumeHandle)
+	idB := mustParseStoreID(t, pvB.Spec.CSI.VolumeHandle)
+	if idA == idB {
+		t.Fatalf("expected distinct storeIDs, got %q for both", idA)
 	}
+
+	// 2. Each pod's node DaemonSet pod has exactly one .img file in
+	// the matching store dir, and no .img file in the other store dir.
+	for _, c := range []struct {
+		pod string
+		id  string
+		volumeHandle string
+	}{
+		{"pod-a", idA, pvA.Spec.CSI.VolumeHandle},
+		{"pod-b", idB, pvB.Spec.CSI.VolumeHandle},
+	} {
+		nodeName := nodeOfPod(t, ctx, clientset, c.pod)
+		dsPod := dsPodOnNode(t, ctx, clientset, "fileblock-system", "fileblock-node", nodeName)
+		out := execInPod(t, ctx, clientset, dsPod, "fileblock-node",
+			fmt.Sprintf("ls /var/lib/fileblock/stores/%s/", c.id))
+		imgs := filterFiles(strings.Fields(out), ".img")
+		if len(imgs) != 1 {
+			t.Errorf("[%s] /var/lib/fileblock/stores/%s/ contains %d .img files: %v", c.pod, c.id, len(imgs), imgs)
+		}
+		expected := c.volumeHandle + ".img"
+		if len(imgs) == 1 && imgs[0] != expected {
+			t.Errorf("[%s] expected %s, got %s", c.pod, expected, imgs[0])
+		}
+	}
+}
+
+func mustParseStoreID(t *testing.T, volumeHandle string) string {
+	// volumeHandle = "fb-<12-hex-storeID>-<name>"; extract the storeID.
+	if !strings.HasPrefix(volumeHandle, "fb-") || len(volumeHandle) < 16 || volumeHandle[15] != '-' {
+		t.Fatalf("malformed volumeHandle %q", volumeHandle)
+	}
+	return volumeHandle[3:15]
 }
 ```
 
-The helpers (`applySC`, `applyPVCAndPod`, `waitRunning`, `mustExecOnNode`, `scYAML`) reuse whatever already exists under `test/e2e/`; copy from existing tests. Concrete implementations are left to the existing harness conventions.
+Helpers to add to `test/e2e/helpers_test.go` (or wherever existing helpers live):
+
+```go
+// pvForPVC returns the bound PV for a PVC.
+func pvForPVC(t *testing.T, ctx context.Context, cs *kubernetes.Clientset, pvc string) *corev1.PersistentVolume {
+	c, _ := cs.CoreV1().PersistentVolumeClaims("default").Get(ctx, pvc, metav1.GetOptions{})
+	if c.Spec.VolumeName == "" {
+		t.Fatalf("pvc %s has no bound volume", pvc)
+	}
+	pv, _ := cs.CoreV1().PersistentVolumes().Get(ctx, c.Spec.VolumeName, metav1.GetOptions{})
+	return pv
+}
+
+// nodeOfPod returns the node a Pod was scheduled on.
+func nodeOfPod(t *testing.T, ctx context.Context, cs *kubernetes.Clientset, pod string) string {
+	p, _ := cs.CoreV1().Pods("default").Get(ctx, pod, metav1.GetOptions{})
+	if p.Spec.NodeName == "" {
+		t.Fatalf("pod %s not yet scheduled", pod)
+	}
+	return p.Spec.NodeName
+}
+
+// dsPodOnNode returns the DaemonSet pod that runs on a given node.
+func dsPodOnNode(t *testing.T, ctx context.Context, cs *kubernetes.Clientset, ns, dsName, nodeName string) string {
+	pods, _ := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=" + dsName,
+		FieldSelector: "spec.nodeName=" + nodeName,
+	})
+	if len(pods.Items) != 1 {
+		t.Fatalf("expected 1 ds pod %s on %s, got %d", dsName, nodeName, len(pods.Items))
+	}
+	return pods.Items[0].Name
+}
+
+// filterFiles returns only entries that end with the given suffix.
+func filterFiles(entries []string, suffix string) []string {
+	var out []string
+	for _, e := range entries {
+		if strings.HasSuffix(e, suffix) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+```
+
+`execInPod` (kubelet exec helper) most likely already exists in the harness; if not, port from `client-go`'s `remotecommand.NewSPDYExecutor` — about 25 lines, one-time effort.
+
+Use `local` SCs (not NFS) so the test runs under `make e2e` without an NFS server. The local source paths `/tmp/fileblock-e2e/{a,b}` need to exist on each node — the e2e overlay's hostPath patch can pre-create them, or the test setup `mkdir -p`s them via `kubectl debug node/.../-- mkdir -p ...` (or, easier, the e2e overlay's `host-source-patch.yaml` uses `type: DirectoryOrCreate` and the kubelet creates them when the DaemonSet pod first comes up).
 
 - [ ] **Step 2: Run the test**
 
