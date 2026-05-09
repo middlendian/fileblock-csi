@@ -2505,29 +2505,30 @@ resources:
   - storageclass.yaml
 
 patches:
-  - path: host-source-patch.yaml
+  - path: host-source-patch-controller.yaml
     target:
       kind: Deployment
       name: fileblock-controller
-  - path: host-source-patch.yaml
+  - path: host-source-patch-node.yaml
     target:
       kind: DaemonSet
       name: fileblock-node
 ```
 
-And create `deploy/kustomize/overlays/example-localdir/host-source-patch.yaml`:
+Create `deploy/kustomize/overlays/example-localdir/host-source-patch-controller.yaml`:
 
 ```yaml
-# Surfaces /var/lib/fileblock-localdir from the host into the driver
-# pods so the LocalMounter's bind-mount target has a real source. Same
-# patch shape works for Deployment and DaemonSet because both have a
-# single primary container; kustomize matches the patch to whichever
-# kind/name target it's applied to.
+# Surfaces /var/lib/fileblock-localdir from the host into the controller
+# pod so the LocalMounter's bind-mount target has a real source.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fileblock-controller
 spec:
   template:
     spec:
       containers:
-        - name: fileblock-controller   # overridden per target via Kustomize patch matching
+        - name: fileblock-controller
           volumeMounts:
             - name: host-source
               mountPath: /var/lib/fileblock-localdir
@@ -2538,7 +2539,28 @@ spec:
             type: DirectoryOrCreate
 ```
 
-> **Note on container-name matching.** Kustomize's strategic-merge patch matches container by `name`. For the DaemonSet target the container is `fileblock-node`, not `fileblock-controller`. The simplest way is to ship two separate patch files (`host-source-patch-controller.yaml` and `host-source-patch-node.yaml`) that differ only in the container name. The implementer should split into two files; this single-file shape is illustrative.
+Create `deploy/kustomize/overlays/example-localdir/host-source-patch-node.yaml`:
+
+```yaml
+# Same hostPath surface for the node DaemonSet's container.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fileblock-node
+spec:
+  template:
+    spec:
+      containers:
+        - name: fileblock-node
+          volumeMounts:
+            - name: host-source
+              mountPath: /var/lib/fileblock-localdir
+      volumes:
+        - name: host-source
+          hostPath:
+            path: /var/lib/fileblock-localdir
+            type: DirectoryOrCreate
+```
 
 Delete any existing patches:
 
