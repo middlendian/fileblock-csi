@@ -331,9 +331,14 @@ Public surface:
 `pkg/loop`'s reconciler (drop entries whose `back-file` doesn't match)
 stays as-is. New addition: on `Registry` init, scan
 `/var/lib/fileblock/stores/*/` for any pre-existing mounts and adopt
-them as already-mounted. With sticky-per-process this is mostly belt-
-and-braces — `emptyDir` is wiped on restart in normal cases — but
-correct under unexpected restarts.
+them as already-mounted. Under the recommended `emptyDir` mount cache
+the scan is always empty — the directory is wiped on every pod
+restart — but the adoption pass is load-bearing if an operator
+substitutes a `hostPath: DirectoryOrCreate` for the cache dir on the
+node DaemonSet (a supported variant for environments where mount
+state must survive driver-pod restarts). Keep the scan in v0.3.0;
+removing it is a future cleanup once the supported deployment shapes
+are nailed down.
 
 ## Data flow
 
