@@ -47,6 +47,8 @@ require go
 prepare_backing_local() {
   rm -rf "$WORK"
   mkdir -p "$BACKING_HOST"
+  # Create per-store subdirectories for TestTwoStores
+  mkdir -p "$WORK/a" "$WORK/b"
 }
 
 prepare_backing_nfs() {
