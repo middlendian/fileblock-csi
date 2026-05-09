@@ -20,9 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Binary flags removed: `--backing-store`, `--topology-key`,
   `--topology-value`. Both binaries now accept `--stores-root`
   (default `/var/lib/fileblock/stores`).
-- Controller pod requires `SYS_ADMIN` capability (added by base
-  manifests). `privileged: true` is a tested fallback if `SYS_ADMIN`
-  alone is rejected by the host's LSM.
+- Controller pod runs `privileged: true` + `SYS_ADMIN` (set by base
+  manifests). Mirrors csi-driver-nfs's controller pod and our own
+  node DaemonSet. NFSv3's lock manager binds a privileged source
+  port; SYS_ADMIN alone is rejected by the LSM in most environments
+  when nfsvers=3 is used.
 - Container image now includes `nfs-common` for in-driver NFS
   mounting (NFSv3 and NFSv4 both supported via the generic
   `mount.nfs` helper).

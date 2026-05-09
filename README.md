@@ -179,9 +179,10 @@ Other knobs:
   by the backing store. You can overcommit, but a full backing store
   produces I/O errors inside pods.
 - **ext4 only.** No other filesystem types are supported.
-- **SYS_ADMIN required.** The controller needs `SYS_ADMIN` capability
-  (or `privileged: true` as a fallback on hosts where the LSM rejects
-  `SYS_ADMIN` alone) to perform loop device operations and NFS mounts.
+- **Privileged pods.** Both the controller and the node DaemonSet run
+  `privileged: true` with `SYS_ADMIN`, matching csi-driver-nfs. The
+  privilege is required for `mount.nfs` (NFSv3 in particular needs a
+  privileged source port for the lock manager) and for `losetup`.
 
 ## Troubleshooting
 
