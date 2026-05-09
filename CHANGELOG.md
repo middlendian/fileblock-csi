@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provisioner cancelled the gRPC context, the driver killed
   `mount.nfs`, and CreateVolume returned `exit -1: signal: killed`.
   Matches csi-driver-nfs.
+- `pkg/store.NFSMounter` now invokes `mount -t nfs` (the generic
+  mount(8) command, dispatching to mount.nfs internally) instead of
+  calling `mount.nfs` directly. csi-driver-nfs goes through mount(8)
+  via `k8s.io/mount-utils`, and the previous direct-`mount.nfs` path
+  surfaced "Protocol not supported" failures on debian:trixie-slim
+  that mount(8) does not reproduce. mount(8) does additional argument
+  preprocessing before dispatching to the helper that, on this image,
+  the helper requires.
 
 ### Documentation
 

@@ -8,7 +8,7 @@ import (
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 )
 
-func TestNFSMounterCallsMountNFS(t *testing.T) {
+func TestNFSMounterInvokesMountWithFstype(t *testing.T) {
 	fake := exectest.New()
 	fake.SetDefault("", nil)
 	m := NewNFSMounter(fake)
@@ -25,10 +25,10 @@ func TestNFSMounterCallsMountNFS(t *testing.T) {
 		t.Fatalf("expected 1 call, got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	c := fake.Calls[0]
-	if c.Name != "mount.nfs" {
-		t.Errorf("cmd = %q, want mount.nfs", c.Name)
+	if c.Name != "mount" {
+		t.Errorf("cmd = %q, want mount", c.Name)
 	}
-	wantArgs := []string{"-o", "nfsvers=4.1,hard", "nfs.example.internal:/exports/fileblock", "/var/lib/fileblock/stores/abc"}
+	wantArgs := []string{"-t", "nfs", "-o", "nfsvers=4.1,hard", "nfs.example.internal:/exports/fileblock", "/var/lib/fileblock/stores/abc"}
 	if !equalArgs(c.Args, wantArgs) {
 		t.Errorf("args = %v\n want %v", c.Args, wantArgs)
 	}
@@ -43,7 +43,7 @@ func TestNFSMounterOmitsOptsWhenEmpty(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 	c := fake.Calls[0]
-	wantArgs := []string{"s:/p", "/t"}
+	wantArgs := []string{"-t", "nfs", "s:/p", "/t"}
 	if !equalArgs(c.Args, wantArgs) {
 		t.Errorf("args = %v\n want %v", c.Args, wantArgs)
 	}
@@ -53,12 +53,12 @@ func TestNFSMounterV3Variant(t *testing.T) {
 	fake := exectest.New()
 	fake.SetDefault("", nil)
 	m := NewNFSMounter(fake)
-	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSMountOptions: "nfsvers=3"}
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSMountOptions: "nfsvers=3,nolock"}
 	if err := m.Mount(context.Background(), "/t", cfg); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
 	c := fake.Calls[0]
-	wantArgs := []string{"-o", "nfsvers=3", "s:/p", "/t"}
+	wantArgs := []string{"-t", "nfs", "-o", "nfsvers=3,nolock", "s:/p", "/t"}
 	if !equalArgs(c.Args, wantArgs) {
 		t.Errorf("args = %v\n want %v", c.Args, wantArgs)
 	}

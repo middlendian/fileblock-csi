@@ -36,12 +36,12 @@ func TestRegistryGetMountsOnce(t *testing.T) {
 	}
 	mountCalls := 0
 	for _, c := range fake.Calls {
-		if c.Name == "mount.nfs" {
+		if c.Name == "mount" {
 			mountCalls++
 		}
 	}
 	if mountCalls != 1 {
-		t.Errorf("mount.nfs called %d times, want 1", mountCalls)
+		t.Errorf("mount called %d times, want 1", mountCalls)
 	}
 }
 
@@ -79,12 +79,12 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 	wg.Wait()
 	mountCalls := 0
 	for _, c := range fake.Calls {
-		if c.Name == "mount.nfs" {
+		if c.Name == "mount" {
 			mountCalls++
 		}
 	}
 	if mountCalls != 1 {
-		t.Errorf("under concurrent Get, mount.nfs called %d times, want 1", mountCalls)
+		t.Errorf("under concurrent Get, mount called %d times, want 1", mountCalls)
 	}
 }
 
