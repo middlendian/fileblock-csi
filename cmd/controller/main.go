@@ -18,23 +18,20 @@ import (
 
 func main() {
 	endpoint := flag.String("endpoint", "unix:///csi/csi.sock", "CSI endpoint (unix:// or tcp://)")
-	backingStore := flag.String("backing-store", "", "directory where .img files are stored (must be readable from every node)")
-	topologyKey := flag.String("topology-key", "", "topology segment key (default fileblock.csi/node); set to match the node plugin")
+	storesRoot := flag.String("stores-root", "/var/lib/fileblock/stores", "directory under which each backing store is mounted at <id>/")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
 	log := newLogger(*logLevel)
 
-	exec := fbexec.New(0)
-	mnt := mount.New(exec)
-	storesRoot := "/var/lib/fileblock/stores"
-	if err := os.MkdirAll(storesRoot, 0o755); err != nil {
+	if err := os.MkdirAll(*storesRoot, 0o755); err != nil {
 		log.Error("create stores root", "err", err)
 		os.Exit(2)
 	}
-	registry := store.NewRegistry(storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
-	_ = backingStore // unused until Chunk 5 removes the flag
-	_ = topologyKey  // unused until Chunk 5 removes the flag
+
+	exec := fbexec.New(0)
+	mnt := mount.New(exec)
+	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
 
 	identity := driver.NewIdentityServer(true)
 	controller := driver.NewControllerServer(registry, exec)
