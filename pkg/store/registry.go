@@ -97,6 +97,40 @@ func (r *Registry) MountedPaths() []string {
 	return out
 }
 
+// AdoptExisting walks r.root and treats every immediate subdirectory as
+// a previously-mounted store, populating the mounted-paths cache so
+// MountedPaths() / DeleteVolume / etc. can find them. It does NOT
+// re-mount anything — the directory is assumed to still hold a live
+// mount (true under hostPath caches that survive pod restarts).
+//
+// Caveats:
+//   - Cannot reconstruct the full Config for adopted stores; only the
+//     storeID is recovered (from the directory name). DeleteVolume
+//     against an adopted-but-not-Get-ed store will return NotFound from
+//     ConfigByStoreID. After the next CreateVolume against the SC,
+//     the Config is registered and Delete works.
+//   - Under emptyDir (the recommended cache shape) the directory is
+//     empty after restart, so this is always a no-op.
+func (r *Registry) AdoptExisting() error {
+	entries, err := os.ReadDir(r.root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read stores root %s: %w", r.root, err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := e.Name()
+		r.mounted[id] = filepath.Join(r.root, id)
+	}
+	return nil
+}
+
 func (r *Registry) lockStore(id string) *sync.Mutex {
 	r.mu.Lock()
 	defer r.mu.Unlock()

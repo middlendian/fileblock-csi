@@ -32,6 +32,9 @@ func main() {
 	exec := fbexec.New(0)
 	mnt := mount.New(exec)
 	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
+	if err := registry.AdoptExisting(); err != nil {
+		log.Warn("adopt existing stores failed at startup", "err", err)
+	}
 
 	identity := driver.NewIdentityServer(true)
 	controller := driver.NewControllerServer(registry, exec)

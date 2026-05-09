@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -141,6 +142,34 @@ func TestRegistryMountedPaths(t *testing.T) {
 	got := map[string]bool{paths[0]: true, paths[1]: true}
 	if !got[pA] || !got[pB] {
 		t.Errorf("MountedPaths = %v, want {%q, %q}", paths, pA, pB)
+	}
+}
+
+func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	if err := reg.AdoptExisting(); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	if len(reg.MountedPaths()) != 0 {
+		t.Errorf("expected empty mounted set, got %v", reg.MountedPaths())
+	}
+}
+
+func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "abc123def456"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := exectest.New()
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	if err := reg.AdoptExisting(); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	got := reg.MountedPaths()
+	if len(got) != 1 || got[0] != filepath.Join(root, "abc123def456") {
+		t.Errorf("MountedPaths = %v", got)
 	}
 }
 
