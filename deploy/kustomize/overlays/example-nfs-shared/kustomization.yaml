@@ -1,30 +1,16 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Example overlay: backing store is a single NFS export mounted at the same
-# path on every node. All nodes advertise the same topology segment, so the
-# external-provisioner sees them as interchangeable landing zones for any
-# PV created in this store.
+# Shared NFS export as backing store. Every node mounts the same export
+# inside its DaemonSet pod on demand; cross-node mutual exclusion is
+# CSI's SINGLE_NODE_WRITER serialization, so neither NLM (NFSv3) nor
+# server-side locks are on the critical path.
 #
-# Edit the `server`/`path` fields in patch-controller.yaml and patch-node.yaml
-# to match your NFS export. Cross-node mutual exclusion comes from CSI's
-# SINGLE_NODE_WRITER serialization, not a fileblock-side lease, so the NFS
-# server's lock manager is not on the critical path.
+# Replace `backingStore.nfs.server` and `backingStore.nfs.path` with
+# your NFS export. Set `nfsvers=3` if the server only supports v3.
 
 namespace: fileblock-system
 
 resources:
   - ../../base
-
-# Image tag is inherited from base/kustomization.yaml — `latest` on the
-# `main` branch, `vX.Y.Z` on a release tag.
-
-patches:
-  - path: patch-controller.yaml
-    target:
-      kind: Deployment
-      name: fileblock-controller
-  - path: patch-node.yaml
-    target:
-      kind: DaemonSet
-      name: fileblock-node
+  - storageclass.yaml

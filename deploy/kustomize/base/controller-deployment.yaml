@@ -23,19 +23,21 @@ spec:
           command: [/usr/local/bin/fileblock-controller]
           args:
             - --endpoint=unix:///csi/csi.sock
-            - --backing-store=/var/lib/fileblock
+            - --stores-root=/var/lib/fileblock/stores
             - --log-level=info
+          securityContext:
+            capabilities:
+              add: [SYS_ADMIN]
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
-            - name: backing-store
-              mountPath: /var/lib/fileblock
+            - name: stores
+              mountPath: /var/lib/fileblock/stores
         - name: csi-provisioner
           image: registry.k8s.io/sig-storage/csi-provisioner:v5.0.1
           args:
             - --csi-address=/csi/csi.sock
             - --feature-gates=Topology=true
-            - --strict-topology
             - --leader-election
             - --leader-election-namespace=fileblock-system
           volumeMounts:
@@ -60,9 +62,5 @@ spec:
       volumes:
         - name: socket-dir
           emptyDir: {}
-        - name: backing-store
-          # Overlay patches this hostPath to point at the operator's chosen
-          # directory (NFS mount, local dir, FUSE mount, etc.).
-          hostPath:
-            path: /var/lib/fileblock
-            type: DirectoryOrCreate
+        - name: stores
+          emptyDir: {}

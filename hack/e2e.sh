@@ -27,10 +27,22 @@ WORK="${WORK:-/tmp/fileblock-e2e}"
 IMAGE="${IMAGE:-fileblock-csi:e2e}"
 KEEP="${KEEP:-0}"
 BACKING_KIND="${BACKING_KIND:-local}"
+NFS_VERSION="${NFS_VERSION:-4.1}"
+export NFS_VERSION
+# NFS_SERVER: the address of the NFS server as seen from inside a kind node.
+# Kind nodes run as Docker containers, so 127.0.0.1 (the host loopback) is not
+# reachable from inside them. Default to the Docker bridge gateway, which is
+# the host from the container's perspective. Falls back to host.docker.internal
+# for environments (e.g. Docker Desktop on macOS) where the bridge may not exist.
+if [ -z "${NFS_SERVER:-}" ]; then
+  NFS_SERVER=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "host.docker.internal")
+fi
+export NFS_SERVER
 SUDO="${SUDO:-sudo}"
 
 BACKING_HOST="$WORK/backing"
 NFS_EXPORT="$WORK/export"
+export NFS_EXPORT
 
 log() { printf '::: %s\n' "$*"; }
 
@@ -45,6 +57,11 @@ require go
 prepare_backing_local() {
   rm -rf "$WORK"
   mkdir -p "$BACKING_HOST"
+  # Per-store subdirectories for TestTwoStores. These need to live under
+  # $BACKING_HOST because that's the host path the kind config mounts into
+  # each kind node at /srv/fileblock-source — and that's where the driver
+  # pods see them via the e2e overlay's host-source patches.
+  mkdir -p "$BACKING_HOST/a" "$BACKING_HOST/b"
 }
 
 prepare_backing_nfs() {
@@ -111,16 +128,22 @@ prepare_backing_nfs() {
     exit 1
   fi
 
-  log "mounting export at $BACKING_HOST as NFSv3"
-  $SUDO mount -t nfs -o vers=3,lock,hard \
+  log "mounting export at $BACKING_HOST as NFSv${NFS_VERSION}"
+  $SUDO mount -t nfs -o "vers=${NFS_VERSION},lock,hard" \
     127.0.0.1:"$NFS_EXPORT" "$BACKING_HOST"
   $SUDO chmod 0777 "$BACKING_HOST"
+
+  # Per-store subdirectories for TestTwoStores. After the NFS mount,
+  # these directories live on the NFS export and are visible inside kind
+  # nodes (via the runner -> kind -> pod hostPath chain) and to the
+  # driver pods via the e2e overlay's host-source patches.
+  mkdir -p "$BACKING_HOST/a" "$BACKING_HOST/b"
 
   if ! findmnt -no FSTYPE "$BACKING_HOST" | grep -q '^nfs'; then
     echo "expected $BACKING_HOST to be mounted as nfs, got: $(findmnt -no FSTYPE "$BACKING_HOST")" >&2
     exit 1
   fi
-  log "backing store is $(findmnt -no FSTYPE "$BACKING_HOST") (vers=3)"
+  log "backing store is $(findmnt -no FSTYPE "$BACKING_HOST") (vers=${NFS_VERSION})"
 }
 
 cleanup() {
@@ -165,6 +188,18 @@ kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 log "applying e2e overlay"
 kubectl apply -k "$ROOT/deploy/kustomize/overlays/e2e"
+# For NFS backing-store mode, replace the local SC with a driver-NFS SC so the
+# driver mounts the export itself (in addition to the host NFSv3 mount used by
+# the backing-store path). This validates the driver's NFS mounter code path.
+if [[ "$BACKING_KIND" == "nfs" ]]; then
+  log "applying NFS StorageClass (nfsvers=${NFS_VERSION})"
+  # The e2e overlay already created a local-type SC named "fileblock".
+  # StorageClass parameters are immutable, so delete it before applying the
+  # NFS variant (which has different parameters).
+  kubectl delete sc fileblock --ignore-not-found --wait=false
+  envsubst < "$ROOT/deploy/kustomize/overlays/e2e/storageclass-nfs.yaml.tpl" \
+    | kubectl apply -f -
+fi
 
 # Inline diagnostics on rollout failure: when something doesn't come up,
 # print the full pod and event state immediately so the CI log alone is

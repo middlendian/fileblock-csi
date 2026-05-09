@@ -12,36 +12,32 @@ import (
 
 	"github.com/middlendian/fileblock-csi/pkg/driver"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
-	"github.com/middlendian/fileblock-csi/pkg/image"
+	"github.com/middlendian/fileblock-csi/pkg/mount"
+	"github.com/middlendian/fileblock-csi/pkg/store"
 )
 
 func main() {
 	endpoint := flag.String("endpoint", "unix:///csi/csi.sock", "CSI endpoint (unix:// or tcp://)")
-	backingStore := flag.String("backing-store", "", "directory where .img files are stored (must be readable from every node)")
-	topologyKey := flag.String("topology-key", "", "topology segment key (default fileblock.csi/node); set to match the node plugin")
+	storesRoot := flag.String("stores-root", "/var/lib/fileblock/stores", "directory under which each backing store is mounted at <id>/")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
 	flag.Parse()
 
 	log := newLogger(*logLevel)
 
-	if *backingStore == "" {
-		log.Error("--backing-store is required")
-		os.Exit(2)
-	}
-	if err := os.MkdirAll(*backingStore, 0o755); err != nil {
-		log.Error("create backing store", "err", err)
+	if err := os.MkdirAll(*storesRoot, 0o755); err != nil {
+		log.Error("create stores root", "err", err)
 		os.Exit(2)
 	}
 
 	exec := fbexec.New(0)
-	images, err := image.New(*backingStore, exec)
-	if err != nil {
-		log.Error("open backing store", "err", err)
-		os.Exit(2)
+	mnt := mount.New(exec)
+	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
+	if err := registry.AdoptExisting(); err != nil {
+		log.Warn("adopt existing stores failed at startup", "err", err)
 	}
 
 	identity := driver.NewIdentityServer(true)
-	controller := driver.NewControllerServer(images, *backingStore, *topologyKey)
+	controller := driver.NewControllerServer(registry, exec)
 	srv := driver.NewServer(*endpoint, log, identity, controller, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

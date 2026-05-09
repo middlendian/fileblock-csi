@@ -7,7 +7,6 @@ resources:
   - rbac.yaml
   - controller-deployment.yaml
   - node-daemonset.yaml
-  - storageclass.yaml
 
 # `newTag` tracks the most recent release. `hack/cut-release.sh` bumps it
 # to the new vX.Y.Z on every release PR, so:

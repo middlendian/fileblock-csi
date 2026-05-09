@@ -17,7 +17,8 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${WORK:-/tmp/fileblock-sanity}"
-BACKING="$WORK/backing"
+STORES="$WORK/stores"
+BACKING="$STORES/local"
 STATE="$WORK/state"
 BIN="$WORK/bin"
 CTL_SOCK="$WORK/ctl.sock"
@@ -30,7 +31,7 @@ cleanup() {
     | tr -d '"' \
     | while read -r dev; do
         back=$(losetup --noheadings --output BACK-FILE "$dev" 2>/dev/null || true)
-        case "$back" in "$BACKING"/*) losetup --detach "$dev" ;; esac
+        case "$back" in "$STORES"/*) losetup --detach "$dev" ;; esac
       done
   [[ -n "${CTL_PID-}" ]]  && kill "$CTL_PID"  2>/dev/null
   [[ -n "${NODE_PID-}" ]] && kill "$NODE_PID" 2>/dev/null
@@ -45,11 +46,11 @@ mkdir -p "$BACKING" "$STATE" "$BIN"
 ( cd "$ROOT" && go build -o "$BIN/fileblock-node" ./cmd/node )
 
 "$BIN/fileblock-controller" \
-  --endpoint="unix://$CTL_SOCK" --backing-store="$BACKING" --log-level=debug &
+  --endpoint="unix://$CTL_SOCK" --stores-root="$STORES" --log-level=debug &
 CTL_PID=$!
 "$BIN/fileblock-node" \
   --endpoint="unix://$NODE_SOCK" --node-id=local --state-dir="$STATE" \
-  --backing-store="$BACKING" --log-level=debug &
+  --stores-root="$STORES" --log-level=debug &
 NODE_PID=$!
 
 for _ in $(seq 1 20); do
@@ -60,5 +61,5 @@ done
 csi-sanity \
   --csi.controllerendpoint="unix://$CTL_SOCK" \
   --csi.endpoint="unix://$NODE_SOCK" \
-  --csi.testvolumeparameters=<(printf "backingStorePath: %s\n" "$BACKING") \
+  --csi.testvolumeparameters=<(printf "backingStore.type: local\nbackingStore.local.path: %s\n" "$BACKING") \
   --csi.testvolumesize=$((128*1024*1024))

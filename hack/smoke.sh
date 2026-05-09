@@ -15,7 +15,8 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${WORK:-/tmp/fileblock-smoke}"
-BACKING="$WORK/backing"
+STORES="$WORK/stores"
+BACKING="$STORES/local"
 STATE="$WORK/state"
 BIN="$WORK/bin"
 CTL_SOCK="$WORK/ctl.sock"
@@ -34,7 +35,7 @@ cleanup() {
     | tr -d '"' \
     | while read -r dev; do
         back=$(losetup --noheadings --output BACK-FILE "$dev" 2>/dev/null || true)
-        case "$back" in "$BACKING"/*) losetup --detach "$dev" ;; esac
+        case "$back" in "$STORES"/*) losetup --detach "$dev" ;; esac
       done
   if [[ -n "${CTL_PID-}" ]]; then kill "$CTL_PID" 2>/dev/null || true; fi
   if [[ -n "${NODE_PID-}" ]]; then kill "$NODE_PID" 2>/dev/null || true; fi
@@ -52,7 +53,7 @@ echo "::: building binaries"
 echo "::: starting controller"
 "$BIN/fileblock-controller" \
   --endpoint="unix://$CTL_SOCK" \
-  --backing-store="$BACKING" \
+  --stores-root="$STORES" \
   --log-level=debug >"$LOG/controller.log" 2>&1 &
 CTL_PID=$!
 
@@ -61,7 +62,7 @@ echo "::: starting node"
   --endpoint="unix://$NODE_SOCK" \
   --node-id=local \
   --state-dir="$STATE" \
-  --backing-store="$BACKING" \
+  --stores-root="$STORES" \
   --log-level=debug >"$LOG/node.log" 2>&1 &
 NODE_PID=$!
 
@@ -81,7 +82,8 @@ echo "::: create volume"
 CREATE_OUT=$(csc controller new \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --req-bytes $((128*1024*1024)) \
-  --params "backingStorePath=$BACKING" \
+  --params "backingStore.type=local" \
+  --params "backingStore.local.path=$BACKING" \
   smoke-vol)
 VOL_ID=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
 echo "  created volumeID=$VOL_ID"
@@ -93,7 +95,8 @@ mkdir -p "$STAGE"
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --staging-target-path "$STAGE" \
-  --vol-context "backingStorePath=$BACKING" \
+  --vol-context "backingStore.type=local" \
+  --vol-context "backingStore.local.path=$BACKING" \
   "$VOL_ID"
 
 mount | grep -q " on $STAGE " || { echo "stage path not mounted"; exit 1; }
@@ -106,7 +109,8 @@ CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE"
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --staging-target-path "$STAGE" \
-  --vol-context "backingStorePath=$BACKING" \
+  --vol-context "backingStore.type=local" \
+  --vol-context "backingStore.local.path=$BACKING" \
   "$VOL_ID"
 [[ -x "$STAGE/x.sh" ]] || { echo "+x lost across remount"; exit 1; }
 
@@ -124,7 +128,8 @@ echo "::: orphan loop is reclaimed on plugin restart"
 CREATE_OUT=$(csc controller new \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --req-bytes $((128*1024*1024)) \
-  --params "backingStorePath=$BACKING" \
+  --params "backingStore.type=local" \
+  --params "backingStore.local.path=$BACKING" \
   orphan-vol)
 VOL2=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
 ORPHAN=$(losetup --find --show "$BACKING/$VOL2.img")
@@ -133,7 +138,7 @@ kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
   --endpoint="unix://$NODE_SOCK" \
   --node-id=local \
   --state-dir="$STATE" \
-  --backing-store="$BACKING" \
+  --stores-root="$STORES" \
   --log-level=debug >>"$LOG/node.log" 2>&1 &
 NODE_PID=$!
 sleep 1
@@ -148,7 +153,8 @@ echo "::: cross-node takeover (shared backing store)"
 CREATE_OUT=$(csc controller new \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --req-bytes $((128*1024*1024)) \
-  --params "backingStorePath=$BACKING" \
+  --params "backingStore.type=local" \
+  --params "backingStore.local.path=$BACKING" \
   takeover-vol)
 VOL3=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
 STAGE_A="$STATE/staging/${VOL3}-a"
@@ -160,14 +166,15 @@ kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
   --endpoint="unix://$NODE_SOCK" \
   --node-id=node-a \
   --state-dir="$STATE" \
-  --backing-store="$BACKING" \
+  --stores-root="$STORES" \
   --log-level=debug >>"$LOG/node.log" 2>&1 &
 NODE_PID=$!
 for _ in $(seq 1 20); do [[ -S "$NODE_SOCK" ]] && break; sleep 0.1; done
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --staging-target-path "$STAGE_A" \
-  --vol-context "backingStorePath=$BACKING" \
+  --vol-context "backingStore.type=local" \
+  --vol-context "backingStore.local.path=$BACKING" \
   "$VOL3"
 echo node-a-was-here > "$STAGE_A/who"
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE_A" "$VOL3"
@@ -180,14 +187,15 @@ kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
   --endpoint="unix://$NODE_SOCK" \
   --node-id=node-b \
   --state-dir="$STATE" \
-  --backing-store="$BACKING" \
+  --stores-root="$STORES" \
   --log-level=debug >>"$LOG/node.log" 2>&1 &
 NODE_PID=$!
 for _ in $(seq 1 20); do [[ -S "$NODE_SOCK" ]] && break; sleep 0.1; done
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
   --cap "SINGLE_NODE_WRITER,mount,ext4" \
   --staging-target-path "$STAGE_B" \
-  --vol-context "backingStorePath=$BACKING" \
+  --vol-context "backingStore.type=local" \
+  --vol-context "backingStore.local.path=$BACKING" \
   "$VOL3"
 grep -q '^node-a-was-here$' "$STAGE_B/who" || {
   echo "data written by node-a not visible to node-b"; exit 1; }

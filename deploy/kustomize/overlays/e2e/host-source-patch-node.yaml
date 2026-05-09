@@ -1,0 +1,19 @@
+# Same hostPath surface for the node DaemonSet so LocalMounter can
+# bind-mount the backing-store path on every scheduled node.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fileblock-node
+spec:
+  template:
+    spec:
+      containers:
+        - name: fileblock-node
+          volumeMounts:
+            - name: host-source
+              mountPath: /srv/fileblock-source
+      volumes:
+        - name: host-source
+          hostPath:
+            path: /srv/fileblock-source
+            type: DirectoryOrCreate

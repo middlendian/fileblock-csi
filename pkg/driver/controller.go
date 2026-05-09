@@ -9,46 +9,38 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/image"
+	"github.com/middlendian/fileblock-csi/pkg/store"
 )
 
-// ParamBackingStorePath is the StorageClass parameter that names the
-// host-readable directory where .img files live. The same key is also
-// returned in the volume context so the node plugin knows where to look.
-const ParamBackingStorePath = "backingStorePath"
-
-// TopologyKeyNode is the default topology key. With this key each node
-// reports its own NodeID as the segment value, so a PV is pinned to the
-// node it was first scheduled on. Operators sharing a backing store across
-// multiple nodes (NFS, SMB, FUSE) override this with a per-store key — for
-// example fileblock.csi/backing-store — so all nodes that mount the same
-// store advertise the same segment and the PV can land on any of them.
-const TopologyKeyNode = "fileblock.csi/node"
+// topologyKeyNode is the segment key reported by the node plugin. The
+// controller echoes it back when pinning local-type volumes to the
+// provisioner's preferred node.
+const topologyKeyNode = "fileblock.csi/node"
 
 const (
 	defaultCapacityBytes = 1 << 30 // 1 GiB
 )
 
+type imageFactory func(backingStorePath string, exec fbexec.Runner) (image.Manager, error)
+
 type ControllerServer struct {
 	csi.UnimplementedControllerServer
-	images           image.Manager
-	backingStorePath string
-	// topologyKey is accepted for symmetry with the node plugin so the two
-	// can be configured together; the controller itself only echoes whatever
-	// key the provisioner passes in AccessibilityRequirements.
-	topologyKey string
+	registry  *store.Registry
+	exec      fbexec.Runner
+	newImages imageFactory
 }
 
-// NewControllerServer constructs a ControllerServer. topologyKey may be empty;
-// it defaults to TopologyKeyNode (per-node pin).
-func NewControllerServer(images image.Manager, backingStorePath, topologyKey string) *ControllerServer {
-	if topologyKey == "" {
-		topologyKey = TopologyKeyNode
-	}
+// NewControllerServer constructs a ControllerServer. The registry routes
+// per-StorageClass backing-store configs to mounted directories; the
+// image manager for each volume is built lazily inside CreateVolume from
+// the per-store path.
+func NewControllerServer(reg *store.Registry, r fbexec.Runner) *ControllerServer {
 	return &ControllerServer{
-		images:           images,
-		backingStorePath: backingStorePath,
-		topologyKey:      topologyKey,
+		registry:  reg,
+		exec:      r,
+		newImages: image.New,
 	}
 }
 
@@ -77,6 +69,19 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		return nil, err
 	}
 
+	cfg, err := store.ConfigFromParams(req.GetParameters())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	mountedPath, err := c.registry.Get(ctx, cfg)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "mount backing store: %v", err)
+	}
+	images, err := c.newImages(mountedPath, c.exec)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "open backing store: %v", err)
+	}
+
 	capacity := defaultCapacityBytes
 	if r := req.GetCapacityRange(); r != nil {
 		if r.RequiredBytes > 0 {
@@ -86,14 +91,11 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 	}
 
-	// Derive a stable volumeID from the request name so repeated calls with
-	// the same name resolve to the same on-disk image — required by CSI's
-	// CreateVolume idempotency contract.
-	volumeID, err := volumeIDFromName(req.GetName())
+	volumeID, err := volumeIDFromName(cfg, req.GetName())
 	if err != nil {
 		return nil, err
 	}
-	meta, err := c.images.Create(ctx, volumeID, int64(capacity))
+	meta, err := images.Create(ctx, volumeID, int64(capacity))
 	if err != nil {
 		var mismatch *image.CapacityMismatchError
 		if errors.As(err, &mismatch) {
@@ -105,31 +107,55 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	vol := &csi.Volume{
 		VolumeId:      meta.VolumeID,
 		CapacityBytes: meta.CapacityBytes,
-		VolumeContext: map[string]string{
-			ParamBackingStorePath: c.backingStorePath,
-		},
+		VolumeContext: cfg.ToVolumeContext(),
 	}
-	// Honor the provisioner's topology preference. The pin is to a single
-	// segment (key=value), not necessarily a single node: when every node
-	// that mounts the same backing store advertises the same segment, the
-	// PV is schedulable on any of them. ext4 still has no distributed
-	// locking; SINGLE_NODE_WRITER + the kubelet's per-volume serialization
-	// is what keeps two nodes from staging at once.
-	if reqTop := req.GetAccessibilityRequirements(); reqTop != nil {
-		if pref := reqTop.GetPreferred(); len(pref) > 0 {
-			vol.AccessibleTopology = []*csi.Topology{pref[0]}
-		} else if reqs := reqTop.GetRequisite(); len(reqs) > 0 {
-			vol.AccessibleTopology = []*csi.Topology{reqs[0]}
-		}
-	}
+	vol.AccessibleTopology = topologyForCfg(cfg, req.GetAccessibilityRequirements())
 	return &csi.CreateVolumeResponse{Volume: vol}, nil
+}
+
+// topologyForCfg returns AccessibleTopology that the external-provisioner
+// will honor:
+//   - nfs: empty (any node may stage).
+//   - local with backingStore.local.shared=true: empty (operator declares
+//     the path is shared across nodes via OS-level shared FS or kind
+//     extraMount; kubelet's SINGLE_NODE_WRITER serialization handles
+//     cross-node mutual exclusion exactly like the NFS case).
+//   - local (default, unshared): pinned to the provisioner's preferred
+//     segment (per-node behavior — the path only exists on one node).
+func topologyForCfg(cfg store.Config, req *csi.TopologyRequirement) []*csi.Topology {
+	if cfg.Type == store.TypeNFS {
+		return nil
+	}
+	if cfg.Type == store.TypeLocal && cfg.LocalShared {
+		return nil
+	}
+	if req == nil {
+		return nil
+	}
+	if pref := req.GetPreferred(); len(pref) > 0 {
+		return []*csi.Topology{pref[0]}
+	}
+	if reqs := req.GetRequisite(); len(reqs) > 0 {
+		return []*csi.Topology{reqs[0]}
+	}
+	return nil
 }
 
 func (c *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "volumeId is required")
 	}
-	if err := c.images.Delete(ctx, req.GetVolumeId()); err != nil {
+	m, err := c.imageManagerForVolumeID(ctx, req.GetVolumeId())
+	if err != nil {
+		// CSI DeleteVolume must be idempotent — a volumeID that can't be
+		// resolved (malformed or store unknown to this controller) is
+		// treated as already-deleted.
+		if status.Code(err) == codes.NotFound {
+			return &csi.DeleteVolumeResponse{}, nil
+		}
+		return nil, err
+	}
+	if err := m.Delete(ctx, req.GetVolumeId()); err != nil {
 		return nil, status.Errorf(codes.Internal, "delete volume: %v", err)
 	}
 	return &csi.DeleteVolumeResponse{}, nil
@@ -142,7 +168,11 @@ func (c *ControllerServer) ValidateVolumeCapabilities(ctx context.Context, req *
 	if len(req.GetVolumeCapabilities()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume_capabilities is required")
 	}
-	if _, err := c.images.Get(ctx, req.GetVolumeId()); err != nil {
+	m, err := c.imageManagerForVolumeID(ctx, req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	if _, err := m.Get(ctx, req.GetVolumeId()); err != nil {
 		return nil, status.Errorf(codes.NotFound, "volume %s: %v", req.GetVolumeId(), err)
 	}
 	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
@@ -161,19 +191,24 @@ func (c *ControllerServer) ListVolumes(ctx context.Context, req *csi.ListVolumes
 	if req.GetStartingToken() != "" {
 		return nil, status.Error(codes.Aborted, "starting_token is not supported")
 	}
-	metas, err := c.images.List(ctx)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "list: %v", err)
-	}
-	out := make([]*csi.ListVolumesResponse_Entry, 0, len(metas))
-	for _, m := range metas {
-		out = append(out, &csi.ListVolumesResponse_Entry{
-			Volume: &csi.Volume{
-				VolumeId:      m.VolumeID,
-				CapacityBytes: m.CapacityBytes,
-				VolumeContext: map[string]string{ParamBackingStorePath: c.backingStorePath},
-			},
-		})
+	out := []*csi.ListVolumesResponse_Entry{}
+	for _, path := range c.registry.MountedPaths() {
+		m, err := c.newImages(path, c.exec)
+		if err != nil {
+			continue
+		}
+		metas, err := m.List(ctx)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "list: %v", err)
+		}
+		for _, meta := range metas {
+			out = append(out, &csi.ListVolumesResponse_Entry{
+				Volume: &csi.Volume{
+					VolumeId:      meta.VolumeID,
+					CapacityBytes: meta.CapacityBytes,
+				},
+			})
+		}
 	}
 	return &csi.ListVolumesResponse{Entries: out}, nil
 }
@@ -186,7 +221,11 @@ func (c *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	if r == nil || r.RequiredBytes <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "capacity_range.required_bytes is required")
 	}
-	meta, err := c.images.Resize(ctx, req.GetVolumeId(), r.RequiredBytes)
+	m, err := c.imageManagerForVolumeID(ctx, req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	meta, err := m.Resize(ctx, req.GetVolumeId(), r.RequiredBytes)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resize: %v", err)
 	}
@@ -196,19 +235,59 @@ func (c *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	}, nil
 }
 
+// imageManagerForVolumeID resolves a volumeID's home store and returns
+// an image.Manager over its mounted path. Returns NotFound if the
+// store has not been seen by this controller process (typical after a
+// controller-pod restart before CreateVolume re-populates the Registry
+// for that storeID — see CHANGELOG migration note).
+func (c *ControllerServer) imageManagerForVolumeID(ctx context.Context, volumeID string) (image.Manager, error) {
+	storeID, err := parseStoreIDFromVolumeID(volumeID)
+	if err != nil {
+		return nil, err
+	}
+	cfg, ok := c.registry.ConfigByStoreID(storeID)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "store %s for volume %s is not mounted on this controller; retry after the SC is in use", storeID, volumeID)
+	}
+	path, err := c.registry.Get(ctx, cfg)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "remount backing store %s: %v", storeID, err)
+	}
+	return c.newImages(path, c.exec)
+}
+
 // volumeIDFromName produces the on-disk volume ID for a given CSI request
-// name. The mapping is deterministic: the same name always yields the same ID,
-// so a retried CreateVolume call lands on the existing image instead of
-// minting a fresh one. The "fb-" prefix mirrors the on-disk file-naming
-// convention; if the name already starts with "fb-" we don't double it.
-func volumeIDFromName(name string) (string, error) {
+// name. The mapping is deterministic on (cfg, name): the same name +
+// same backing store always yields the same ID, so a retried CreateVolume
+// call lands on the existing image instead of minting a fresh one. The
+// "fb-<storeID>-" prefix lets DeleteVolume / Expand resolve the
+// volumeID's home store without parameters in the request.
+//
+// Hyphens are allowed in name. parseStoreIDFromVolumeID indexes at fixed
+// positions (3..15 for storeID) so subsequent hyphens in name are
+// unambiguous.
+func volumeIDFromName(cfg store.Config, name string) (string, error) {
 	if strings.ContainsAny(name, "/\\\x00") {
 		return "", status.Errorf(codes.InvalidArgument, "name %q contains invalid characters", name)
 	}
-	if strings.HasPrefix(name, "fb-") {
-		return name, nil
+	return "fb-" + cfg.ID() + "-" + name, nil
+}
+
+// parseStoreIDFromVolumeID extracts the 12-char storeID from a volumeID
+// produced by volumeIDFromName. A volumeID that doesn't fit the format
+// can't have been issued by this driver, so callers treat it the same
+// as any other unknown volume — NotFound (or, for DeleteVolume, OK
+// because delete is idempotent per the CSI spec).
+func parseStoreIDFromVolumeID(volumeID string) (string, error) {
+	const prefix = "fb-"
+	if !strings.HasPrefix(volumeID, prefix) {
+		return "", status.Errorf(codes.NotFound, "volumeID %q is not in fb-<storeID>-<name> form", volumeID)
 	}
-	return "fb-" + name, nil
+	rest := volumeID[len(prefix):]
+	if len(rest) < 13 || rest[12] != '-' {
+		return "", status.Errorf(codes.NotFound, "volumeID %q has malformed storeID segment", volumeID)
+	}
+	return rest[:12], nil
 }
 
 func validateCapabilities(caps []*csi.VolumeCapability) error {

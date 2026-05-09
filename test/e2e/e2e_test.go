@@ -232,16 +232,6 @@ func TestNFSv3BackingProperties(t *testing.T) {
 		t.Skip("E2E_BACKING_KIND != nfs; skipping NFSv3-specific properties test")
 	}
 
-	// 1. The backing store the controller writes to is actually NFS — this
-	//    catches a misconfigured harness that would silently pass the
-	//    downstream assertions on a local fs.
-	out := kubectl(t, "-n", "fileblock-system", "exec",
-		"deploy/fileblock-controller", "-c", "fileblock-controller",
-		"--", "stat", "-f", "-c", "%T", "/var/lib/fileblock")
-	if !strings.Contains(out, "nfs") {
-		t.Fatalf("expected backing store to be on NFS, stat reported: %q", out)
-	}
-
 	ns := makeNamespace(t)
 	applyYAML(t, pvcManifest(ns, "vol", "128Mi"))
 	applyYAML(t, podWithScript(ns, "nfs-props", "vol", `
@@ -283,6 +273,19 @@ echo nfsv3-ok > /tmp/done
 sleep 3600
 `))
 	waitPodReady(t, ns, "nfs-props", defaultPodReady)
+
+	// 1. The backing store the controller writes to is actually NFS — checked
+	//    after the pod is ready so that CreateVolume has already triggered a
+	//    store mount under /var/lib/fileblock/stores/<storeID>/. Checking the
+	//    parent /var/lib/fileblock/stores itself would see the emptyDir cache
+	//    volume, not the per-store NFS mount that lives one level deeper.
+	storeCheck := kubectl(t, "-n", "fileblock-system", "exec",
+		"deploy/fileblock-controller", "-c", "fileblock-controller",
+		"--", "sh", "-c",
+		`stat -f -c %T /var/lib/fileblock/stores/$(ls /var/lib/fileblock/stores | head -1)`)
+	if !strings.Contains(storeCheck, "nfs") {
+		t.Fatalf("expected backing store to be on NFS, stat reported: %q", storeCheck)
+	}
 
 	eventually(t, 60*time.Second, func() error {
 		out, err := kubectlRaw("-n", ns, "exec", "nfs-props", "--", "cat", "/tmp/done")
