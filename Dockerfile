@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/middlendian/f
 FROM debian:trixie-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        e2fsprogs util-linux ca-certificates \
+        e2fsprogs util-linux ca-certificates nfs-common \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/fileblock-controller /usr/local/bin/fileblock-controller
 COPY --from=build /out/fileblock-node /usr/local/bin/fileblock-node
