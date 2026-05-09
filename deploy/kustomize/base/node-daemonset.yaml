@@ -23,7 +23,7 @@ spec:
             - --endpoint=unix:///csi/csi.sock
             - --node-id=$(NODE_NAME)
             - --state-dir=/var/lib/kubelet/plugins/fileblock.csi
-            - --backing-store=/var/lib/fileblock
+            - --stores-root=/var/lib/fileblock/stores
             - --log-level=info
           env:
             - name: NODE_NAME
@@ -42,9 +42,9 @@ spec:
               mountPropagation: Bidirectional
             - name: host-dev
               mountPath: /dev
-            - name: backing-store
-              mountPath: /var/lib/fileblock
-              mountPropagation: HostToContainer
+            - name: stores
+              mountPath: /var/lib/fileblock/stores
+              # emptyDir is pod-private; kubelet's view of staging mounts is via kubelet-dir
         - name: csi-node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
           args:
@@ -79,9 +79,5 @@ spec:
           hostPath:
             path: /dev
             type: Directory
-        - name: backing-store
-          # Overlay patches this hostPath to point at the operator's chosen
-          # directory (NFS mount, local dir, FUSE mount, etc.).
-          hostPath:
-            path: /var/lib/fileblock
-            type: DirectoryOrCreate
+        - name: stores
+          emptyDir: {}
