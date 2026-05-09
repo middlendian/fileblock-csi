@@ -1,4 +1,4 @@
-# Surfaces /tmp/fileblock-e2e from the host into the controller pod so
+# Surfaces /srv/fileblock-source from the host into the controller pod so
 # LocalMounter's bind-mount source has a real path in the pod's mount namespace.
 apiVersion: apps/v1
 kind: Deployment
@@ -11,9 +11,9 @@ spec:
         - name: fileblock-controller
           volumeMounts:
             - name: host-source
-              mountPath: /tmp/fileblock-e2e
+              mountPath: /srv/fileblock-source
       volumes:
         - name: host-source
           hostPath:
-            path: /tmp/fileblock-e2e
+            path: /srv/fileblock-source
             type: DirectoryOrCreate

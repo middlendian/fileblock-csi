@@ -1,7 +1,10 @@
 # kind cluster used by hack/e2e.sh. Two nodes (control-plane + worker), both
-# with the same host directory bind-mounted at /var/lib/fileblock so the
-# backing store is shared. The control-plane node is left untainted so user
-# pods can land on either side — needed for the cross-node takeover test.
+# with the same host directory bind-mounted at /srv/fileblock-source so the
+# backing store is shared across kind nodes. The driver's e2e overlay then
+# surfaces /srv/fileblock-source into each pod via host-source patches;
+# LocalMounter bind-mounts it into /var/lib/fileblock/stores/<id> at
+# provision time. The control-plane node is left untainted so user pods can
+# land on either side — needed for the cross-node takeover test.
 #
 # /dev is bind-mounted from the runner host into each kind node so the loop
 # devices fileblock allocates via losetup are visible to mount(8). Without
@@ -13,7 +16,7 @@ nodes:
   - role: control-plane
     extraMounts:
       - hostPath: __E2E_BACKING_HOST__
-        containerPath: /var/lib/fileblock
+        containerPath: /srv/fileblock-source
       - hostPath: /dev
         containerPath: /dev
     kubeadmConfigPatches:
@@ -24,6 +27,6 @@ nodes:
   - role: worker
     extraMounts:
       - hostPath: __E2E_BACKING_HOST__
-        containerPath: /var/lib/fileblock
+        containerPath: /srv/fileblock-source
       - hostPath: /dev
         containerPath: /dev

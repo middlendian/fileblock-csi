@@ -5,7 +5,7 @@ metadata:
 provisioner: fileblock.csi
 parameters:
   backingStore.type: local
-  backingStore.local.path: /tmp/fileblock-e2e
+  backingStore.local.path: /srv/fileblock-source
 reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer

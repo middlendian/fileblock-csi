@@ -17,8 +17,8 @@ import (
 func TestTwoStores(t *testing.T) {
 	ns := makeNamespace(t)
 
-	applyYAML(t, scYAML("fileblock-store-a", "/tmp/fileblock-e2e/a"))
-	applyYAML(t, scYAML("fileblock-store-b", "/tmp/fileblock-e2e/b"))
+	applyYAML(t, scYAML("fileblock-store-a", "/srv/fileblock-source/a"))
+	applyYAML(t, scYAML("fileblock-store-b", "/srv/fileblock-source/b"))
 	t.Cleanup(func() {
 		_, _ = kubectlRaw("delete", "sc", "fileblock-store-a", "--ignore-not-found")
 		_, _ = kubectlRaw("delete", "sc", "fileblock-store-b", "--ignore-not-found")

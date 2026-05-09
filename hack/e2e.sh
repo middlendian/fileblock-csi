@@ -56,16 +56,17 @@ require go
 prepare_backing_local() {
   rm -rf "$WORK"
   mkdir -p "$BACKING_HOST"
-  # Create per-store subdirectories for TestTwoStores
-  mkdir -p "$WORK/a" "$WORK/b"
+  # Per-store subdirectories for TestTwoStores. These need to live under
+  # $BACKING_HOST because that's the host path the kind config mounts into
+  # each kind node at /srv/fileblock-source — and that's where the driver
+  # pods see them via the e2e overlay's host-source patches.
+  mkdir -p "$BACKING_HOST/a" "$BACKING_HOST/b"
 }
 
 prepare_backing_nfs() {
   require findmnt
   rm -rf "$WORK"
   mkdir -p "$NFS_EXPORT" "$BACKING_HOST"
-  # Create per-store subdirectories for TestTwoStores
-  mkdir -p "$WORK/a" "$WORK/b"
 
   if ! command -v exportfs >/dev/null; then
     log "installing nfs-kernel-server (one-shot)"
@@ -130,6 +131,12 @@ prepare_backing_nfs() {
   $SUDO mount -t nfs -o "vers=${NFS_VERSION},lock,hard" \
     127.0.0.1:"$NFS_EXPORT" "$BACKING_HOST"
   $SUDO chmod 0777 "$BACKING_HOST"
+
+  # Per-store subdirectories for TestTwoStores. After the NFS mount,
+  # these directories live on the NFS export and are visible inside kind
+  # nodes (via the runner -> kind -> pod hostPath chain) and to the
+  # driver pods via the e2e overlay's host-source patches.
+  mkdir -p "$BACKING_HOST/a" "$BACKING_HOST/b"
 
   if ! findmnt -no FSTYPE "$BACKING_HOST" | grep -q '^nfs'; then
     echo "expected $BACKING_HOST to be mounted as nfs, got: $(findmnt -no FSTYPE "$BACKING_HOST")" >&2

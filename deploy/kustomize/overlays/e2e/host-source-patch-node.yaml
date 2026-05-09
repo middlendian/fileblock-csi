@@ -11,9 +11,9 @@ spec:
         - name: fileblock-node
           volumeMounts:
             - name: host-source
-              mountPath: /tmp/fileblock-e2e
+              mountPath: /srv/fileblock-source
       volumes:
         - name: host-source
           hostPath:
-            path: /tmp/fileblock-e2e
+            path: /srv/fileblock-source
             type: DirectoryOrCreate
