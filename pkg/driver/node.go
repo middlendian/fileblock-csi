@@ -51,11 +51,11 @@ type NodeServer struct {
 }
 
 // NewNodeServer constructs a NodeServer. topologyKey/topologyValue may be
-// empty, in which case they default to TopologyKeyNode and nodeID — that is,
+// empty, in which case they default to topologyKeyNode and nodeID — that is,
 // the legacy per-node pin.
 func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *loop.Losetup, st *loop.State, log *slog.Logger, topologyKey, topologyValue string) *NodeServer {
 	if topologyKey == "" {
-		topologyKey = TopologyKeyNode
+		topologyKey = topologyKeyNode
 	}
 	if topologyValue == "" {
 		topologyValue = nodeID
@@ -105,7 +105,8 @@ func (n *NodeServer) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest)
 func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
 	stagePath := req.GetStagingTargetPath()
-	backing := req.GetVolumeContext()[ParamBackingStorePath]
+	// TODO(chunk4): replace with store.ConfigFromVolumeContext after node is refactored.
+	backing := req.GetVolumeContext()["backingStorePath"]
 	if volumeID == "" || stagePath == "" || backing == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id, staging_target_path, and volume_context.backingStorePath are required")
 	}

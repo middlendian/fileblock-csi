@@ -31,8 +31,8 @@ func TestNodeGetInfoDefaultTopology(t *testing.T) {
 		t.Fatalf("NodeId: got %q want node-a", resp.NodeId)
 	}
 	segs := resp.GetAccessibleTopology().GetSegments()
-	if len(segs) != 1 || segs[TopologyKeyNode] != "node-a" {
-		t.Fatalf("topology segments: got %v want {%s: node-a}", segs, TopologyKeyNode)
+	if len(segs) != 1 || segs[topologyKeyNode] != "node-a" {
+		t.Fatalf("topology segments: got %v want {%s: node-a}", segs, topologyKeyNode)
 	}
 }
 
@@ -106,7 +106,7 @@ func TestNodeStageBadCapability(t *testing.T) {
 	_, err := n.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
 		VolumeId:          "v",
 		StagingTargetPath: "/s",
-		VolumeContext:     map[string]string{ParamBackingStorePath: "/srv"},
+		VolumeContext:     map[string]string{"backingStorePath": "/srv"},
 		// no VolumeCapability
 	})
 	if status.Code(err) != codes.InvalidArgument {

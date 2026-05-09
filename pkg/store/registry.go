@@ -85,6 +85,18 @@ func (r *Registry) ConfigByStoreID(id string) (Config, bool) {
 	return cfg, ok
 }
 
+// MountedPaths returns the absolute paths of every store currently
+// mounted by this Registry. Order is unspecified.
+func (r *Registry) MountedPaths() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.mounted))
+	for _, p := range r.mounted {
+		out = append(out, p)
+	}
+	return out
+}
+
 func (r *Registry) lockStore(id string) *sync.Mutex {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -119,6 +119,31 @@ func TestRegistryConfigByStoreID(t *testing.T) {
 	}
 }
 
+func TestRegistryMountedPaths(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+
+	if paths := reg.MountedPaths(); len(paths) != 0 {
+		t.Fatalf("MountedPaths before any Get = %v, want empty", paths)
+	}
+
+	cfgA := Config{Type: TypeNFS, NFSServer: "s1", NFSPath: "/p"}
+	cfgB := Config{Type: TypeNFS, NFSServer: "s2", NFSPath: "/p"}
+	pA, _ := reg.Get(context.Background(), cfgA)
+	pB, _ := reg.Get(context.Background(), cfgB)
+
+	paths := reg.MountedPaths()
+	if len(paths) != 2 {
+		t.Fatalf("MountedPaths = %v, want 2 entries", paths)
+	}
+	got := map[string]bool{paths[0]: true, paths[1]: true}
+	if !got[pA] || !got[pB] {
+		t.Errorf("MountedPaths = %v, want {%q, %q}", paths, pA, pB)
+	}
+}
+
 func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
