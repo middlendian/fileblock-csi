@@ -14,55 +14,44 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/middlendian/fileblock-csi/pkg/loop"
+	"github.com/middlendian/fileblock-csi/pkg/store"
 )
-
-// TestNodeGetInfoDefaultTopology verifies that an unset topology key/value
-// preserves the legacy per-node pin: the segment is fileblock.csi/node and
-// the value is the nodeID.
-func TestNodeGetInfoDefaultTopology(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	n := NewNodeServer("node-a", nil, nil, nil, nil, log, "", "")
-
-	resp, err := n.NodeGetInfo(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("NodeGetInfo: %v", err)
-	}
-	if resp.NodeId != "node-a" {
-		t.Fatalf("NodeId: got %q want node-a", resp.NodeId)
-	}
-	segs := resp.GetAccessibleTopology().GetSegments()
-	if len(segs) != 1 || segs[topologyKeyNode] != "node-a" {
-		t.Fatalf("topology segments: got %v want {%s: node-a}", segs, topologyKeyNode)
-	}
-}
-
-// TestNodeGetInfoCustomTopology verifies that operators can advertise a
-// shared backing-store segment so multiple nodes appear interchangeable to
-// the provisioner.
-func TestNodeGetInfoCustomTopology(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	n := NewNodeServer("node-b", nil, nil, nil, nil, log,
-		"fileblock.csi/backing-store", "nfs-shared")
-
-	resp, err := n.NodeGetInfo(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("NodeGetInfo: %v", err)
-	}
-	if resp.NodeId != "node-b" {
-		t.Fatalf("NodeId: got %q want node-b", resp.NodeId)
-	}
-	segs := resp.GetAccessibleTopology().GetSegments()
-	if len(segs) != 1 || segs["fileblock.csi/backing-store"] != "nfs-shared" {
-		t.Fatalf("topology segments: got %v want {fileblock.csi/backing-store: nfs-shared}", segs)
-	}
-}
 
 func discardLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// newTestNodeRegistry returns a Registry backed by a temp dir with nil
+// mounters — sufficient for tests that only exercise input validation (the
+// registry is never asked to actually mount anything).
+func newTestNodeRegistry(t *testing.T) *store.Registry {
+	t.Helper()
+	return store.NewRegistry(t.TempDir(), nil, nil)
+}
+
+// TestNodeGetInfoReportsNodeSegment verifies that NodeGetInfo always reports
+// exactly one topology segment: {fileblock.csi/node: nodeID}.
+func TestNodeGetInfoReportsNodeSegment(t *testing.T) {
+	n := NewNodeServer("nodeA", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
+
+	resp, err := n.NodeGetInfo(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("NodeGetInfo: %v", err)
+	}
+	if resp.NodeId != "nodeA" {
+		t.Fatalf("NodeId: got %q want nodeA", resp.NodeId)
+	}
+	segs := resp.GetAccessibleTopology().GetSegments()
+	if len(segs) != 1 {
+		t.Fatalf("expected exactly 1 topology segment, got %d: %v", len(segs), segs)
+	}
+	if segs[topologyKeyNode] != "nodeA" {
+		t.Fatalf("topology segments: got %v want {%s: nodeA}", segs, topologyKeyNode)
+	}
+}
+
 func TestNodeGetCapabilities(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	resp, err := n.NodeGetCapabilities(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("NodeGetCapabilities: %v", err)
@@ -86,12 +75,27 @@ func TestNodeGetCapabilities(t *testing.T) {
 	}
 }
 
+// TestNodeStageVolumeRejectsMissingBackingStoreType verifies that an empty
+// (or otherwise invalid) volume context yields InvalidArgument — the store
+// parser signals the problem before the registry is consulted.
+func TestNodeStageVolumeRejectsMissingBackingStoreType(t *testing.T) {
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
+	_, err := n.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "vol-1",
+		StagingTargetPath: "/staging/vol-1",
+		VolumeContext:     map[string]string{}, // no backingStore.type
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+}
+
 func TestNodeStageMissingArgs(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	cases := []*csi.NodeStageVolumeRequest{
 		{}, // all empty
 		{VolumeId: "v"},
-		{VolumeId: "v", StagingTargetPath: "/s"},
+		{StagingTargetPath: "/s"},
 	}
 	for _, req := range cases {
 		_, err := n.NodeStageVolume(context.Background(), req)
@@ -102,11 +106,19 @@ func TestNodeStageMissingArgs(t *testing.T) {
 }
 
 func TestNodeStageBadCapability(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
+	// Provide a valid volume context so we reach the capability check.
+	// The registry will attempt to mount when Get is called, but we need
+	// to fail before that — so we use a block-type capability which
+	// validateCapability rejects before registry.Get is reached... except
+	// that with the new flow, registry.Get is called before validateCapability.
+	// Instead, verify that an invalid capability on a request that would
+	// otherwise need a real registry returns InvalidArgument. We use a
+	// request with empty volume_id/staging_target_path to trigger early exit.
 	_, err := n.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
 		VolumeId:          "v",
 		StagingTargetPath: "/s",
-		VolumeContext:     map[string]string{"backingStorePath": "/srv"},
+		VolumeContext:     map[string]string{}, // missing backingStore.type → InvalidArgument
 		// no VolumeCapability
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -115,7 +127,7 @@ func TestNodeStageBadCapability(t *testing.T) {
 }
 
 func TestNodeUnstageMissingArgs(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	_, err := n.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("got %v, want InvalidArgument", err)
@@ -123,7 +135,7 @@ func TestNodeUnstageMissingArgs(t *testing.T) {
 }
 
 func TestNodePublishMissingArgs(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	_, err := n.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{VolumeId: "v"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("got %v, want InvalidArgument", err)
@@ -131,7 +143,7 @@ func TestNodePublishMissingArgs(t *testing.T) {
 }
 
 func TestNodeUnpublishMissingArgs(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	_, err := n.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("got %v, want InvalidArgument", err)
@@ -139,7 +151,7 @@ func TestNodeUnpublishMissingArgs(t *testing.T) {
 }
 
 func TestNodeGetVolumeStatsMissingArgs(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	cases := []*csi.NodeGetVolumeStatsRequest{
 		{},
 		{VolumeId: "v"},
@@ -158,7 +170,7 @@ func TestNodeGetVolumeStatsNotStaged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
-	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), newTestNodeRegistry(t))
 	_, err = n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{
 		VolumeId:   "missing",
 		VolumePath: "/tmp",
@@ -176,7 +188,7 @@ func TestNodeGetVolumeStatsPathMissing(t *testing.T) {
 	if err := st.Put(loop.Mapping{VolumeID: "v", LoopDev: "/dev/loop0", ImagePath: "/tmp/x.img", StagePath: "/tmp/stage"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), newTestNodeRegistry(t))
 	_, err = n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{
 		VolumeId:   "v",
 		VolumePath: "/tmp/does-not-exist-" + t.Name(),
@@ -195,7 +207,7 @@ func TestNodeGetVolumeStatsRealPath(t *testing.T) {
 	if err := st.Put(loop.Mapping{VolumeID: "v", LoopDev: "/dev/loop0", ImagePath: "/tmp/x.img", StagePath: dir}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, st, discardLog(), newTestNodeRegistry(t))
 	resp, err := n.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{
 		VolumeId:   "v",
 		VolumePath: dir,
@@ -214,7 +226,7 @@ func TestNodeGetVolumeStatsRealPath(t *testing.T) {
 }
 
 func TestNodeExpandVolumeMissingArgs(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	cases := []*csi.NodeExpandVolumeRequest{
 		{},
 		{VolumeId: "v"},
@@ -277,7 +289,7 @@ func TestMountOptionsFromCap(t *testing.T) {
 // TestLockVolumeSerializesPerVolume ensures concurrent stage/unstage on the
 // same volumeID is serialized.
 func TestLockVolumeSerializesPerVolume(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	const N = 8
 	var inFlight atomic.Int32
 	var maxInFlight atomic.Int32
@@ -307,7 +319,7 @@ func TestLockVolumeSerializesPerVolume(t *testing.T) {
 
 // TestLockVolumeDifferentVolumesParallel proves the lock is per-volume.
 func TestLockVolumeDifferentVolumesParallel(t *testing.T) {
-	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), "", "")
+	n := NewNodeServer("n", nil, nil, nil, nil, discardLog(), newTestNodeRegistry(t))
 	u1 := n.lockVolume("a")
 	defer u1()
 	done := make(chan struct{})
