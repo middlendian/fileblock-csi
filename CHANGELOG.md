@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Controller pod now runs `privileged: true` (in addition to its
+  pre-existing `SYS_ADMIN` capability). Without this, `mount.nfs`
+  inside the controller hangs and is killed by the driver's exec
+  timeout when the SC uses `nfsvers=3`: NFSv3's lock manager binds a
+  privileged source port, which the LSM rejects under
+  SYS_ADMIN-without-privileged on most production hosts. Real
+  symptom in v0.3.0 was a stuck `Pending` PVC with controller logs
+  showing `mount.nfs ...: exit -1: signal: killed`. The change
+  matches csi-driver-nfs's controller pod and our own node
+  DaemonSet's pre-existing posture.
+
+### Security
+
+- Both controller and node containers now also `drop: [ALL]` caps,
+  so `SYS_ADMIN` is the only capability either retains. Mirrors
+  csi-driver-nfs.
+
+### Internal
+
+- `deploy/manifests_test.go` asserts both base manifests carry the
+  canonical `privileged: true` + `add: [SYS_ADMIN]` + `drop: [ALL]`
+  block in order, so a future edit can't regress it silently.
+
 ## [0.3.0] - 2026-05-09
 
 ### Breaking
@@ -20,16 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Binary flags removed: `--backing-store`, `--topology-key`,
   `--topology-value`. Both binaries now accept `--stores-root`
   (default `/var/lib/fileblock/stores`).
-- Both controller and node pods run `privileged: true` with
-  `capabilities: { add: [SYS_ADMIN], drop: [ALL] }` (set by base
-  manifests). Mirrors csi-driver-nfs's posture. `privileged: true`
-  is necessary because NFSv3's lock manager binds a privileged
-  source port; SYS_ADMIN alone is rejected by the LSM in most
-  environments when nfsvers=3 is used. `drop: [ALL]` tightens the
-  posture: the explicit add-back of `SYS_ADMIN` is the only
-  capability either container retains. Manifest tests under
-  `deploy/manifests_test.go` assert this posture so a future edit
-  can't regress it silently.
+- Controller pod requires `SYS_ADMIN` capability (added by base
+  manifests). `privileged: true` is a tested fallback if `SYS_ADMIN`
+  alone is rejected by the host's LSM. (Operators using NFSv3 need
+  this fallback; see v0.3.1 Fixed where `privileged: true` becomes
+  the default.)
 - Container image now includes `nfs-common` for in-driver NFS
   mounting (NFSv3 and NFSv4 both supported via the generic
   `mount.nfs` helper).
