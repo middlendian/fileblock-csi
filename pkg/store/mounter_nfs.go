@@ -7,10 +7,18 @@ import (
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 )
 
-// NFSMounter shells out to mount.nfs (the generic helper from
-// nfs-common). The same binary handles both NFSv3 and NFSv4 — the
-// version is selected via the nfsvers= option, or auto-negotiated when
-// omitted.
+// NFSMounter shells out to mount(8) with `-t nfs`, which dispatches to
+// the generic mount.nfs helper from nfs-common. Both NFSv3 and NFSv4
+// are supported — the version is selected via the nfsvers= option, or
+// auto-negotiated when omitted.
+//
+// Why mount(8) and not mount.nfs(8) directly: csi-driver-nfs goes
+// through mount(8) (via k8s.io/mount-utils), and an earlier draft of
+// this driver invoked mount.nfs directly — which on debian:trixie-slim
+// surfaced "Protocol not supported" failures that mount(8) does not
+// reproduce. mount(8) does additional argument preprocessing before
+// dispatching to the helper that, on this image at least, the helper
+// requires to behave correctly. Match csi-driver-nfs's pattern.
 type NFSMounter struct {
 	exec fbexec.Runner
 }
@@ -30,13 +38,13 @@ func (m *NFSMounter) Mount(ctx context.Context, target string, cfg Config) error
 		return fmt.Errorf("NFSMounter: cfg.NFSPath is empty")
 	}
 	source := cfg.NFSServer + ":" + cfg.NFSPath
-	args := make([]string, 0, 4)
+	args := []string{"-t", "nfs"}
 	if cfg.NFSMountOptions != "" {
 		args = append(args, "-o", cfg.NFSMountOptions)
 	}
 	args = append(args, source, target)
-	if _, err := m.exec.Run(ctx, "mount.nfs", args...); err != nil {
-		return fmt.Errorf("mount.nfs %s -> %s: %w", source, target, err)
+	if _, err := m.exec.Run(ctx, "mount", args...); err != nil {
+		return fmt.Errorf("mount -t nfs %s -> %s: %w", source, target, err)
 	}
 	return nil
 }

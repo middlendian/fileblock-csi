@@ -48,6 +48,11 @@ spec:
             - --feature-gates=Topology=true
             - --leader-election
             - --leader-election-namespace=fileblock-system
+            # NFSv3 mount via mount.nfs userland can exceed the
+            # default 15s gRPC timeout on first connect (portmapper +
+            # mountd RPC roundtrips). Match csi-driver-nfs's posture
+            # so CreateVolume doesn't get killed mid-mount.
+            - --timeout=1200s
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -57,6 +62,8 @@ spec:
             - --csi-address=/csi/csi.sock
             - --leader-election
             - --leader-election-namespace=fileblock-system
+            # Same rationale as csi-provisioner above.
+            - --timeout=1200s
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

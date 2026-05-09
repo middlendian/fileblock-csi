@@ -7,6 +7,15 @@ parameters:
   backingStore.type: nfs
   backingStore.nfs.server: nfs.example.internal
   backingStore.nfs.path: /exports/fileblock
+  # NFSv4.1 is recommended: no NLM/statd/portmapper to negotiate, no
+  # privileged-port binds, mount succeeds immediately.
+  #
+  # For NFSv3, add `nolock` — fileblock's cross-node mutual exclusion
+  # is CSI's SINGLE_NODE_WRITER serialization, not NFS-level file
+  # locks, so the client-side lock manager is not needed and will
+  # fail mount.nfs with "rpc.statd is not running but is required for
+  # remote locking" if not skipped. v3 example:
+  #   backingStore.nfs.mountOptions: "nfsvers=3,hard,timeo=600,nolock"
   backingStore.nfs.mountOptions: "nfsvers=4.1,hard,timeo=600"
 reclaimPolicy: Delete
 allowVolumeExpansion: true

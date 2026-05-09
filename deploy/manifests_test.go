@@ -28,6 +28,37 @@ func TestNodeSecurityContext(t *testing.T) {
 	requireFileblockSecurityContext(t, "kustomize/base/node-daemonset.yaml")
 }
 
+// TestSidecarTimeouts asserts the csi-provisioner and csi-resizer
+// sidecars on the controller pod set --timeout=1200s. This was added
+// after a real regression: the default 15s gRPC timeout on the
+// provisioner sidecar killed mount.nfs mid-call on slow first-connect
+// NFSv3 mounts, surfacing as 'exit -1: signal: killed' in CreateVolume
+// errors. csi-driver-nfs uses the same 1200s timeout for the same
+// reason.
+func TestSidecarTimeouts(t *testing.T) {
+	data, err := os.ReadFile("kustomize/base/controller-deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, sidecar := range []string{"csi-provisioner", "csi-resizer"} {
+		idx := strings.Index(text, "name: "+sidecar)
+		if idx == -1 {
+			t.Fatalf("controller-deployment.yaml: missing sidecar %q", sidecar)
+		}
+		// Search forward from the sidecar's name to its args block;
+		// the next container's `name:` (or end of file) bounds it.
+		end := strings.Index(text[idx+1:], "- name:")
+		if end == -1 {
+			end = len(text) - idx - 1
+		}
+		block := text[idx : idx+1+end]
+		if !strings.Contains(block, "--timeout=1200s") {
+			t.Errorf("controller-deployment.yaml: %s sidecar must include --timeout=1200s arg", sidecar)
+		}
+	}
+}
+
 // requireFileblockSecurityContext reads a base manifest and asserts the
 // canonical security-context block — privileged, SYS_ADMIN, drop ALL —
 // appears in order. The match is substring-based rather than

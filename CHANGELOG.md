@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `csi-provisioner` and `csi-resizer` sidecars now run with
+  `--timeout=1200s`. Default was 15s. NFSv3 `mount.nfs` first-connect
+  takes longer than that (portmapper + mountd RPC roundtrips); the
+  provisioner cancelled the gRPC context, the driver killed
+  `mount.nfs`, and CreateVolume returned `exit -1: signal: killed`.
+  Matches csi-driver-nfs.
+- `pkg/store.NFSMounter` now invokes `mount -t nfs` (the generic
+  mount(8) command, dispatching to mount.nfs internally) instead of
+  calling `mount.nfs` directly. csi-driver-nfs goes through mount(8)
+  via `k8s.io/mount-utils`, and the previous direct-`mount.nfs` path
+  surfaced "Protocol not supported" failures on debian:trixie-slim
+  that mount(8) does not reproduce. mount(8) does additional argument
+  preprocessing before dispatching to the helper that, on this image,
+  the helper requires.
+
+### Documentation
+
+- README now spells out the NFSv3 `nolock` requirement: fileblock
+  doesn't depend on NFS-level file locks (CSI's `SINGLE_NODE_WRITER`
+  + the loop device's exclusive open are what enforce cross-node
+  mutual exclusion), so the client-side `rpc.statd` daemon — which
+  the driver pod doesn't run — isn't needed. Without `nolock`,
+  `mount.nfs` refuses with "rpc.statd is not running but is required
+  for remote locking". README also recommends NFSv4 where the
+  server speaks it: no NLM/statd/portmapper to negotiate.
+- `deploy/kustomize/overlays/example-nfs-shared/storageclass.yaml`
+  documents the v3-vs-v4 mountOptions choice inline.
+
+### Internal
+
+- `deploy/manifests_test.go` adds `TestSidecarTimeouts` asserting
+  both sidecars carry `--timeout=1200s`, so a future edit can't
+  regress it silently.
+
 ## [0.3.1] - 2026-05-09
 
 ### Fixed
