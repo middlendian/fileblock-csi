@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `csi-provisioner` and `csi-resizer` sidecars now run with
+  `--timeout=1200s`. Default was 15s. NFSv3 `mount.nfs` first-connect
+  takes longer than that (portmapper + mountd RPC roundtrips); the
+  provisioner cancelled the gRPC context, the driver killed
+  `mount.nfs`, and CreateVolume returned `exit -1: signal: killed`.
+  Matches csi-driver-nfs.
+
+### Internal
+
+- `deploy/manifests_test.go` adds `TestSidecarTimeouts` asserting
+  both sidecars carry `--timeout=1200s`, so a future edit can't
+  regress it silently.
+
 ## [0.3.1] - 2026-05-09
 
 ### Fixed
