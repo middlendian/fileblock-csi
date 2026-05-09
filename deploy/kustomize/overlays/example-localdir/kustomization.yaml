@@ -1,17 +1,32 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Example overlay: backing store is a plain host-local directory at
-# /var/lib/fileblock on every node — exactly what the base ships with.
-# To use a different path, copy this overlay, change the StorageClass
-# parameter and the hostPath in a strategic-merge patch on the controller
-# Deployment and node DaemonSet to point at your own NFS / SMB / FUSE mount,
-# and update --backing-store= in the container args to match.
+# Single-node, host-directory backing store. Useful for kind-based tests
+# and trivial dev setups. Replace `backingStore.local.path` with the host
+# directory the driver should manage; it must exist on every node where
+# the DaemonSet runs.
+#
+# Local-type also requires that the host directory be visible inside the
+# driver pods' mount namespaces — the LocalMounter bind-mounts it into
+# /var/lib/fileblock/stores/<id>/. The base manifests do not mount any
+# host paths beyond /var/lib/kubelet and /dev. This overlay ships a
+# minimal patch (host-source-patch.yaml) that adds a hostPath volume
+# matching `backingStore.local.path`, mounted at the same path inside
+# the controller and node pods. NFS-type SCs do NOT need such a patch —
+# they're zero-overlay by design.
 
 namespace: fileblock-system
 
 resources:
   - ../../base
+  - storageclass.yaml
 
-# Image tag is inherited from base/kustomization.yaml — `latest` on the
-# `main` branch, `vX.Y.Z` on a release tag.
+patches:
+  - path: host-source-patch-controller.yaml
+    target:
+      kind: Deployment
+      name: fileblock-controller
+  - path: host-source-patch-node.yaml
+    target:
+      kind: DaemonSet
+      name: fileblock-node

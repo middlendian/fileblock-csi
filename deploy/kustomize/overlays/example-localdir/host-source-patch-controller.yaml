@@ -1,0 +1,19 @@
+# Surfaces /var/lib/fileblock-localdir from the host into the controller
+# pod so the LocalMounter's bind-mount target has a real source.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fileblock-controller
+spec:
+  template:
+    spec:
+      containers:
+        - name: fileblock-controller
+          volumeMounts:
+            - name: host-source
+              mountPath: /var/lib/fileblock-localdir
+      volumes:
+        - name: host-source
+          hostPath:
+            path: /var/lib/fileblock-localdir
+            type: DirectoryOrCreate
