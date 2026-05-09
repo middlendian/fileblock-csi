@@ -12,7 +12,8 @@ import (
 
 	"github.com/middlendian/fileblock-csi/pkg/driver"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
-	"github.com/middlendian/fileblock-csi/pkg/image"
+	"github.com/middlendian/fileblock-csi/pkg/mount"
+	"github.com/middlendian/fileblock-csi/pkg/store"
 )
 
 func main() {
@@ -24,24 +25,19 @@ func main() {
 
 	log := newLogger(*logLevel)
 
-	if *backingStore == "" {
-		log.Error("--backing-store is required")
-		os.Exit(2)
-	}
-	if err := os.MkdirAll(*backingStore, 0o755); err != nil {
-		log.Error("create backing store", "err", err)
-		os.Exit(2)
-	}
-
 	exec := fbexec.New(0)
-	images, err := image.New(*backingStore, exec)
-	if err != nil {
-		log.Error("open backing store", "err", err)
+	mnt := mount.New(exec)
+	storesRoot := "/var/lib/fileblock/stores"
+	if err := os.MkdirAll(storesRoot, 0o755); err != nil {
+		log.Error("create stores root", "err", err)
 		os.Exit(2)
 	}
+	registry := store.NewRegistry(storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
+	_ = backingStore // unused until Chunk 5 removes the flag
+	_ = topologyKey  // unused until Chunk 5 removes the flag
 
 	identity := driver.NewIdentityServer(true)
-	controller := driver.NewControllerServer(images, *backingStore, *topologyKey)
+	controller := driver.NewControllerServer(registry, exec)
 	srv := driver.NewServer(*endpoint, log, identity, controller, nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
