@@ -57,6 +57,8 @@ func (c Config) Canonical() []byte {
 }
 
 // ID is a deterministic 12-char hex truncation of sha256(Canonical()).
+// Used to name the per-store mount directory and as a label in volume
+// context for diagnostics.
 func (c Config) ID() string {
 	sum := sha256.Sum256(c.Canonical())
 	return hex.EncodeToString(sum[:])[:12]

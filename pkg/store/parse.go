@@ -12,33 +12,6 @@ const (
 	VolumeContextStoreID = "storeID"
 )
 
-// ToVolumeContext serializes a Config into the map the controller
-// returns from CreateVolume and the node receives in NodeStageVolume.
-// It also embeds the storeID for diagnostics.
-func (c Config) ToVolumeContext() map[string]string {
-	vc := map[string]string{
-		ParamType:            string(c.Type),
-		VolumeContextStoreID: c.ID(),
-	}
-	switch c.Type {
-	case TypeNFS:
-		vc[ParamNFSServer] = c.NFSServer
-		vc[ParamNFSPath] = c.NFSPath
-		if c.NFSMountOptions != "" {
-			vc[ParamNFSMountOptions] = c.NFSMountOptions
-		}
-	case TypeLocal:
-		vc[ParamLocalPath] = c.LocalPath
-	}
-	return vc
-}
-
-// ConfigFromVolumeContext is a thin wrapper that re-parses the same key
-// set ConfigFromParams expects.
-func ConfigFromVolumeContext(vc map[string]string) (Config, error) {
-	return ConfigFromParams(vc)
-}
-
 // ConfigFromParams parses SC.parameters into a Config. Missing or
 // malformed required keys produce a non-nil error suitable for surfacing
 // as gRPC InvalidArgument by the caller.
@@ -70,4 +43,32 @@ func ConfigFromParams(params map[string]string) (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("%s=%q not supported (must be nfs or local)", ParamType, t)
 	}
+}
+
+// ToVolumeContext serializes a Config into the map the controller
+// returns from CreateVolume and the node receives in NodeStageVolume.
+// It also embeds the storeID for diagnostics.
+func (c Config) ToVolumeContext() map[string]string {
+	vc := map[string]string{
+		ParamType:            string(c.Type),
+		VolumeContextStoreID: c.ID(),
+	}
+	switch c.Type {
+	case TypeNFS:
+		vc[ParamNFSServer] = c.NFSServer
+		vc[ParamNFSPath] = c.NFSPath
+		if c.NFSMountOptions != "" {
+			vc[ParamNFSMountOptions] = c.NFSMountOptions
+		}
+	case TypeLocal:
+		vc[ParamLocalPath] = c.LocalPath
+	}
+	return vc
+}
+
+// ConfigFromVolumeContext is a thin wrapper that re-parses the same key
+// set ConfigFromParams expects. The two APIs are kept distinct so callers
+// signal intent clearly; the body is shared.
+func ConfigFromVolumeContext(vc map[string]string) (Config, error) {
+	return ConfigFromParams(vc)
 }
