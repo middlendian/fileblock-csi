@@ -5,8 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 )
+
+// storeIDPattern matches a 12-char lowercase hex sha256 prefix — the only
+// shape Config.ID() ever produces. AdoptExisting uses this to skip
+// directories that happen to live under r.root but were not created by
+// the Registry (e.g. an operator's local-backing source dir if they
+// chose to put it under stores-root).
+var storeIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 // Registry mounts each unique store config once per process and hands
 // out the resulting paths. Concurrency: per-storeID Mutex prevents two
@@ -126,6 +134,12 @@ func (r *Registry) AdoptExisting() error {
 			continue
 		}
 		id := e.Name()
+		if !storeIDPattern.MatchString(id) {
+			// Not a Registry-managed dir; skip. This guards against
+			// accidental adoption of bind-mount source dirs the
+			// operator may have placed under stores-root.
+			continue
+		}
 		r.mounted[id] = filepath.Join(r.root, id)
 	}
 	return nil

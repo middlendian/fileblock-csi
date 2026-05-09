@@ -173,6 +173,41 @@ func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
 	}
 }
 
+// TestRegistryAdoptExistingSkipsNonStoreIDDirs guards against false
+// adoption when the operator chooses a local-backing source path that
+// happens to live under stores-root. AdoptExisting must only adopt
+// directories whose name matches the storeID pattern (12 lowercase hex
+// chars).
+func TestRegistryAdoptExistingSkipsNonStoreIDDirs(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{
+		"local",                // bare word
+		"FOO",                  // uppercase
+		"abc123",               // too short
+		"abc123def4567",        // too long
+		"abc123def45z",         // not hex
+		"abcdefabcdef.bak",     // extra chars
+		"abcdefabcdef-suffix",  // hyphen
+	} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// And one valid storeID-looking dir to make sure adoption still works.
+	if err := os.MkdirAll(filepath.Join(root, "0123456789ab"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := exectest.New()
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	if err := reg.AdoptExisting(); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	got := reg.MountedPaths()
+	if len(got) != 1 || got[0] != filepath.Join(root, "0123456789ab") {
+		t.Errorf("MountedPaths = %v; want exactly the one storeID-shaped dir", got)
+	}
+}
+
 func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
