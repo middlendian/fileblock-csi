@@ -29,6 +29,15 @@ KEEP="${KEEP:-0}"
 BACKING_KIND="${BACKING_KIND:-local}"
 NFS_VERSION="${NFS_VERSION:-4.1}"
 export NFS_VERSION
+# NFS_SERVER: the address of the NFS server as seen from inside a kind node.
+# Kind nodes run as Docker containers, so 127.0.0.1 (the host loopback) is not
+# reachable from inside them. Default to the Docker bridge gateway, which is
+# the host from the container's perspective. Falls back to host.docker.internal
+# for environments (e.g. Docker Desktop on macOS) where the bridge may not exist.
+if [ -z "${NFS_SERVER:-}" ]; then
+  NFS_SERVER=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "host.docker.internal")
+fi
+export NFS_SERVER
 SUDO="${SUDO:-sudo}"
 
 BACKING_HOST="$WORK/backing"
