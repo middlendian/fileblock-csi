@@ -132,6 +132,14 @@ files, mounted once per process. The `reclaimPolicy` lives on the SC
 itself (Kubernetes-native), so the same pool can serve PVs with different
 delete/retain semantics.
 
+`canonicalize(Config)` normalizes mount options before hashing so that
+two SCs that differ only in cosmetic option-string formatting still
+share a `storeID`. Specifically: split `mountOptions` on commas, drop
+empties, sort lexicographically, join. So
+`"nfsvers=4.1,hard,timeo=600"` and `"hard,nfsvers=4.1,timeo=600"`
+canonicalize to the same byte string. Type and other primitive fields
+serialize as-is.
+
 ## Architecture
 
 ### Per-store mount cache
@@ -221,6 +229,18 @@ at registration time. For `nfs`-backed PVs, the controller leaves
 universally schedulable. For `local`-backed PVs, the controller echoes
 the provisioner's preferred segment exactly as today.
 
+**`--strict-topology` removed from external-provisioner.** The
+controller sidecar today sets `--strict-topology`
+(`controller-deployment.yaml:38`). Combined with empty
+`AccessibleTopology` for NFS, this would cause the provisioner to
+reject the volume — the strict mode requires the volume's topology to
+match the selected node's segments exactly, and "no segments" doesn't
+match. Drop `--strict-topology` from the provisioner args. Local-pin
+behavior still works: the provisioner falls back to its default
+non-strict topology mode, which honors the preferred segment we echo
+without requiring an exact match. This matches the configuration
+shipped by `csi-driver-nfs`.
+
 ## Components and package layout
 
 A new package owns the "given an SC config, produce a mounted directory"
@@ -280,13 +300,31 @@ Public surface:
 
 ### Existing: `pkg/image`, `pkg/loop`, `pkg/mount`
 
-Unchanged.
+`pkg/image` and `pkg/mount` are unchanged.
 
 - `image.New(path, exec)` is called per-store with the per-store mounted
   path. Same code, different argument value per call.
-- `loop` keys off `volumeID` and stores the absolute `ImagePath` — works
-  fine when paths span multiple stores.
 - `pkg/mount` is unchanged.
+
+`pkg/loop` requires one constructor-argument change:
+
+- `Reconciler.backingStorePath` (today a single per-binary store path,
+  used by `Reconcile` to decide which orphan loops are fileblock's to
+  detach via a `strings.HasPrefix(back, cleanRoot+"/")` check) is now
+  set to the **parent stores directory**
+  `/var/lib/fileblock/stores`. Every store mounts at
+  `/var/lib/fileblock/stores/<storeID>/`, so any loop whose back-file
+  is under that tree is ours regardless of which `storeID` it belongs
+  to. The reconcile pass then DTRT across all live stores: drop stale
+  state entries, detach orphan loops anywhere under
+  `/var/lib/fileblock/stores/`. No code change inside `pkg/loop` —
+  only the value the node binary passes at startup.
+- `loop`'s state file (`Mapping{VolumeID, LoopDev, ImagePath,
+  StagePath}`) carries the absolute `.img` path, which already spans
+  stores correctly. v0.2.0 entries deserialize into v0.3.0 `Mapping`s
+  unchanged; the reconciler will simply find them stale (no live loop
+  matches) on first start under v0.3.0 and drop them, which is the
+  desired migration behavior.
 
 ### Reconcile on plugin restart
 
@@ -340,6 +378,50 @@ correct under unexpected restarts.
 | `local`-type, `path` doesn't exist | `Internal` |
 | Mount target already exists with wrong source | `Internal`; logged; manual recovery |
 | Two simultaneous CreateVolumes for same `storeID` | serialized by per-store mutex; second sees `mounted=true` |
+
+### Operational concerns
+
+**Asymmetric mount failure (controller succeeds, node fails).** The
+controller and node mount the same `server:path` independently inside
+their own pods. There is no shared "is this store reachable
+cluster-wide?" probe. If `CreateVolume` succeeds (controller mounted)
+but `NodeStageVolume` fails (node can't reach the server, e.g.
+NetworkPolicy blocks the path or DNS resolves differently in the
+DaemonSet pod's network namespace), the PV exists with an `.img` but
+the Pod stays in `ContainerCreating` indefinitely while the kubelet
+retries Stage with exponential backoff. This failure mode is new in
+v0.3.0 — today the kubelet pre-mounts the hostPath, so connectivity
+problems surface at pod-scheduling time. Operator runbook:
+
+```
+$ kubectl describe pod <stuck-pod>           # see Stage error
+$ kubectl logs -n fileblock-system fileblock-node-<x>
+                                             # find the mount.nfs4 stderr
+$ # fix DNS / firewall / NFS export ACL on the failing node
+```
+
+No driver-side back-pressure on `CreateVolume` is added. PV cleanup
+on permanent failure is the operator's call: `kubectl delete pvc`
+honors the SC's `reclaimPolicy`.
+
+**NFS server flap.** Sticky-per-process mounts mean that if the NFS
+server goes away while the driver pod is up, the existing mount may
+hang on I/O depending on `hard` vs `soft` mount options. Recommend
+operators set `nfs.mountOptions: "hard,timeo=600"` (or similar) so
+recovery on server-return is automatic; the spec's example SC reflects
+this. A truly dead server requires a driver-pod restart to drop the
+hung mount; this is the same trade-off `csi-driver-nfs` accepts.
+
+**Privilege verification.** The spec advertises `SYS_ADMIN`-only for
+the controller. Verify on a kind cluster *and* on the production k0s
+cluster during step 6 (deploy/kustomize/base) of the implementation
+order that `SYS_ADMIN` without `privileged: true` is sufficient for
+`mount.nfs4` and the bind-mount used by `type: local`. Some kernels,
+AppArmor profiles, or SELinux contexts deny mount syscalls from a
+non-`privileged` container regardless of caps. If verification fails,
+escalate the controller to `privileged: true` — same blast radius as
+the node container today, and the spec accepts this fallback. This
+verification is a required implementation step, not an open question.
 
 ## Deploy / kustomize impact
 
@@ -417,7 +499,12 @@ overrides; what remains is k0s kubelet-root and StorageClass
   the per-node topology pin still works.
 - **e2e nfs, `make e2e-nfs`**: SC switches to `type: nfs`. Verifies
   driver-mounted NFS, exec-bit, chmod, and flock through the loop +
-  ext4 path. This is the headline test for zero-patch operation.
+  ext4 path. This is the headline test for zero-patch operation. The
+  three load-bearing assertions — exec bit survives, chmod is honored,
+  flock works — must run against the **driver-mounted** store
+  specifically, not against any NFS-backed PV. Easy to regress if
+  `mount.nfs4 -o ...` ends up with different default options than the
+  kubelet's in-tree NFS mount; the test should fail loudly if so.
 - **New e2e: "two stores"**: same NFS server, two paths, two SCs. PVC
   from each. Verify both Pods come up and `.img` files land in the
   correct pools (`/var/lib/fileblock/stores/<idA>/` vs `<idB>/`).
@@ -436,6 +523,13 @@ Runbook:
    disk; with `Delete` they are removed.
 3. Apply v0.3.0 manifests.
 4. Apply new StorageClasses with `backingStore.type` etc.
+   **`backingStore.nfs.path` is the NFS server's export path**, not
+   the in-pod mount path that v0.2.0 used (`--backing-store`,
+   `volumes[backing-store].mountPath`). Read it off your old
+   `volumes[backing-store].nfs.path` (the source side of the volume),
+   not off the `volumeMounts` entry. Easy to get wrong on first
+   migration; concretely, the homelab consumer's value is
+   `/var/nfs/shared/fileblock`, not `/var/lib/fileblock`.
 5. Re-create PVCs. New PVs adopt existing `.img` files at the same
    backing path (`image.Create` is idempotent: same `volumeID` + same
    on-disk size = adopt).
@@ -476,13 +570,14 @@ The CHANGELOG entry under "Breaking" calls out:
 
 ## Open questions for implementation
 
-None blocking. Two items the implementer should verify in code:
+None blocking. One item the implementer should verify in code:
 
 - Confirm `mount.nfs4 -o ...` is the right invocation under
   `nfs-common` on `debian:trixie-slim`. Alternative: call `mount(2)`
   directly with `type="nfs4"` for v4-only (no userland helper needed),
   fall back to `mount.nfs` for v3. Stay with `mount.nfs4` as the
   baseline; revisit if it pulls in unexpected RPC daemons.
-- Confirm `local`-type bind-mount works without `SYS_ADMIN` on the
-  controller pod, or whether the bind-mount also needs the cap. Both
-  containers will end up with the same cap set in practice.
+
+(The controller-`SYS_ADMIN`-sufficiency question that was here
+previously has been promoted to a required verification step under
+"Operational concerns".)
