@@ -48,45 +48,75 @@ metadata. Nothing else lives on the backing store.
   `e2fsprogs` (`mkfs.ext4`, `e2fsck`, `resize2fs`).
 - The `loop` kernel module loaded. On Raspberry Pi / small ARM nodes you
   may want `modprobe loop max_loop=64` to expand the default 8-loop pool.
-- A directory readable + writable from every node at the same path
-  (`backingStorePath`). Common choices:
-  - an NFS share mounted at `/mnt/nfs` on every node,
-  - an SMB share,
-  - a FUSE-backed mount,
-  - or a plain local directory if you only have one node.
+- For NFS backing stores: `nfs-common` on each node (the driver image
+  includes it). For local backing stores: no extra dependencies.
 
 ## Quickstart
 
-1. **Install the driver**
-
-   Pin to a release:
+1. **Apply the base manifests** (driver, RBAC, CSIDriver):
 
    ```sh
-   kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/overlays/example-localdir?ref=v0.1.0'
+   kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=v0.3.0'
    ```
 
    Or follow `main`:
 
    ```sh
-   kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/overlays/example-localdir?ref=main'
+   kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=main'
    ```
 
    The base kustomization sets the image tag from the ref — `vX.Y.Z` on a
-   release tag, `latest` on `main` — so the same URL with a different
-   `?ref=` selects which version you install.
+   release tag, `latest` on `main`.
 
-   The example overlay uses `/var/lib/fileblock` on every node. To point at
-   your own NFS / SMB / FUSE mount, copy the overlay and patch
-   `backingStorePath` in the StorageClass plus the `hostPath` on the
-   controller Deployment and node DaemonSet.
+2. **Create a StorageClass** pointing at your backing store:
 
-2. **Create a volume**
+   ```yaml
+   # NFS-backed example:
+   apiVersion: storage.k8s.io/v1
+   kind: StorageClass
+   metadata:
+     name: fileblock
+   provisioner: fileblock.csi
+   parameters:
+     backingStore.type: nfs
+     backingStore.nfs.server: nfs.example.internal
+     backingStore.nfs.path: /exports/fileblock
+     backingStore.nfs.mountOptions: "nfsvers=4.1,hard,timeo=600"
+   reclaimPolicy: Delete
+   allowVolumeExpansion: true
+   volumeBindingMode: WaitForFirstConsumer
+   ```
+
+   For a local directory (single-node or testing):
+
+   ```yaml
+   apiVersion: storage.k8s.io/v1
+   kind: StorageClass
+   metadata:
+     name: fileblock
+   provisioner: fileblock.csi
+   parameters:
+     backingStore.type: local
+     backingStore.local.path: /var/lib/fileblock
+   reclaimPolicy: Delete
+   allowVolumeExpansion: true
+   volumeBindingMode: WaitForFirstConsumer
+   ```
+
+   Both NFSv3 and NFSv4 are supported. Use `nfsvers=3` in `mountOptions`
+   for v3 servers; `nfsvers=4.1` (or omit) for v4.
+
+   Pre-built example overlays live at:
+   - `deploy/kustomize/overlays/example-localdir/`
+   - `deploy/kustomize/overlays/example-nfs-shared/`
+
+3. **Create a volume**
 
    ```sh
    kubectl apply -f examples/pvc.yaml -f examples/pod.yaml
    ```
 
-3. **Verify**
+4. **Verify**
 
    ```sh
    kubectl exec fileblock-demo -- sh -c 'stat -f -c %T /data; ls -l /data/hello.sh'
@@ -101,50 +131,27 @@ metadata. Nothing else lives on the backing store.
 
 `StorageClass` parameters:
 
-| Key                | Required | Notes                                                        |
-|--------------------|----------|--------------------------------------------------------------|
-| `backingStorePath` | yes      | Directory the controller and every node can read & write.    |
+| Key                           | Required          | Notes                                                         |
+|-------------------------------|-------------------|---------------------------------------------------------------|
+| `backingStore.type`           | yes               | `nfs` or `local`                                              |
+| `backingStore.nfs.server`     | when type=nfs     | NFS server hostname or IP                                     |
+| `backingStore.nfs.path`       | when type=nfs     | Exported path on the server                                   |
+| `backingStore.nfs.mountOptions` | no (type=nfs)  | Mount options string, e.g. `"nfsvers=4.1,hard,timeo=600"`    |
+| `backingStore.local.path`     | when type=local   | Absolute path on every node that can read & write the store   |
+
+Multiple StorageClasses with distinct backing stores can coexist in a
+single driver install — no manifest forking is required.
 
 Other knobs:
 
-- `volumeBindingMode: WaitForFirstConsumer` is **required** — fileblock pins
-  each PV to a topology segment at provisioning time, so the scheduler must
-  place the pod before the volume is provisioned. By default the segment is
-  the node ID, so the PV is pinned to that one node. See
-  [Sharing a backing store across nodes](#sharing-a-backing-store-across-nodes)
-  to make a PV usable from any node that mounts the same shared store.
-- `reclaimPolicy: Delete` removes the `.img` and sidecar when the PVC is
-  deleted. `Retain` leaves them in place.
-- `allowVolumeExpansion: false` in v1; offline expand is supported via
-  `ControllerExpandVolume` but the operator must restart the consuming pod
-  for the resize to land.
-- `fsType` is pinned to `ext4` in v1.
-
-## Sharing a backing store across nodes
-
-When the backing store is genuinely shared (one NFS export mounted at the
-same path on every node, an SMB share, a FUSE-backed cluster filesystem),
-you can let any node stage any volume. fileblock advertises
-`SINGLE_NODE_WRITER`, so the kubelet's CSI attach/detach controller is
-responsible for serializing Stage/Unstage on a given volume across the
-cluster — the driver does not add a second cross-node lock of its own.
-
-Two flags control this:
-
-| Flag (node and controller)        | Default               | Notes                                                       |
-|-----------------------------------|-----------------------|-------------------------------------------------------------|
-| `--topology-key`                  | `fileblock.csi/node`  | Set the same on the controller and every node DaemonSet pod |
-| `--topology-value` (node only)    | `$NODE_NAME`          | Set the **same value** on every node sharing the store      |
-
-When every node advertises an identical `(key, value)` segment, the
-external-provisioner's `--strict-topology` no longer pins the PV to one
-node — it pins it to that segment, and any node that advertises it is a
-valid landing zone.
-
-A worked example overlay lives at
-`deploy/kustomize/overlays/example-nfs-shared/`. Edit the `nfs.server` /
-`nfs.path` placeholders in `patch-controller.yaml` and `patch-node.yaml`
-and apply with `kubectl apply -k`.
+- `volumeBindingMode: WaitForFirstConsumer` is **required** — fileblock
+  must see the scheduler's node selection before provisioning.
+- `reclaimPolicy: Delete` removes the `.img` when the PVC is deleted.
+  `Retain` leaves it in place.
+- `allowVolumeExpansion: true` enables offline expansion via
+  `ControllerExpandVolume`. The consuming pod must be restarted for the
+  resize to land (OFFLINE expansion contract).
+- `fsType` is pinned to `ext4`.
 
 ## Limitations
 
@@ -154,10 +161,15 @@ and apply with `kubectl apply -k`.
   is no fileblock-level cross-node lease on the `.img`.
 - **Offline expand only.** Expanding the PVC truncates the image; the
   filesystem grows on the next stage (i.e. after the pod is recreated).
+  The pod must be deleted and recreated to pick up the new size.
 - **One pod per volume at a time.** As above.
 - **Sparse, not thin.** Capacity is enforced inside the image's ext4, not
   by the backing store. You can overcommit, but a full backing store
   produces I/O errors inside pods.
+- **ext4 only.** No other filesystem types are supported.
+- **SYS_ADMIN required.** The controller needs `SYS_ADMIN` capability
+  (or `privileged: true` as a fallback on hosts where the LSM rejects
+  `SYS_ADMIN` alone) to perform loop device operations and NFS mounts.
 
 ## Troubleshooting
 
@@ -188,11 +200,13 @@ node-to-node takeover on a shared backing store.
 
 ```sh
 make e2e        # plain host directory shared into both kind nodes
-make e2e-nfs    # same suite, but the backing store is an NFSv3 export
+make e2e-nfs    # same suite, backing store over NFS (default NFSv4.1)
+make e2e-nfs3   # same as e2e-nfs with NFS_VERSION=3
 ```
 
-`make e2e-nfs` stands up `nfs-kernel-server` on the host, mounts the export
-via NFSv3, and points the kind cluster at that mount — so the suite
-validates that fileblock corrects the NFSv3 exec-bit, chmod, and in-pod
-flock pathologies described above. See [CLAUDE.md](./CLAUDE.md) for
-contributor notes and harness limitations.
+`make e2e-nfs` stands up `nfs-kernel-server` on the host, mounts the export,
+and points the kind cluster at that mount — so the suite validates that
+fileblock corrects the NFSv3/v4 exec-bit, chmod, and in-pod flock
+pathologies described above. `make e2e-nfs3` runs the same suite with
+NFSv3. See [CLAUDE.md](./CLAUDE.md) for contributor notes and harness
+limitations.
