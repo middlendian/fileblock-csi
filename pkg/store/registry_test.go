@@ -181,13 +181,13 @@ func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
 func TestRegistryAdoptExistingSkipsNonStoreIDDirs(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{
-		"local",                // bare word
-		"FOO",                  // uppercase
-		"abc123",               // too short
-		"abc123def4567",        // too long
-		"abc123def45z",         // not hex
-		"abcdefabcdef.bak",     // extra chars
-		"abcdefabcdef-suffix",  // hyphen
+		"local",               // bare word
+		"FOO",                 // uppercase
+		"abc123",              // too short
+		"abc123def4567",       // too long
+		"abc123def45z",        // not hex
+		"abcdefabcdef.bak",    // extra chars
+		"abcdefabcdef-suffix", // hyphen
 	} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatal(err)
