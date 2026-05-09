@@ -17,6 +17,7 @@ import (
 	"github.com/middlendian/fileblock-csi/pkg/image"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
+	"github.com/middlendian/fileblock-csi/pkg/store"
 )
 
 // NodeServer implements the CSI NodeServer for fileblock. The node owns:
@@ -31,18 +32,13 @@ import (
 type NodeServer struct {
 	csi.UnimplementedNodeServer
 
-	nodeID  string
-	exec    fbexec.Runner
-	mnt     *mount.Mounter
-	losetup *loop.Losetup
-	state   *loop.State
-	log     *slog.Logger
-
-	// topologyKey/topologyValue are the single segment NodeGetInfo reports.
-	// When all nodes that mount the same backing store share these values,
-	// any of them is a valid landing zone for a PV from that store.
-	topologyKey   string
-	topologyValue string
+	nodeID   string
+	exec     fbexec.Runner
+	mnt      *mount.Mounter
+	losetup  *loop.Losetup
+	state    *loop.State
+	log      *slog.Logger
+	registry *store.Registry
 
 	// One mutex per volumeID protects Stage/Unstage from racing each other
 	// inside this process.
@@ -50,26 +46,18 @@ type NodeServer struct {
 	volMutex map[string]*sync.Mutex
 }
 
-// NewNodeServer constructs a NodeServer. topologyKey/topologyValue may be
-// empty, in which case they default to topologyKeyNode and nodeID — that is,
-// the legacy per-node pin.
-func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *loop.Losetup, st *loop.State, log *slog.Logger, topologyKey, topologyValue string) *NodeServer {
-	if topologyKey == "" {
-		topologyKey = topologyKeyNode
-	}
-	if topologyValue == "" {
-		topologyValue = nodeID
-	}
+// NewNodeServer constructs a NodeServer. The registry is used to resolve and
+// mount backing stores on demand when a volume is staged.
+func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *loop.Losetup, st *loop.State, log *slog.Logger, reg *store.Registry) *NodeServer {
 	return &NodeServer{
-		nodeID:        nodeID,
-		exec:          exec,
-		mnt:           mnt,
-		losetup:       ls,
-		state:         st,
-		log:           log,
-		topologyKey:   topologyKey,
-		topologyValue: topologyValue,
-		volMutex:      map[string]*sync.Mutex{},
+		nodeID:   nodeID,
+		exec:     exec,
+		mnt:      mnt,
+		losetup:  ls,
+		state:    st,
+		log:      log,
+		registry: reg,
+		volMutex: map[string]*sync.Mutex{},
 	}
 }
 
@@ -94,7 +82,7 @@ func (n *NodeServer) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest)
 	return &csi.NodeGetInfoResponse{
 		NodeId: n.nodeID,
 		AccessibleTopology: &csi.Topology{
-			Segments: map[string]string{n.topologyKey: n.topologyValue},
+			Segments: map[string]string{topologyKeyNode: n.nodeID},
 		},
 		// One loop device per volume; pick a generous cap. Operators can
 		// raise this with modprobe loop max_loop=N.
@@ -105,10 +93,16 @@ func (n *NodeServer) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest)
 func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
 	stagePath := req.GetStagingTargetPath()
-	// TODO(chunk4): replace with store.ConfigFromVolumeContext after node is refactored.
-	backing := req.GetVolumeContext()["backingStorePath"]
-	if volumeID == "" || stagePath == "" || backing == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume_id, staging_target_path, and volume_context.backingStorePath are required")
+	if volumeID == "" || stagePath == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and staging_target_path are required")
+	}
+	cfg, err := store.ConfigFromVolumeContext(req.GetVolumeContext())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	backing, err := n.registry.Get(ctx, cfg)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "mount backing store: %v", err)
 	}
 	if err := validateCapability(req.GetVolumeCapability()); err != nil {
 		return nil, err
