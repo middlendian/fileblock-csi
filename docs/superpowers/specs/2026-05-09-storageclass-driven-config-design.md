@@ -24,11 +24,10 @@ both the controller `Deployment` and the node `DaemonSet`:
 
 The result: every operator copies `example-nfs-shared/`, edits the IP and
 path, and ships custom kustomize patches for what should be SC-level
-config. The operator who consumed this driver in
-`greghaskins/homelab/apps/csi-driver-fileblock/` ended up wiring a
-`replacements:` block from a `nas-config` ConfigMap into the volume
-definitions on both pods to keep IPs/paths in one place — a workaround for
-a missing first-class interface.
+config. Operators consuming this driver have ended up wiring
+`replacements:` blocks from a shared ConfigMap into the volume
+definitions on both pods to keep IPs and paths in one place — a
+workaround for a missing first-class interface.
 
 ## Goals
 
@@ -86,8 +85,8 @@ metadata:
 provisioner: fileblock.csi
 parameters:
   backingStore.type: nfs
-  backingStore.nfs.server: 10.0.0.235
-  backingStore.nfs.path: /var/nfs/shared/fileblock
+  backingStore.nfs.server: nfs.example.internal
+  backingStore.nfs.path: /exports/fileblock
   backingStore.nfs.mountOptions: "nfsvers=4.1,hard,timeo=600"   # optional
 reclaimPolicy: Delete
 allowVolumeExpansion: true
@@ -95,7 +94,18 @@ volumeBindingMode: WaitForFirstConsumer
 ```
 
 `backingStore.nfs.mountOptions` is a comma-separated string passed to
-`mount.nfs4` as `-o`. If omitted, the kernel default applies.
+`mount.nfs` as `-o`. If omitted, the kernel default applies. Both
+NFSv3 and NFSv4 are supported via the same generic `mount.nfs` helper
+shipped in Debian's `nfs-common`; select the version explicitly with
+`nfsvers=3`, `nfsvers=4`, `nfsvers=4.1`, etc., or omit `nfsvers` to
+let the client auto-negotiate the highest mutual version with the
+server. NFSv3 mounts work as long as the server's portmapper (TCP/UDP
+111) and mountd ports are reachable from the driver pods; the
+in-container `mount.nfs` userland handles the RPC dialogue. The
+driver does not run `rpc.statd` or `rpcbind` itself — those are
+server-side requirements (NLM file locking is server-mediated, and we
+don't depend on it because cross-node mutual exclusion is the
+kubelet's job via `SINGLE_NODE_WRITER`).
 
 ### Local hostPath
 
@@ -115,14 +125,14 @@ Intended for kind-based e2e and trivial single-node test setups.
 # SC #1 — same server, same path
 parameters:
   backingStore.type: nfs
-  backingStore.nfs.server: 10.0.0.235
-  backingStore.nfs.path: /var/nfs/shared/fileblock
+  backingStore.nfs.server: nfs.example.internal
+  backingStore.nfs.path: /exports/fileblock
 ---
 # SC #2 — same server, same path: shares the on-disk pool with SC #1
 parameters:
   backingStore.type: nfs
-  backingStore.nfs.server: 10.0.0.235
-  backingStore.nfs.path: /var/nfs/shared/fileblock
+  backingStore.nfs.server: nfs.example.internal
+  backingStore.nfs.path: /exports/fileblock
 reclaimPolicy: Retain   # different reclaim from SC #1
 ```
 
@@ -186,8 +196,10 @@ Registry.
 
 Today's `Dockerfile` is `debian:trixie-slim` + `e2fsprogs util-linux
 ca-certificates`. Add `nfs-common` to the same `apt-get install
---no-install-recommends` line. This brings `mount.nfs` and `mount.nfs4`
-plus minimal RPC machinery (~5 MB compressed). Base remains
+--no-install-recommends` line. This brings the generic `mount.nfs`
+helper (which dispatches to NFSv3 or NFSv4 based on the `nfsvers`
+mount option, or auto-negotiates) plus the minimal RPC userland
+needed for v3 portmapper discovery (~5 MB compressed). Base remains
 `debian:trixie-slim`. No multi-stage runtime change.
 
 We do not pull in a Go-level NFS client. POSIX semantics on the in-pod
@@ -201,8 +213,8 @@ What `CreateVolume` returns and `NodeStageVolume` reads:
 ```json
 {
   "backingStore.type": "nfs",
-  "backingStore.nfs.server": "10.0.0.235",
-  "backingStore.nfs.path": "/var/nfs/shared/fileblock",
+  "backingStore.nfs.server": "nfs.example.internal",
+  "backingStore.nfs.path": "/exports/fileblock",
   "backingStore.nfs.mountOptions": "nfsvers=4.1,hard,timeo=600",
   "storeID": "a3f1c290bb04"
 }
@@ -256,8 +268,8 @@ pkg/store/
   registry.go      per-process Registry: Get(ctx, Config) (mountedPath, error)
                    serializes per-storeID; caches mounted state in memory;
                    hosts mounts under /var/lib/fileblock/stores/<storeID>/
-  mounter_nfs.go   exec("mount.nfs4", server:path, target, "-o", opts)
-                   via pkg/exec.Runner
+  mounter_nfs.go   exec("mount.nfs", server:path, target, "-o", opts)
+                   via pkg/exec.Runner — generic helper, supports v3+v4
   mounter_local.go validates Config.LocalPath exists; bind-mounts it into
                    /var/lib/fileblock/stores/<storeID>/
   store_test.go    unit tests with FakeRunner — no real mounts
@@ -352,7 +364,7 @@ are nailed down.
         -> InvalidArgument if missing/malformed
    b. mountedPath, err := registry.Get(ctx, cfg)
         - already mounted? return /var/lib/fileblock/stores/<id>/
-        - else: mkdir target, exec mount.nfs4 (or bind-mount for local),
+        - else: mkdir target, exec mount.nfs (or bind-mount for local),
           mark mounted in cache; surface stderr in error
    c. images := image.New(mountedPath, exec)
    d. images.Create(ctx, volumeID, capacity)
@@ -379,7 +391,7 @@ are nailed down.
 | SC params missing required key (`backingStore.type`) | `InvalidArgument` (controller) |
 | SC params unknown type (`type: smb`) | `InvalidArgument` (controller) |
 | Volume context missing on Stage (e.g. PV from older release) | `InvalidArgument` (node) |
-| `mount.nfs4` exit non-zero | `Internal`; stderr surfaced in message |
+| `mount.nfs` exit non-zero | `Internal`; stderr surfaced in message |
 | `local`-type, `path` doesn't exist | `Internal` |
 | Mount target already exists with wrong source | `Internal`; logged; manual recovery |
 | Two simultaneous CreateVolumes for same `storeID` | serialized by per-store mutex; second sees `mounted=true` |
@@ -401,7 +413,7 @@ problems surface at pod-scheduling time. Operator runbook:
 ```
 $ kubectl describe pod <stuck-pod>           # see Stage error
 $ kubectl logs -n fileblock-system fileblock-node-<x>
-                                             # find the mount.nfs4 stderr
+                                             # find the mount.nfs stderr
 $ # fix DNS / firewall / NFS export ACL on the failing node
 ```
 
@@ -421,7 +433,7 @@ hung mount; this is the same trade-off `csi-driver-nfs` accepts.
 the controller. Verify on a kind cluster *and* on the production k0s
 cluster during step 6 (deploy/kustomize/base) of the implementation
 order that `SYS_ADMIN` without `privileged: true` is sufficient for
-`mount.nfs4` and the bind-mount used by `type: local`. Some kernels,
+`mount.nfs` and the bind-mount used by `type: local`. Some kernels,
 AppArmor profiles, or SELinux contexts deny mount syscalls from a
 non-`privileged` container regardless of caps. If verification fails,
 escalate the controller to `privileged: true` — same blast radius as
@@ -476,24 +488,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 ```
 
-### Downstream consumer (`greghaskins/homelab/apps/csi-driver-fileblock/`)
-
-The current overlay's `replacements:` block (substituting `nas-ip` and
-`nas-fileblock-path` from `nas-config` into the controller and node pod
-volumes) is removed. The same replacement block now lives on a
-`storageclass.yaml` shipped from this overlay, substituting
-`nas-config.data.nas-ip` → `parameters.backingStore.nfs.server` and
-`nas-config.data.nas-fileblock-path` → `parameters.backingStore.nfs.path`.
-The `patches/controller.yaml` and `patches/node.yaml` lose their volume
-overrides; what remains is k0s kubelet-root and StorageClass
-`reclaimPolicy: Retain`, both still relevant.
-
 ## Testing strategy
 
 - **Unit, `pkg/store/`**: `parse_test.go` covers SC param round-trip,
   volume context round-trip, hash determinism, and every error case.
   `registry_test.go` uses `pkg/exec/exectest.FakeRunner` to assert
-  `mount.nfs4` invocations and idempotent re-`Get`. No real mounts.
+  `mount.nfs` invocations (covering both `nfsvers=3` and `nfsvers=4.1`
+  parameter cases) and idempotent re-`Get`. No real mounts.
 - **Smoke, `hack/smoke.sh`**: extend to include a `local`-type SC and
   assert end-to-end PVC → PV → loop attach → mount on a developer host
   (no NFS server required).
@@ -508,8 +509,10 @@ overrides; what remains is k0s kubelet-root and StorageClass
   three load-bearing assertions — exec bit survives, chmod is honored,
   flock works — must run against the **driver-mounted** store
   specifically, not against any NFS-backed PV. Easy to regress if
-  `mount.nfs4 -o ...` ends up with different default options than the
+  `mount.nfs -o ...` ends up with different default options than the
   kubelet's in-tree NFS mount; the test should fail loudly if so.
+  Run `make e2e-nfs` once with `nfsvers=3` and once with `nfsvers=4.1`
+  in `mountOptions` so both protocol versions are covered.
 - **New e2e: "two stores"**: same NFS server, two paths, two SCs. PVC
   from each. Verify both Pods come up and `.img` files land in the
   correct pools (`/var/lib/fileblock/stores/<idA>/` vs `<idB>/`).
@@ -532,9 +535,10 @@ Runbook:
    the in-pod mount path that v0.2.0 used (`--backing-store`,
    `volumes[backing-store].mountPath`). Read it off your old
    `volumes[backing-store].nfs.path` (the source side of the volume),
-   not off the `volumeMounts` entry. Easy to get wrong on first
-   migration; concretely, the homelab consumer's value is
-   `/var/nfs/shared/fileblock`, not `/var/lib/fileblock`.
+   not off the `volumeMounts` entry. Concretely: if v0.2.0 had
+   `volumes[backing-store].nfs.path: /exports/fileblock` patched
+   into the controller pod, the new SC's
+   `backingStore.nfs.path: /exports/fileblock` — same value.
 5. Re-create PVCs. New PVs adopt existing `.img` files at the same
    backing path (`image.Create` is idempotent: same `volumeID` + same
    on-disk size = adopt).
@@ -570,18 +574,22 @@ The CHANGELOG entry under "Breaking" calls out:
 7. `Dockerfile` — add `nfs-common`.
 8. Overlays: simplify `example-localdir`, `example-nfs-shared`, `e2e`.
 9. Tests: smoke updates, e2e updates, new "two stores" e2e.
-10. `greghaskins/homelab/apps/csi-driver-fileblock/` — drop the volume
-    `replacements:`, add a `storageclass.yaml`, simplify the overlay.
+10. (Downstream consumer overlays follow the new shape: a
+    `storageclass.yaml` consumes the operator's source-of-truth
+    ConfigMap for server + path; no patches on the controller
+    Deployment or node DaemonSet are needed.)
 
 ## Open questions for implementation
 
 None blocking. One item the implementer should verify in code:
 
-- Confirm `mount.nfs4 -o ...` is the right invocation under
-  `nfs-common` on `debian:trixie-slim`. Alternative: call `mount(2)`
-  directly with `type="nfs4"` for v4-only (no userland helper needed),
-  fall back to `mount.nfs` for v3. Stay with `mount.nfs4` as the
-  baseline; revisit if it pulls in unexpected RPC daemons.
+- Confirm `mount.nfs -o ...` from `nfs-common` on
+  `debian:trixie-slim` works against both NFSv3 and NFSv4 servers
+  during smoke and e2e. Alternative considered and rejected: calling
+  `mount(2)` directly with `type="nfs4"` skips the userland helper
+  (smaller image, no RPC tooling) but loses NFSv3 — the v3 path needs
+  `mount.nfs` to dialogue with the server's portmapper. We support
+  v3 and v4 equally, so the helper stays.
 
 (The controller-`SYS_ADMIN`-sufficiency question that was here
 previously has been promoted to a required verification step under
