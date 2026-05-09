@@ -34,6 +34,7 @@ spec:
             privileged: true
             capabilities:
               add: [SYS_ADMIN]
+              drop: [ALL]
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

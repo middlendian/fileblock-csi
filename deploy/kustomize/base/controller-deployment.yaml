@@ -30,9 +30,12 @@ spec:
             # binds a privileged source port. SYS_ADMIN alone is rejected
             # under most LSM profiles when nfsvers=3 is used. Matches
             # csi-driver-nfs's controller pod and our own node DaemonSet.
+            # drop: [ALL] tightens the posture: the explicit add-back of
+            # SYS_ADMIN is the only capability the container retains.
             privileged: true
             capabilities:
               add: [SYS_ADMIN]
+              drop: [ALL]
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
