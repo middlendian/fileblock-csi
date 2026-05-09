@@ -16,3 +16,11 @@ patches:
     target:
       kind: DaemonSet
       name: fileblock-node
+  - path: host-source-patch-controller.yaml
+    target:
+      kind: Deployment
+      name: fileblock-controller
+  - path: host-source-patch-node.yaml
+    target:
+      kind: DaemonSet
+      name: fileblock-node
