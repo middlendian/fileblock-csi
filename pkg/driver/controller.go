@@ -138,6 +138,12 @@ func (c *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 	}
 	m, err := c.imageManagerForVolumeID(ctx, req.GetVolumeId())
 	if err != nil {
+		// CSI DeleteVolume must be idempotent — a volumeID that can't be
+		// resolved (malformed or store unknown to this controller) is
+		// treated as already-deleted.
+		if status.Code(err) == codes.NotFound {
+			return &csi.DeleteVolumeResponse{}, nil
+		}
 		return nil, err
 	}
 	if err := m.Delete(ctx, req.GetVolumeId()); err != nil {
@@ -259,15 +265,18 @@ func volumeIDFromName(cfg store.Config, name string) (string, error) {
 }
 
 // parseStoreIDFromVolumeID extracts the 12-char storeID from a volumeID
-// produced by volumeIDFromName.
+// produced by volumeIDFromName. A volumeID that doesn't fit the format
+// can't have been issued by this driver, so callers treat it the same
+// as any other unknown volume — NotFound (or, for DeleteVolume, OK
+// because delete is idempotent per the CSI spec).
 func parseStoreIDFromVolumeID(volumeID string) (string, error) {
 	const prefix = "fb-"
 	if !strings.HasPrefix(volumeID, prefix) {
-		return "", status.Errorf(codes.InvalidArgument, "volumeID %q is not in fb-<storeID>-<name> form", volumeID)
+		return "", status.Errorf(codes.NotFound, "volumeID %q is not in fb-<storeID>-<name> form", volumeID)
 	}
 	rest := volumeID[len(prefix):]
 	if len(rest) < 13 || rest[12] != '-' {
-		return "", status.Errorf(codes.InvalidArgument, "volumeID %q has malformed storeID segment", volumeID)
+		return "", status.Errorf(codes.NotFound, "volumeID %q has malformed storeID segment", volumeID)
 	}
 	return rest[:12], nil
 }
