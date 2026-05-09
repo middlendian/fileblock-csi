@@ -247,8 +247,12 @@ func (c *ControllerServer) imageManagerForVolumeID(ctx context.Context, volumeID
 // call lands on the existing image instead of minting a fresh one. The
 // "fb-<storeID>-" prefix lets DeleteVolume / Expand resolve the
 // volumeID's home store without parameters in the request.
+//
+// Hyphens are allowed in name. parseStoreIDFromVolumeID indexes at fixed
+// positions (3..15 for storeID) so subsequent hyphens in name are
+// unambiguous.
 func volumeIDFromName(cfg store.Config, name string) (string, error) {
-	if strings.ContainsAny(name, "/\\\x00-") {
+	if strings.ContainsAny(name, "/\\\x00") {
 		return "", status.Errorf(codes.InvalidArgument, "name %q contains invalid characters", name)
 	}
 	return "fb-" + cfg.ID() + "-" + name, nil

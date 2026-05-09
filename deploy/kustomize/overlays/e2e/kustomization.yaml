@@ -7,15 +7,17 @@ resources:
   - ../../base
   - storageclass.yaml
 
+# Rewrite the base's ghcr.io/middlendian/fileblock-csi image reference to
+# the local image kind has loaded via `kind load docker-image`. Tests
+# never pull from a registry; they exercise the freshly-built local
+# image. hack/e2e.sh sets IMAGE=fileblock-csi:e2e by default; this
+# rewrite must match.
+images:
+  - name: ghcr.io/middlendian/fileblock-csi
+    newName: fileblock-csi
+    newTag: e2e
+
 patches:
-  - path: patch-controller.yaml
-    target:
-      kind: Deployment
-      name: fileblock-controller
-  - path: patch-node.yaml
-    target:
-      kind: DaemonSet
-      name: fileblock-node
   - path: host-source-patch-controller.yaml
     target:
       kind: Deployment
