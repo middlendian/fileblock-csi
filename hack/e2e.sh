@@ -185,6 +185,10 @@ kubectl apply -k "$ROOT/deploy/kustomize/overlays/e2e"
 # the backing-store path). This validates the driver's NFS mounter code path.
 if [[ "$BACKING_KIND" == "nfs" ]]; then
   log "applying NFS StorageClass (nfsvers=${NFS_VERSION})"
+  # The e2e overlay already created a local-type SC named "fileblock".
+  # StorageClass parameters are immutable, so delete it before applying the
+  # NFS variant (which has different parameters).
+  kubectl delete sc fileblock --ignore-not-found --wait=false
   envsubst < "$ROOT/deploy/kustomize/overlays/e2e/storageclass-nfs.yaml.tpl" \
     | kubectl apply -f -
 fi
