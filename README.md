@@ -38,9 +38,9 @@ with a genuine local filesystem.
      /data inside the pod === ext4 on a loop device
 ```
 
-Each PV is one `${volumeId}.img` (sparse — actual disk usage grows with
-real writes) plus a `${volumeId}.json` sidecar holding capacity and
-metadata. Nothing else lives on the backing store.
+Each PV is a single sparse `fb-<uuid>.img` file on the backing store —
+actual disk usage grows only with real writes. There is no separate metadata
+sidecar; capacity is read from the file's apparent size (`stat().Size()`).
 
 ## Requirements
 
