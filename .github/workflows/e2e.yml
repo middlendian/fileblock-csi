@@ -15,8 +15,28 @@ name: E2E
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - "Makefile"
+      - "deploy/kustomize/**"
+      - "hack/e2e.sh"
+      - "hack/e2e-kind.yaml"
+      - ".github/workflows/e2e.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - "Makefile"
+      - "deploy/kustomize/**"
+      - "hack/e2e.sh"
+      - "hack/e2e-kind.yaml"
+      - ".github/workflows/e2e.yml"
   workflow_dispatch:
 
 permissions:

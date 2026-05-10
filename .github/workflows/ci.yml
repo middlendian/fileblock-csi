@@ -3,8 +3,28 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - "Makefile"
+      - ".golangci.yml"
+      - "hack/smoke.sh"
+      - "hack/csi-sanity.sh"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - "Makefile"
+      - ".golangci.yml"
+      - "hack/smoke.sh"
+      - "hack/csi-sanity.sh"
+      - ".github/workflows/ci.yml"
 
 permissions:
   contents: read
