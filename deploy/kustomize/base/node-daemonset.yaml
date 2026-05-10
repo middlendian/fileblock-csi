@@ -14,6 +14,11 @@ spec:
     spec:
       serviceAccountName: fileblock-node
       hostPID: true
+      # hostNetwork so the source IP of mount.nfs is the host's, not
+      # the pod CIDR. Same rationale as the controller pod; matches
+      # csi-driver-nfs.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: fileblock-node
           image: ghcr.io/middlendian/fileblock-csi:dev

@@ -16,6 +16,13 @@ spec:
         app: fileblock-controller
     spec:
       serviceAccountName: fileblock-controller
+      # hostNetwork so the source IP of mount.nfs is the host's, not
+      # the pod CIDR. NFS server export ACLs typically allow the
+      # cluster's host network, not pod IPs. Matches csi-driver-nfs's
+      # controller and node pods. dnsPolicy: ClusterFirstWithHostNet
+      # keeps Kubernetes DNS working under hostNetwork.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: fileblock-controller
           image: ghcr.io/middlendian/fileblock-csi:dev

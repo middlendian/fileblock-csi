@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   csi-driver-nfs (running nfs-utils 2.6.2) mounted shares on the
   same NAS fine; fileblock-csi (2.8.3) failed identically on every
   share including the one csi-driver-nfs mounted successfully.
+- Both controller and node pods now run with `hostNetwork: true`
+  (and `dnsPolicy: ClusterFirstWithHostNet` so cluster DNS keeps
+  working). Without this, the source IP of `mount.nfs` is the pod
+  CIDR, and NFS server export ACLs that allow only the cluster's
+  host network reject the mount with the generic "Protocol not
+  supported". Matches csi-driver-nfs's controller and node pods.
+  Real production failure in v0.3.2: a UNAS Pro NAS rejected
+  pod-CIDR clients, leaving CreateVolume permanently failing on
+  an export that worked fine when the kubelet's in-tree NFS
+  plugin (host-network) accessed it.
+
+### Internal
+
+- `deploy/manifests_test.go` adds `TestHostNetwork` asserting both
+  base manifests carry `hostNetwork: true` and the matching
+  `dnsPolicy`, so a future edit can't regress it silently.
 
 ## [0.3.2] - 2026-05-09
 
