@@ -78,6 +78,14 @@ spec:
           image: registry.k8s.io/sig-storage/livenessprobe:v2.13.1
           args:
             - --csi-address=/csi/csi.sock
+            # Bind to localhost on a controller-specific port. Default
+            # is 0.0.0.0:9808 — under hostNetwork: true, every pod with
+            # this sidecar binds the same host port and they collide
+            # (controller pod + node DaemonSet pod scheduled on the
+            # same host). Distinct localhost ports per pod-role solve
+            # it without exposing the probe externally. Matches
+            # csi-driver-nfs (their controller uses 29652, node 29653).
+            - --http-endpoint=localhost:29652
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

@@ -65,6 +65,9 @@ spec:
           image: registry.k8s.io/sig-storage/livenessprobe:v2.13.1
           args:
             - --csi-address=/csi/csi.sock
+            # localhost-bound on a node-specific port. See the
+            # controller's liveness-probe args for the full rationale.
+            - --http-endpoint=localhost:29653
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
