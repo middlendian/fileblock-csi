@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dockerfile installs netbase for the same reason. Real production
   failure on a UNAS Pro NAS in v0.3.3.
 
+### Internal
+
+- Dockerfile carries a build-time assertion that the netbase files
+  exist (`test -s /etc/protocols && test -s /etc/services &&
+  test -s /etc/rpc`). A future edit that drops netbase from the
+  install line fails the build rather than shipping a regression.
+- E2E workflow matrix now includes an explicit NFSv3 variant (was
+  `[local, nfs]` with `nfs` defaulting to v4.1; now `[local,
+  nfs (v4.1), nfs (v3)]` with `BACKING_KIND` and `NFS_VERSION` set
+  per-variant). The netbase regression shipped past CI because v3
+  was never exercised; v4 doesn't go through portmapper / mountd
+  / `/etc/protocols` lookups, so v4-only coverage misses several
+  whole code paths.
+
 ## [0.3.3] - 2026-05-10
 
 ### Fixed
