@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Runtime image base downgraded from `debian:trixie-slim` (nfs-utils
+  2.8.3) to `debian:bookworm-slim` (nfs-utils 2.6.2). nfs-utils
+  2.8.x has a NFSv3 mount regression that surfaces against some
+  servers as `mount.nfs: Protocol not supported` even after
+  successfully discovering both NFS (port 2049 TCP) and mountd
+  ports. Real production failure on a UNAS Pro NAS in v0.3.2:
+  csi-driver-nfs (running nfs-utils 2.6.2) mounted shares on the
+  same NAS fine; fileblock-csi (2.8.3) failed identically on every
+  share including the one csi-driver-nfs mounted successfully.
 - Both controller and node pods now run with `hostNetwork: true`
   (and `dnsPolicy: ClusterFirstWithHostNet` so cluster DNS keeps
   working). Without this, the source IP of `mount.nfs` is the pod
