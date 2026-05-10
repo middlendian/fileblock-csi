@@ -81,6 +81,18 @@ jobs:
           ref: ${{ needs.detect.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
+      - name: Verify kustomization newTag matches release version
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          KUSTOMIZATION="deploy/kustomize/base/kustomization.yaml"
+          TAG=$(awk '/^[[:space:]]+newTag:/ {print $2; exit}' "$KUSTOMIZATION")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::$KUSTOMIZATION newTag ($TAG) does not match release version ($VERSION)"
+            exit 1
+          fi
+
       - name: Create and push tag
         env:
           VERSION: ${{ needs.detect.outputs.version }}
