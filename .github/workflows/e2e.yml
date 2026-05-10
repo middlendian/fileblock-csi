@@ -48,13 +48,29 @@ concurrency:
 
 jobs:
   e2e:
-    name: e2e (${{ matrix.backing }})
+    name: e2e (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        backing: [local, nfs]
+        # Three variants: local, NFSv4.1, and NFSv3. The v3 variant is
+        # important — the v4 protocol skips portmapper / mountd / NLM
+        # entirely, so v4-only coverage misses several whole code
+        # paths in the kernel client and in the runtime image (e.g.
+        # /etc/protocols and /etc/rpc lookups). A real production
+        # NFSv3 mount regression in v0.3.3 (against debian:bookworm-slim
+        # missing netbase) shipped past CI because we only ran v4.1.
+        include:
+          - name: local
+            BACKING_KIND: local
+            NFS_VERSION: ""
+          - name: nfs (v4.1)
+            BACKING_KIND: nfs
+            NFS_VERSION: "4.1"
+          - name: nfs (v3)
+            BACKING_KIND: nfs
+            NFS_VERSION: "3"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -91,7 +107,8 @@ jobs:
 
       - name: Run e2e
         env:
-          BACKING_KIND: ${{ matrix.backing }}
+          BACKING_KIND: ${{ matrix.BACKING_KIND }}
+          NFS_VERSION: ${{ matrix.NFS_VERSION }}
         run: hack/e2e.sh
 
       - name: Dump fileblock-system on failure
