@@ -28,6 +28,33 @@ func TestNodeSecurityContext(t *testing.T) {
 	requireFileblockSecurityContext(t, "kustomize/base/node-daemonset.yaml")
 }
 
+// TestHostNetwork asserts both pods run with hostNetwork: true and
+// dnsPolicy: ClusterFirstWithHostNet. Source IP of NFS mounts must be
+// the host's so NFS server export ACLs (which typically allow the
+// cluster's host network, not the pod CIDR) accept it. Matches
+// csi-driver-nfs's controller and node pods. Real production failure
+// in v0.3.2: NAS-side ACL rejected pod-CIDR clients with the generic
+// "Protocol not supported" error, leaving CreateVolume permanently
+// failing.
+func TestHostNetwork(t *testing.T) {
+	for _, p := range []string{
+		"kustomize/base/controller-deployment.yaml",
+		"kustomize/base/node-daemonset.yaml",
+	} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "hostNetwork: true") {
+			t.Errorf("%s: missing hostNetwork: true", p)
+		}
+		if !strings.Contains(text, "dnsPolicy: ClusterFirstWithHostNet") {
+			t.Errorf("%s: missing dnsPolicy: ClusterFirstWithHostNet (required for DNS resolution under hostNetwork)", p)
+		}
+	}
+}
+
 // TestSidecarTimeouts asserts the csi-provisioner and csi-resizer
 // sidecars on the controller pod set --timeout=1200s. This was added
 // after a real regression: the default 15s gRPC timeout on the
