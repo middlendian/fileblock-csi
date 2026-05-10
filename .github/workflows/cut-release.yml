@@ -1,0 +1,142 @@
+name: Cut release
+
+# Creates a release/vX.Y.Z branch from main with the CHANGELOG promoted and
+# the kustomization newTag bumped, then opens a PR. Merging the PR triggers
+# tag-and-release.yml, which creates the tag and runs the publish pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.4.0)"
+        type: string
+        required: true
+
+permissions:
+  contents: write       # push branch
+  pull-requests: write  # open PR
+
+jobs:
+  cut:
+    name: Cut ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate inputs and preconditions
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'
+          if [[ ! "$VERSION" =~ $re ]]; then
+            echo "::error::version '$VERSION' does not look like vX.Y.Z[-prerelease]"
+            exit 1
+          fi
+          SEMVER="${VERSION#v}"
+          BRANCH="release/$VERSION"
+
+          if git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1; then
+            echo "::error::tag $VERSION already exists on origin"
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::error::branch $BRANCH already exists on origin"
+            exit 1
+          fi
+          if grep -qE "^## \[$SEMVER\] - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md already contains a ## [$SEMVER] section"
+            exit 1
+          fi
+
+          # Require non-empty [Unreleased] section.
+          HAS_CONTENT=$(awk '/^## \[Unreleased\]$/{found=1; next} found && /^## \[/{exit} found && /[^[:space:]]/{print; exit}' CHANGELOG.md)
+          if [ -z "$HAS_CONTENT" ]; then
+            echo "::error::## [Unreleased] section in CHANGELOG.md is empty — add changelog entries before cutting a release"
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION"   >> "$GITHUB_ENV"
+          echo "SEMVER=$SEMVER"     >> "$GITHUB_ENV"
+          echo "BRANCH=$BRANCH"     >> "$GITHUB_ENV"
+
+      - name: Edit CHANGELOG.md
+        run: |
+          set -euo pipefail
+          TODAY="$(date +%Y-%m-%d)"
+          REPO_URL="https://github.com/$GITHUB_REPOSITORY"
+
+          # The [Unreleased] compare link tells us the previous release tag.
+          PREV_TAG=$(sed -n 's|^\[Unreleased\]: .*/compare/\(.*\)\.\.\.HEAD$|\1|p' CHANGELOG.md)
+          if [ -z "$PREV_TAG" ]; then
+            echo "::error::Could not extract previous tag from [Unreleased] link in CHANGELOG.md"
+            exit 1
+          fi
+          echo "Previous tag: $PREV_TAG"
+
+          # Insert a new empty ## [Unreleased] section above the promoted heading.
+          sed -i "0,/^## \[Unreleased\]$/{s|^## \[Unreleased\]$|## [Unreleased]\n\n## [$SEMVER] - $TODAY|}" CHANGELOG.md
+
+          # Update the [Unreleased] compare link to point from the new version.
+          sed -i "s|^\[Unreleased\]: .*$|[Unreleased]: $REPO_URL/compare/$VERSION...HEAD|" CHANGELOG.md
+
+          # Insert a [SEMVER] compare link on the line after [Unreleased].
+          sed -i "/^\[Unreleased\]: /a[$SEMVER]: $REPO_URL/compare/$PREV_TAG...$VERSION" CHANGELOG.md
+
+          echo "PREV_TAG=$PREV_TAG" >> "$GITHUB_ENV"
+
+      - name: Bump kustomization newTag
+        run: |
+          set -euo pipefail
+          KUSTOMIZATION="deploy/kustomize/base/kustomization.yaml"
+          CURRENT_TAG=$(awk '/^[[:space:]]+newTag:/ {print $2; exit}' "$KUSTOMIZATION")
+          if [ "$CURRENT_TAG" = "$VERSION" ]; then
+            echo "::error::$KUSTOMIZATION already has newTag: $VERSION"
+            exit 1
+          fi
+          echo "Bumping newTag: $CURRENT_TAG -> $VERSION"
+          sed -i -E "s|^([[:space:]]+)newTag: .*$|\1newTag: $VERSION|" "$KUSTOMIZATION"
+
+      - name: Commit and push release branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add CHANGELOG.md deploy/kustomize/base/kustomization.yaml
+          git commit -m "release: $VERSION"
+          git push -u origin "$BRANCH"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          KUSTOMIZATION="deploy/kustomize/base/kustomization.yaml"
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "release: $VERSION" \
+            --body "$(cat <<EOF
+          ## Summary
+
+          Cuts release **$VERSION**.
+
+          - Promotes \`## [Unreleased]\` → \`## [$SEMVER] - $(date +%Y-%m-%d)\` in \`CHANGELOG.md\`.
+          - Bumps \`$KUSTOMIZATION\` \`newTag\` from \`$PREV_TAG\` to \`$VERSION\`.
+
+          ## Merge instructions
+
+          Squash-merge or merge-commit both work. \`tag-and-release.yml\` reads
+          the version from the PR's head branch name (\`$BRANCH\`), not the
+          commit message, so the merge mode doesn't affect tag creation.
+
+          After merge:
+          - Multi-arch image at \`ghcr.io/middlendian/fileblock-csi:$VERSION\`
+            (and \`:latest\` for non-prereleases) is published.
+          - A GitHub release is created with the \`[$SEMVER]\` CHANGELOG section
+            as its body.
+          EOF
+          )"
