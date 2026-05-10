@@ -55,6 +55,58 @@ func TestHostNetwork(t *testing.T) {
 	}
 }
 
+// TestLivenessProbePortsAreDistinct asserts the controller and node
+// liveness-probe sidecars bind to distinct localhost ports. With
+// hostNetwork: true, the default 0.0.0.0:9808 collides between the
+// controller pod and the node-DaemonSet pod scheduled on the same
+// host (kubelet keeps one running, the other crash-loops). Distinct
+// localhost: ports per pod-role avoid the collision and don't expose
+// the probe outside the pod. Matches csi-driver-nfs (29652/29653).
+func TestLivenessProbePortsAreDistinct(t *testing.T) {
+	ctlPort := requireLivenessHTTPEndpointPort(t, "kustomize/base/controller-deployment.yaml")
+	nodePort := requireLivenessHTTPEndpointPort(t, "kustomize/base/node-daemonset.yaml")
+	if ctlPort == "" || nodePort == "" {
+		// requireLivenessHTTPEndpointPort already failed the test.
+		return
+	}
+	if ctlPort == nodePort {
+		t.Errorf("controller and node liveness-probe ports must differ; both set to %s", ctlPort)
+	}
+}
+
+// requireLivenessHTTPEndpointPort returns the port from a
+// `--http-endpoint=localhost:PORT` arg in the named manifest's
+// liveness-probe sidecar. Fails the test if absent.
+func requireLivenessHTTPEndpointPort(t *testing.T, relPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(relPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	idx := strings.Index(text, "name: liveness-probe")
+	if idx == -1 {
+		t.Fatalf("%s: missing liveness-probe sidecar", relPath)
+	}
+	end := strings.Index(text[idx+1:], "- name:")
+	if end == -1 {
+		end = len(text) - idx - 1
+	}
+	block := text[idx : idx+1+end]
+	const prefix = "--http-endpoint=localhost:"
+	pos := strings.Index(block, prefix)
+	if pos == -1 {
+		t.Errorf("%s: liveness-probe must include --http-endpoint=localhost:PORT to avoid hostNetwork port collision", relPath)
+		return ""
+	}
+	rest := block[pos+len(prefix):]
+	end2 := strings.IndexAny(rest, " \n")
+	if end2 == -1 {
+		end2 = len(rest)
+	}
+	return rest[:end2]
+}
+
 // TestSidecarTimeouts asserts the csi-provisioner and csi-resizer
 // sidecars on the controller pod set --timeout=1200s. This was added
 // after a real regression: the default 15s gRPC timeout on the

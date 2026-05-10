@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Controller and node `liveness-probe` sidecars now bind to distinct
+  localhost ports via `--http-endpoint=localhost:29652` (controller)
+  and `localhost:29653` (node). With `hostNetwork: true` (added in
+  v0.3.3), the default `0.0.0.0:9808` collided on every host running
+  both the controller pod and a node DaemonSet pod, leaving one
+  liveness-probe in `Back-off restarting failed container`. Matches
+  csi-driver-nfs's port choices. `TestLivenessProbePortsAreDistinct`
+  added to `deploy/manifests_test.go` to guard against regression.
+
 ## [0.3.4] - 2026-05-10
 
 ### Fixed
