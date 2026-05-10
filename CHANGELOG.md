@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-05-10
+
 ### Fixed
 
 - Liveness-probe sidecar ports moved from `localhost:29652/29653`
@@ -277,7 +279,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `make check` — single command that runs fmt, vet, lint, tidy-check, race
   test + coverage, build, smoke, and csi-sanity. CI runs the same target.
 
-[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/middlendian/fileblock-csi/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/middlendian/fileblock-csi/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/middlendian/fileblock-csi/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/middlendian/fileblock-csi/compare/v0.3.2...v0.3.3
