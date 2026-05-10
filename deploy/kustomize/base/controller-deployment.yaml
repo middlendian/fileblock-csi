@@ -83,9 +83,14 @@ spec:
             # this sidecar binds the same host port and they collide
             # (controller pod + node DaemonSet pod scheduled on the
             # same host). Distinct localhost ports per pod-role solve
-            # it without exposing the probe externally. Matches
-            # csi-driver-nfs (their controller uses 29652, node 29653).
-            - --http-endpoint=localhost:29652
+            # it without exposing the probe externally.
+            #
+            # 29662/29663 rather than csi-driver-nfs's 29652/29653 so
+            # operators running both drivers on the same cluster (a
+            # common pattern — fileblock for ext4-on-NFS, csi-driver-nfs
+            # for plain NFS to other shares) don't have their node
+            # DaemonSets fight for the same host port.
+            - --http-endpoint=localhost:29662
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

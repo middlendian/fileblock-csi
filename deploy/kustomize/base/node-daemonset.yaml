@@ -67,7 +67,7 @@ spec:
             - --csi-address=/csi/csi.sock
             # localhost-bound on a node-specific port. See the
             # controller's liveness-probe args for the full rationale.
-            - --http-endpoint=localhost:29653
+            - --http-endpoint=localhost:29663
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Liveness-probe sidecar ports moved from `localhost:29652/29653`
+  (matched csi-driver-nfs) to `localhost:29662/29663`. The
+  csi-driver-nfs values collide for operators who run both drivers
+  on the same cluster: under `hostNetwork: true`, the two node
+  DaemonSets bind the same host port and one crash-loops. Real
+  symptom in v0.3.5 on a cluster running both drivers — only one
+  DaemonSet's node-on-host could become Ready at a time.
+
 ## [0.3.5] - 2026-05-10
 
 ### Fixed
