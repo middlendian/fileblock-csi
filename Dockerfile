@@ -10,9 +10,18 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/middlendian/f
         -o /out/fileblock-node ./cmd/node
 
 # Runtime image needs e2fsprogs (mkfs.ext4, e2fsck, resize2fs), util-linux
-# (losetup, mount, umount, findmnt). debian-slim is the smallest image that
-# carries all of these without surprises.
-FROM debian:trixie-slim
+# (losetup, mount, umount, findmnt), and nfs-common (mount.nfs).
+#
+# Pinned to debian:bookworm-slim (Debian 12) rather than trixie-slim
+# (Debian 13). Bookworm ships nfs-utils 2.6.2; trixie ships 2.8.3.
+# nfs-utils 2.8.x has a NFSv3 mount regression that surfaces as
+# "Protocol not supported" against some servers (verbose trace shows
+# mount.nfs successfully discovers NFS port 2049/TCP and mountd
+# port/UDP, then fails). csi-driver-nfs's published image uses
+# nfs-utils 2.6.2 and works against the same NAS, so match that
+# version. Revisit when 2.8.x stabilizes or when we have evidence
+# that a newer release fixes the regression.
+FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         e2fsprogs util-linux ca-certificates nfs-common \
