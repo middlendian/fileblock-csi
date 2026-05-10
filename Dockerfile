@@ -22,9 +22,17 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/middlendian/f
 # version. Revisit when 2.8.x stabilizes or when we have evidence
 # that a newer release fixes the regression.
 FROM debian:bookworm-slim
+# netbase provides /etc/services, /etc/protocols, /etc/rpc — the
+# name<->number tables mount.nfs uses during NFSv3 protocol
+# negotiation. Without it the kernel mount(2) call returns
+# EPROTONOSUPPORT, which mount.nfs surfaces as "Protocol not
+# supported" even though portmapper discovery already succeeded.
+# debian:bookworm-slim strips netbase; nfs-common doesn't depend on
+# it. csi-driver-nfs's Dockerfile installs netbase explicitly for
+# the same reason.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        e2fsprogs util-linux ca-certificates nfs-common \
+        e2fsprogs util-linux ca-certificates nfs-common netbase \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/fileblock-controller /usr/local/bin/fileblock-controller
 COPY --from=build /out/fileblock-node /usr/local/bin/fileblock-node

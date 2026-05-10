@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Dockerfile installs `netbase` alongside `nfs-common`. netbase
+  provides `/etc/services`, `/etc/protocols`, and `/etc/rpc` — the
+  name↔number lookup tables mount.nfs uses during NFSv3 mount(2).
+  Without it, the kernel mount syscall returns `EPROTONOSUPPORT`,
+  which mount.nfs surfaces as `Protocol not supported` even after
+  successful portmapper discovery (verbose trace shows
+  `trying vers=3, prot=6` followed by failure). debian:bookworm-slim
+  strips netbase; nfs-common does not pull it in. csi-driver-nfs's
+  Dockerfile installs netbase for the same reason. Real production
+  failure on a UNAS Pro NAS in v0.3.3.
+
 ## [0.3.3] - 2026-05-10
 
 ### Fixed
