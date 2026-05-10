@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-05-10
+
 ### Fixed
 
 - Dockerfile installs `netbase` alongside `nfs-common`. netbase
@@ -252,7 +254,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `make check` — single command that runs fmt, vet, lint, tidy-check, race
   test + coverage, build, smoke, and csi-sanity. CI runs the same target.
 
-[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/middlendian/fileblock-csi/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/middlendian/fileblock-csi/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/middlendian/fileblock-csi/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/middlendian/fileblock-csi/compare/v0.3.0...v0.3.1
