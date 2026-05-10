@@ -115,11 +115,7 @@ jobs:
         run: |
           set -euo pipefail
           KUSTOMIZATION="deploy/kustomize/base/kustomization.yaml"
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "release: $VERSION" \
-            --body "$(cat <<EOF
+          PR_BODY="$(cat <<EOF
           ## Summary
 
           Cuts release **$VERSION**.
@@ -140,3 +136,17 @@ jobs:
             as its body.
           EOF
           )"
+          if gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "release: $VERSION" \
+              --body "$PR_BODY"; then
+            echo "PR opened."
+          else
+            # gh pr create fails when the repo setting
+            # "Allow GitHub Actions to create and approve pull requests" is off.
+            # The branch is already pushed — open the PR manually via the link below.
+            TITLE_ENC="release%3A+$VERSION"
+            echo "::warning::Could not open PR automatically. Enable 'Allow GitHub Actions to create and approve pull requests' in Settings → Actions → General, or open the PR manually."
+            echo "::notice title=Open PR manually::https://github.com/$GITHUB_REPOSITORY/compare/main...$BRANCH?quick_pull=1&title=$TITLE_ENC"
+          fi
