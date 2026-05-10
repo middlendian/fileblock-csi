@@ -102,18 +102,23 @@ gating tests on root + losetup.
 
 ## Releases
 
-Releases are PR-driven. The maintainer opens a `release/vX.Y.Z` PR via
-`hack/cut-release.sh`; merging it to `main` (any merge mode) triggers
-`tag-and-release.yml`, which reads the version from the head branch
-name, creates the tag at the merge commit, and calls `release.yml` to
-build and publish.
+Releases are PR-driven. The maintainer triggers the `cut-release`
+workflow (`workflow_dispatch`) with a version input; it edits
+`CHANGELOG.md`, bumps the kustomization `newTag`, pushes a
+`release/vX.Y.Z` branch, and opens a PR. Merging that PR (any merge
+mode) triggers `tag-and-release.yml`, which reads the version from the
+head branch name, creates the tag at the merge commit, and calls
+`release.yml` to build and publish.
 
 ### How a release happens, end-to-end
 
-1. **`hack/cut-release.sh vX.Y.Z`** (or `make release VERSION=vX.Y.Z`)
-   creates a `release/vX.Y.Z` branch with one commit on it
-   (CHANGELOG promotion + base kustomization `newTag` bump), subject
-   `release: vX.Y.Z`, and opens a PR.
+1. **`cut-release` workflow** (`Actions → Cut release → Run workflow`,
+   input `version: vX.Y.Z`) creates a `release/vX.Y.Z` branch with one
+   commit (CHANGELOG promotion + base kustomization `newTag` bump),
+   subject `release: vX.Y.Z`, and opens a PR. The workflow promotes
+   `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD` and inserts a fresh
+   empty `## [Unreleased]` above it automatically — no manual CHANGELOG
+   editing required.
 2. **Merge the PR.** Squash-merge, merge-commit, and rebase-merge all
    work — the trigger reads the version from the PR's head branch name
    (`release/vX.Y.Z`), not the commit message, so the merger doesn't
@@ -151,7 +156,7 @@ without needing a PAT or GitHub App.
 
 `deploy/kustomize/base/kustomization.yaml` carries an `images:` override
 whose `newTag` is the **most recent released version**.
-`hack/cut-release.sh` bumps it from the previous release's tag to
+The `cut-release` workflow bumps it from the previous release's tag to
 `vX.Y.Z` as part of the release commit. So:
 
 - `kubectl apply -k 'github.com/middlendian/fileblock-csi/deploy/kustomize/base?ref=v0.1.0'`
@@ -164,14 +169,13 @@ People who want bleeding-edge use the `:dev` image (`make docker`), not
 
 ### Cutting `vX.Y.Z`
 
-1. Edit `CHANGELOG.md`: rename `## [Unreleased]` to
-   `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above
-   it, and update the `[Unreleased]` / `[X.Y.Z]` link references at the
-   bottom. Don't commit yet.
-2. From a clean `main` synced with origin, run
-   `make release VERSION=vX.Y.Z` (or `hack/cut-release.sh vX.Y.Z`). The
-   script verifies pre-conditions, bumps `newTag`, commits, pushes the
-   `release/vX.Y.Z` branch, and opens a PR.
+1. Make sure `CHANGELOG.md`'s `## [Unreleased]` section has the entries
+   for this release (the workflow will not add entries for you, only
+   promote the heading).
+2. Go to **Actions → Cut release → Run workflow**, enter `version: vX.Y.Z`.
+   The `cut-release` workflow promotes `## [Unreleased]` → `## [X.Y.Z] -
+   YYYY-MM-DD`, inserts a fresh empty `## [Unreleased]` above it, updates
+   the link references, bumps `newTag`, commits, and opens a PR.
 3. Review the PR. Merge with whichever mode you prefer — the trigger
    reads the version from the PR's head branch name, not the merge
    commit message.
@@ -181,8 +185,8 @@ People who want bleeding-edge use the `:dev` image (`make docker`), not
    non-prereleases) and the GitHub release is published.
 
 If the `release` job fails with `No CHANGELOG entry for vX.Y.Z`, the
-CHANGELOG promotion in step 1 was wrong (typo, wrong date format).
-Fix CHANGELOG on `main` via a follow-up PR, delete the broken tag
+CHANGELOG promotion was wrong (typo, wrong date format). Fix CHANGELOG
+on `main` via a follow-up PR, delete the broken tag
 (`gh api -X DELETE repos/middlendian/fileblock-csi/git/refs/tags/vX.Y.Z`),
 and re-trigger the release via
 `gh workflow run tag-and-release.yml -f version=vX.Y.Z` (or the Actions
@@ -194,7 +198,7 @@ These rules live in the GitHub repo settings (not in this repo's tree),
 and the release flow above relies on them:
 
 - **`main` branch protection**: pull request required to push. Already
-  in place — that's why `cut-release.sh` opens a PR.
+  in place — that's why the `cut-release` workflow opens a PR.
 - **`v*` tag protection ruleset**: tag creation/update/delete blocked
   for everyone except `github-actions[bot]`. This is what stops humans
   from pushing tags directly; the `tag` job in `tag-and-release.yml` is
