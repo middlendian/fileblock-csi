@@ -138,6 +138,26 @@ func TestSidecarTimeouts(t *testing.T) {
 	}
 }
 
+// TestCSIDriverFsGroupPolicyIsFile asserts the CSIDriver resource sets
+// fsGroupPolicy: File. Without an explicit policy, the API server
+// defaults to ReadWriteOnceWithFSType, which tells kubelet to skip
+// fsGroup-based chown unless the PV declares a csi.fsType. fileblock
+// formats and mounts ext4 internally but does not surface fsType on the
+// PV, so the default policy is a no-op and freshly-provisioned volumes
+// stay owned by root:root 0755 — non-root pods that set fsGroup cannot
+// write to them. File tells kubelet to always apply fsGroup, which is
+// the correct behavior for a driver that provisions one private ext4
+// filesystem per PV with SINGLE_NODE_WRITER access.
+func TestCSIDriverFsGroupPolicyIsFile(t *testing.T) {
+	data, err := os.ReadFile("kustomize/base/csidriver.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "fsGroupPolicy: File") {
+		t.Errorf("kustomize/base/csidriver.yaml: must declare fsGroupPolicy: File so kubelet applies fsGroup to fileblock volumes")
+	}
+}
+
 // requireFileblockSecurityContext reads a base manifest and asserts the
 // canonical security-context block — privileged, SYS_ADMIN, drop ALL —
 // appears in order. The match is substring-based rather than
