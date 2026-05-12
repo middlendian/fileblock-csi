@@ -5,5 +5,12 @@ metadata:
 spec:
   attachRequired: false
   podInfoOnMount: false
+  # File: kubelet always applies the pod's fsGroup to the mounted volume.
+  # fileblock provisions one private ext4 filesystem per PV with
+  # SINGLE_NODE_WRITER, so there is no shared-state concern. The default
+  # (ReadWriteOnceWithFSType) is a no-op for this driver because the PV
+  # does not declare csi.fsType, so non-root pods that set fsGroup would
+  # otherwise be unable to write to freshly-provisioned volumes.
+  fsGroupPolicy: File
   volumeLifecycleModes:
     - Persistent

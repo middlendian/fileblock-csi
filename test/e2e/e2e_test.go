@@ -220,6 +220,33 @@ sleep 3600
 	waitPodReady(t, ns, "pod-b", defaultPodReady)
 }
 
+// TestNonRootPodCanWriteWithFsGroup mounts a fileblock PVC into a pod
+// that runs as a non-root user and declares an fsGroup, then asserts the
+// container can create a file at the root of the mount. This regresses
+// without `fsGroupPolicy: File` on the CSIDriver: the API server default
+// (ReadWriteOnceWithFSType) tells kubelet to skip fsGroup chown unless
+// the PV declares a csi.fsType, which fileblock does not. The mount
+// would then be owned root:root 0755 and the non-root container would
+// fail to write with EACCES.
+func TestNonRootPodCanWriteWithFsGroup(t *testing.T) {
+	ns := makeNamespace(t)
+	applyYAML(t, pvcManifest(ns, "vol", "128Mi"))
+	applyYAML(t, podNonRoot(ns, "writer", "vol", `
+set -eu
+id
+touch /data/owned-by-fsgroup
+ls -ln /data/owned-by-fsgroup
+test -O /data/owned-by-fsgroup
+sleep 3600
+`))
+	waitPodReady(t, ns, "writer", defaultPodReady)
+	out := kubectl(t, "-n", ns, "exec", "writer", "--",
+		"sh", "-c", "stat -c '%u %g %a' /data && stat -c '%u %g' /data/owned-by-fsgroup")
+	if !strings.Contains(out, "1000") {
+		t.Fatalf("expected uid/gid 1000 ownership on mount or written file, got: %s", out)
+	}
+}
+
 // TestNFSv3BackingProperties only runs when E2E_BACKING_KIND=nfs. It first
 // confirms the controller pod really sees an NFS-mounted backing store
 // (otherwise the rest of the assertion is meaningless), then asserts that a
@@ -327,6 +354,40 @@ metadata:
   namespace: %s
 spec:
   restartPolicy: Never
+  containers:
+    - name: shell
+      image: debian:bookworm-slim
+      command: [/bin/sh, -c]
+      args:
+        - |
+%s
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: %s
+`, name, ns, indent(script, 10), pvc)
+}
+
+// podNonRoot is podWithScript with a pod-level securityContext that runs
+// the container as uid:gid 1000:1000 with fsGroup 1000. The fsGroup is
+// what triggers the kubelet's volume-ownership pass that this test is
+// exercising — without it, no chown would be expected regardless of
+// driver configuration.
+func podNonRoot(ns, name, pvc, script string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
   containers:
     - name: shell
       image: debian:bookworm-slim

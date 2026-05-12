@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `CSIDriver` resource now declares `fsGroupPolicy: File`. Without an
+  explicit policy, the API server defaults to `ReadWriteOnceWithFSType`,
+  which tells kubelet to skip the fsGroup-based recursive chown unless
+  the PV declares a `csi.fsType`. fileblock formats and mounts ext4
+  internally but does not surface fsType on the PV, so the default
+  policy was a no-op: freshly-provisioned volumes stayed owned by
+  `root:root 0755` and non-root pods that set `securityContext.fsGroup`
+  could not write to them (EACCES at the mount root). `File` tells
+  kubelet to always apply fsGroup, which is the correct behavior for a
+  driver that provisions one private ext4 filesystem per PV with
+  `SINGLE_NODE_WRITER` access. `TestCSIDriverFsGroupPolicyIsFile` (unit)
+  and `TestNonRootPodCanWriteWithFsGroup` (e2e) added to guard against
+  regression.
+
 ## [0.3.6] - 2026-05-10
 
 ### Fixed
