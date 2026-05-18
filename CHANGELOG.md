@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Registry.AdoptExisting` now verifies each candidate directory is an
+  actual mountpoint via `findmnt(8)` before caching it as "mounted".
+  Previously, any storeID-shaped subdirectory under `--stores-root` was
+  adopted unconditionally. Under the default `emptyDir`-backed stores
+  volume, a container restart within the same pod (node reboot, OOM
+  kill, liveness-probe failure) left the directory entry behind without
+  its NFS mount; `AdoptExisting` poisoned the in-process cache; the
+  next `NodeStageVolume` short-circuited on the false cache hit and
+  returned `NotFound` for `.img` files that were still present on the
+  NFS server. Confirmed in production on a 6-node k0s cluster after a
+  multi-node reboot, 2026-05-17.
+  `TestRegistryAdoptExistingSkipsNonMountedDirs` (unit) added to guard
+  against regression.
+
 ## [0.3.7] - 2026-05-12
 
 ### Fixed
