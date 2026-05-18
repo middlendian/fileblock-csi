@@ -118,11 +118,20 @@ func (r *Registry) MountedPaths() []string {
 	return out
 }
 
-// AdoptExisting walks r.root and treats every immediate subdirectory as
-// a previously-mounted store, populating the mounted-paths cache so
-// MountedPaths() / DeleteVolume / etc. can find them. It does NOT
-// re-mount anything — the directory is assumed to still hold a live
-// mount (true under hostPath caches that survive pod restarts).
+// AdoptExisting walks r.root and adopts each immediate subdirectory whose
+// name matches the storeID pattern AND whose path is currently a live
+// mountpoint (verified via r.mp.IsMountPoint). Adopted entries populate
+// the mounted-paths cache so MountedPaths() / DeleteVolume / etc. can
+// find them. It does NOT re-mount anything — adoption requires an
+// existing live mount.
+//
+// The mountpoint check is load-bearing under the default emptyDir cache
+// shape: emptyDir survives container restarts within the same pod (only
+// pod recreation wipes it), so after a container restart the stores-root
+// may still contain a <storeID> directory from a prior run with no NFS
+// mount underneath. Treating that as "mounted" would short-circuit the
+// next Get and break NodeStageVolume. Under hostPath, the mount itself
+// survives, IsMountPoint returns true, and adoption proceeds.
 //
 // Caveats:
 //   - Cannot reconstruct the full Config for adopted stores; only the
@@ -130,8 +139,9 @@ func (r *Registry) MountedPaths() []string {
 //     against an adopted-but-not-Get-ed store will return NotFound from
 //     ConfigByStoreID. After the next CreateVolume against the SC,
 //     the Config is registered and Delete works.
-//   - Under emptyDir (the recommended cache shape) the directory is
-//     empty after restart, so this is always a no-op.
+//   - Per-candidate IsMountPoint errors are absorbed silently and treated
+//     as "not adopted". The worst case is a redundant mount(8) on the
+//     next Get, which is safe.
 func (r *Registry) AdoptExisting(ctx context.Context) error {
 	entries, err := os.ReadDir(r.root)
 	if err != nil {
