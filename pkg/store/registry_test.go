@@ -293,3 +293,38 @@ func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
 		t.Errorf("after non-adopted Get, mount called %d times, want 1", mountCalls)
 	}
 }
+
+// TestRegistryAdoptExistingAdoptsMountedDirs asserts the positive path:
+// when IsMountPoint reports a live mount, AdoptExisting caches the
+// storeID and subsequent Get(cfg) short-circuits without issuing a real
+// mount(8) call.
+func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+	dir := filepath.Join(root, cfg.ID())
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := exectest.New()
+	fake.Set("findmnt", dir, nil)
+
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+
+	if err := reg.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	got := reg.MountedPaths()
+	if len(got) != 1 || got[0] != dir {
+		t.Fatalf("MountedPaths after adopting verified mount = %v, want [%q]", got, dir)
+	}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, c := range fake.Calls {
+		if c.Name == "mount" {
+			t.Errorf("Get after adoption should hit cache, but called mount: %v", c.Args)
+		}
+	}
+}
