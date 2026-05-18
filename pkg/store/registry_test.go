@@ -167,17 +167,19 @@ func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
 
 func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "abc123def456"), 0o755); err != nil {
+	dir := filepath.Join(root, "abc123def456")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fake := exectest.New()
+	fake.Set("findmnt", dir, nil)
 	mnt := mount.New(fake)
 	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	got := reg.MountedPaths()
-	if len(got) != 1 || got[0] != filepath.Join(root, "abc123def456") {
+	if len(got) != 1 || got[0] != dir {
 		t.Errorf("MountedPaths = %v", got)
 	}
 }
@@ -203,17 +205,19 @@ func TestRegistryAdoptExistingSkipsNonStoreIDDirs(t *testing.T) {
 		}
 	}
 	// And one valid storeID-looking dir to make sure adoption still works.
-	if err := os.MkdirAll(filepath.Join(root, "0123456789ab"), 0o755); err != nil {
+	validDir := filepath.Join(root, "0123456789ab")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fake := exectest.New()
+	fake.Set("findmnt", validDir, nil)
 	mnt := mount.New(fake)
 	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	got := reg.MountedPaths()
-	if len(got) != 1 || got[0] != filepath.Join(root, "0123456789ab") {
+	if len(got) != 1 || got[0] != validDir {
 		t.Errorf("MountedPaths = %v; want exactly the one storeID-shaped dir", got)
 	}
 }
