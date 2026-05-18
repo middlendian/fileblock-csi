@@ -39,12 +39,15 @@ type Registry struct {
 	storeMu map[string]*sync.Mutex // storeID -> per-store lock
 }
 
-// NewRegistry returns a Registry that mounts under root. mounters may be
-// nil if the corresponding type is not supported in this binary. mp is
-// used by AdoptExisting to verify candidate directories are live mounts
-// before adopting them — without it, a stale <storeID> directory in an
-// emptyDir cache would poison the mounted-paths map after a container
-// restart.
+// NewRegistry returns a Registry that mounts under root. nfs and local
+// mounters may be nil if the corresponding backing-store type is not
+// supported in this binary. mp is required by AdoptExisting to verify
+// each candidate directory is a live mount before adopting it; without
+// the check, a stale <storeID> directory left under an emptyDir cache
+// by a prior container would poison the mounted-paths map after a
+// container restart. mp may be nil only when the caller will not invoke
+// AdoptExisting (e.g. tests that exercise Get-only paths and pass nil
+// for all three).
 func NewRegistry(root string, nfs Mounter, local Mounter, mp MountChecker) *Registry {
 	return &Registry{
 		root:    root,
