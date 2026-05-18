@@ -84,6 +84,102 @@ sleep 3600
 	waitPodReady(t, ns, "reader", defaultPodReady)
 }
 
+// TestNodeContainerRestartRecovery exercises the AdoptExisting cache-
+// poisoning regression: a fileblock-node container restart within the
+// same pod preserves the emptyDir backing the stores volume — including
+// the <storeID> directory the prior container created when it mounted
+// the backing source. The post-restart container must NOT adopt that
+// directory as "mounted"; the next NodeStageVolume must do a real mount.
+//
+// Pre-fix, the next stage returned `code = NotFound desc = image …: no
+// such file or directory` for the still-present .img and consumer pods
+// hung in ContainerCreating until a new pod UID forced a fresh emptyDir.
+//
+// Reproduction shape:
+//  1. Apply PVC + consumer pod, wait for Ready (NodeStage → backing
+//     source mounted, <storeID> dir populated, .img created).
+//  2. Delete the consumer pod (NodeUnstage releases the staging mount;
+//     the per-process registry cache is in-memory only).
+//  3. SIGTERM the fileblock-node binary on the consumer's node — same
+//     pod sandbox, fresh container, emptyDir contents preserved on disk.
+//     The DaemonSet runs with hostPID: true, so PID 1 inside the
+//     container is the host's init; we have to locate the binary's
+//     actual PID by walking /proc and matching the comm field. SIGTERM
+//     is delivered because fileblock-node calls signal.NotifyContext
+//     on SIGTERM, which cancels Serve's ctx and exits the binary
+//     cleanly. The container restart that follows is what we're after.
+//  4. Wait for fileblock-node to come back Ready (AdoptExisting runs).
+//  5. Re-apply the consumer pod and wait for Ready. Assert the marker
+//     file from run 1 is still there — proves the new stage actually
+//     re-mounted the same backing source rather than handing out an
+//     empty mountpoint.
+func TestNodeContainerRestartRecovery(t *testing.T) {
+	ns := makeNamespace(t)
+	applyYAML(t, pvcManifest(ns, "vol", "64Mi"))
+
+	applyYAML(t, podWithScript(ns, "consumer", "vol", `
+set -eu
+echo first-run > /data/marker
+sleep 3600
+`))
+	waitPodReady(t, ns, "consumer", defaultPodReady)
+	node := nodeOfPod(t, ns, "consumer")
+	nodePod := dsPodOnNode(t, "fileblock-system", "fileblock-node", node)
+
+	kubectl(t, "-n", ns, "delete", "pod", "consumer", "--wait=true")
+	waitPodGone(t, ns, "consumer", 60*time.Second)
+
+	rcBefore := strings.TrimSpace(kubectl(t, "-n", "fileblock-system", "get", "pod", nodePod,
+		"-o", "jsonpath={.status.containerStatuses[?(@.name=='fileblock-node')].restartCount}"))
+
+	// With hostPID: true, PID 1 inside the container is the host init,
+	// not fileblock-node. Walk /proc and match comm to find the actual
+	// binary, then SIGTERM it via the shell builtin (the slim runtime
+	// image ships no standalone /bin/kill). fileblock-node's
+	// signal.NotifyContext handler exits Serve cleanly; the container
+	// then exits and kubelet restarts it in the same pod sandbox. The
+	// exec connection drops as the container dies; log output for
+	// post-mortem if the restart never happens.
+	out, err := kubectlRaw("-n", "fileblock-system", "exec", nodePod,
+		"-c", "fileblock-node", "--", "sh", "-c",
+		`for p in /proc/[0-9]*; do
+			[ "$(cat $p/comm 2>/dev/null)" = "fileblock-node" ] && kill -TERM "${p##*/}" && exit 0
+		done
+		echo "fileblock-node process not found" >&2
+		exit 1`)
+	t.Logf("kill exec: out=%q err=%v", out, err)
+
+	// Wait for the restart to register and the new container to become
+	// Ready. The restart-count bump is the cleanest signal that the
+	// fresh container has actually started (AdoptExisting has run).
+	eventually(t, defaultPodReady, func() error {
+		rcAfter := strings.TrimSpace(kubectl(t, "-n", "fileblock-system", "get", "pod", nodePod,
+			"-o", "jsonpath={.status.containerStatuses[?(@.name=='fileblock-node')].restartCount}"))
+		ready := strings.TrimSpace(kubectl(t, "-n", "fileblock-system", "get", "pod", nodePod,
+			"-o", "jsonpath={.status.containerStatuses[?(@.name=='fileblock-node')].ready}"))
+		if rcAfter == rcBefore {
+			return fmt.Errorf("restartCount still %s, want > %s", rcAfter, rcBefore)
+		}
+		if ready != "true" {
+			return fmt.Errorf("fileblock-node container not Ready yet: ready=%q", ready)
+		}
+		return nil
+	})
+
+	// Force the consumer back onto the same node so the regression
+	// path — the post-restart fileblock-node serving NodeStageVolume —
+	// is the one under test. Without pinning, the scheduler is free to
+	// land the pod on a different node whose node-plugin never saw the
+	// stale dir.
+	applyYAML(t, podOnNode(ns, "consumer", "vol", node, `
+set -eu
+test -f /data/marker
+grep -q first-run /data/marker
+sleep 3600
+`))
+	waitPodReady(t, ns, "consumer", defaultPodReady)
+}
+
 // TestFlockSerializes asserts that flock(2) on the loop-mounted ext4 has
 // real local-disk semantics — two processes contending on the same lock
 // file see a non-blocking flock fail when the lock is held. Bind-mounted

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 )
@@ -17,7 +18,8 @@ func TestRegistryGetMountsOnce(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	p1, err := reg.Get(context.Background(), cfg)
@@ -49,7 +51,8 @@ func TestRegistryDistinctConfigsMountSeparately(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	a := Config{Type: TypeNFS, NFSServer: "s1", NFSPath: "/p"}
 	b := Config{Type: TypeNFS, NFSServer: "s2", NFSPath: "/p"}
 	pa, _ := reg.Get(context.Background(), a)
@@ -63,7 +66,8 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	var wg sync.WaitGroup
@@ -91,7 +95,8 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 func TestRegistryRejectsUnknownType(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	_, err := reg.Get(context.Background(), Config{Type: "smb"})
 	if err == nil {
 		t.Fatal("expected error for unknown type")
@@ -102,7 +107,8 @@ func TestRegistryConfigByStoreID(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	if _, ok := reg.ConfigByStoreID(cfg.ID()); ok {
@@ -124,7 +130,8 @@ func TestRegistryMountedPaths(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 
 	if paths := reg.MountedPaths(); len(paths) != 0 {
 		t.Fatalf("MountedPaths before any Get = %v, want empty", paths)
@@ -148,8 +155,9 @@ func TestRegistryMountedPaths(t *testing.T) {
 func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
-	if err := reg.AdoptExisting(); err != nil {
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	if len(reg.MountedPaths()) != 0 {
@@ -159,16 +167,19 @@ func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
 
 func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "abc123def456"), 0o755); err != nil {
+	dir := filepath.Join(root, "abc123def456")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
-	if err := reg.AdoptExisting(); err != nil {
+	fake.Set("findmnt", dir, nil)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	got := reg.MountedPaths()
-	if len(got) != 1 || got[0] != filepath.Join(root, "abc123def456") {
+	if len(got) != 1 || got[0] != dir {
 		t.Errorf("MountedPaths = %v", got)
 	}
 }
@@ -194,16 +205,19 @@ func TestRegistryAdoptExistingSkipsNonStoreIDDirs(t *testing.T) {
 		}
 	}
 	// And one valid storeID-looking dir to make sure adoption still works.
-	if err := os.MkdirAll(filepath.Join(root, "0123456789ab"), 0o755); err != nil {
+	validDir := filepath.Join(root, "0123456789ab")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
-	if err := reg.AdoptExisting(); err != nil {
+	fake.Set("findmnt", validDir, nil)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	got := reg.MountedPaths()
-	if len(got) != 1 || got[0] != filepath.Join(root, "0123456789ab") {
+	if len(got) != 1 || got[0] != validDir {
 		t.Errorf("MountedPaths = %v; want exactly the one storeID-shaped dir", got)
 	}
 }
@@ -222,7 +236,8 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 		}
 		return "", nil
 	}
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	if _, err := reg.Get(context.Background(), cfg); err == nil {
@@ -233,5 +248,123 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Errorf("mount called %d times, want 2 (first failed, second retried)", calls.Load())
+	}
+}
+
+// TestRegistryAdoptExistingSkipsNonMountedDirs verifies the fix for the
+// emptyDir cache-poisoning bug: a storeID-shaped directory that exists
+// but is not currently a mountpoint must NOT be adopted. Otherwise a
+// stale leftover from a prior container run causes Get to short-circuit
+// and NodeStageVolume to fail with NotFound on the .img file. The
+// fixture wires findmnt to return exit 1 (the "not a mountpoint"
+// sentinel that pkg/mount.Mounter.IsMountPoint recognizes) and a stub
+// for the real mount(8) call that the recovery path needs.
+func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+	if err := os.MkdirAll(filepath.Join(root, cfg.ID()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{ExitCode: 1})
+	fake.Set("mount", "", nil)
+
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+
+	if err := reg.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	if paths := reg.MountedPaths(); len(paths) != 0 {
+		t.Errorf("MountedPaths after AdoptExisting on non-mounted stale dir = %v, want empty", paths)
+	}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	mountCalls := 0
+	for _, c := range fake.Calls {
+		if c.Name == "mount" {
+			mountCalls++
+		}
+	}
+	if mountCalls != 1 {
+		t.Errorf("after non-adopted Get, mount called %d times, want 1", mountCalls)
+	}
+}
+
+// TestRegistryAdoptExistingAdoptsMountedDirs asserts the positive path:
+// when IsMountPoint reports a live mount, AdoptExisting caches the
+// storeID and subsequent Get(cfg) short-circuits without issuing a real
+// mount(8) call.
+func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+	dir := filepath.Join(root, cfg.ID())
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := exectest.New()
+	fake.Set("findmnt", dir, nil)
+
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+
+	if err := reg.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	got := reg.MountedPaths()
+	if len(got) != 1 || got[0] != dir {
+		t.Fatalf("MountedPaths after adopting verified mount = %v, want [%q]", got, dir)
+	}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, c := range fake.Calls {
+		if c.Name == "mount" {
+			t.Errorf("Get after adoption should hit cache, but called mount: %v", c.Args)
+		}
+	}
+}
+
+// TestRegistryAdoptExistingSkipsOnCheckError verifies that if
+// IsMountPoint returns an error that's NOT the exit-1 "not a mount"
+// sentinel (e.g. findmnt missing, or an unexpected exit code),
+// AdoptExisting skips that candidate but still returns nil. The next
+// Get(cfg) triggers a real mount(8) call — the recovery is identical
+// to the "not a mount" case.
+func TestRegistryAdoptExistingSkipsOnCheckError(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+	if err := os.MkdirAll(filepath.Join(root, cfg.ID()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{ExitCode: 2})
+	fake.Set("mount", "", nil)
+
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+
+	if err := reg.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("AdoptExisting should swallow per-candidate check errors, got %v", err)
+	}
+	if paths := reg.MountedPaths(); len(paths) != 0 {
+		t.Errorf("MountedPaths after IsMountPoint error = %v, want empty", paths)
+	}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	mountCalls := 0
+	for _, c := range fake.Calls {
+		if c.Name == "mount" {
+			mountCalls++
+		}
+	}
+	if mountCalls != 1 {
+		t.Errorf("after non-adopted Get, mount called %d times, want 1", mountCalls)
 	}
 }

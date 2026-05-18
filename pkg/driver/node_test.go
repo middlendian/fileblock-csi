@@ -26,7 +26,7 @@ func discardLog() *slog.Logger {
 // registry is never asked to actually mount anything).
 func newTestNodeRegistry(t *testing.T) *store.Registry {
 	t.Helper()
-	return store.NewRegistry(t.TempDir(), nil, nil)
+	return store.NewRegistry(t.TempDir(), nil, nil, nil)
 }
 
 // TestNodeGetInfoReportsNodeSegment verifies that NodeGetInfo always reports

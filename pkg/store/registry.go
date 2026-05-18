@@ -9,6 +9,13 @@ import (
 	"sync"
 )
 
+// MountChecker verifies whether a path is a live mountpoint. Implemented
+// by pkg/mount.Mounter (which shells out to findmnt(8)); tests substitute
+// a fake.
+type MountChecker interface {
+	IsMountPoint(ctx context.Context, target string) (bool, error)
+}
+
 // storeIDPattern matches a 12-char lowercase hex sha256 prefix — the only
 // shape Config.ID() ever produces. AdoptExisting uses this to skip
 // directories that happen to live under r.root but were not created by
@@ -24,6 +31,7 @@ type Registry struct {
 	root   string
 	nfsM   Mounter
 	localM Mounter
+	mp     MountChecker
 
 	mu      sync.Mutex
 	mounted map[string]string      // storeID -> mounted path
@@ -31,13 +39,21 @@ type Registry struct {
 	storeMu map[string]*sync.Mutex // storeID -> per-store lock
 }
 
-// NewRegistry returns a Registry that mounts under root. mounters may be
-// nil if the corresponding type is not supported in this binary.
-func NewRegistry(root string, nfs Mounter, local Mounter) *Registry {
+// NewRegistry returns a Registry that mounts under root. nfs and local
+// mounters may be nil if the corresponding backing-store type is not
+// supported in this binary. mp is required by AdoptExisting to verify
+// each candidate directory is a live mount before adopting it; without
+// the check, a stale <storeID> directory left under an emptyDir cache
+// by a prior container would poison the mounted-paths map after a
+// container restart. mp may be nil only when the caller will not invoke
+// AdoptExisting (e.g. tests that exercise Get-only paths and pass nil
+// for all three).
+func NewRegistry(root string, nfs Mounter, local Mounter, mp MountChecker) *Registry {
 	return &Registry{
 		root:    root,
 		nfsM:    nfs,
 		localM:  local,
+		mp:      mp,
 		mounted: map[string]string{},
 		configs: map[string]Config{},
 		storeMu: map[string]*sync.Mutex{},
@@ -105,11 +121,20 @@ func (r *Registry) MountedPaths() []string {
 	return out
 }
 
-// AdoptExisting walks r.root and treats every immediate subdirectory as
-// a previously-mounted store, populating the mounted-paths cache so
-// MountedPaths() / DeleteVolume / etc. can find them. It does NOT
-// re-mount anything — the directory is assumed to still hold a live
-// mount (true under hostPath caches that survive pod restarts).
+// AdoptExisting walks r.root and adopts each immediate subdirectory whose
+// name matches the storeID pattern AND whose path is currently a live
+// mountpoint (verified via r.mp.IsMountPoint). Adopted entries populate
+// the mounted-paths cache so MountedPaths() / DeleteVolume / etc. can
+// find them. It does NOT re-mount anything — adoption requires an
+// existing live mount.
+//
+// The mountpoint check is load-bearing under the default emptyDir cache
+// shape: emptyDir survives container restarts within the same pod (only
+// pod recreation wipes it), so after a container restart the stores-root
+// may still contain a <storeID> directory from a prior run with no NFS
+// mount underneath. Treating that as "mounted" would short-circuit the
+// next Get and break NodeStageVolume. Under hostPath, the mount itself
+// survives, IsMountPoint returns true, and adoption proceeds.
 //
 // Caveats:
 //   - Cannot reconstruct the full Config for adopted stores; only the
@@ -117,9 +142,10 @@ func (r *Registry) MountedPaths() []string {
 //     against an adopted-but-not-Get-ed store will return NotFound from
 //     ConfigByStoreID. After the next CreateVolume against the SC,
 //     the Config is registered and Delete works.
-//   - Under emptyDir (the recommended cache shape) the directory is
-//     empty after restart, so this is always a no-op.
-func (r *Registry) AdoptExisting() error {
+//   - Per-candidate IsMountPoint errors are absorbed silently and treated
+//     as "not adopted". The worst case is a redundant mount(8) on the
+//     next Get, which is safe.
+func (r *Registry) AdoptExisting(ctx context.Context) error {
 	entries, err := os.ReadDir(r.root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -140,7 +166,15 @@ func (r *Registry) AdoptExisting() error {
 			// operator may have placed under stores-root.
 			continue
 		}
-		r.mounted[id] = filepath.Join(r.root, id)
+		target := filepath.Join(r.root, id)
+		mounted, err := r.mp.IsMountPoint(ctx, target)
+		if err != nil || !mounted {
+			// Conservative: skip on any failure or non-mount. Worst
+			// case is a redundant mount(8) call on the next Get,
+			// which is safe.
+			continue
+		}
+		r.mounted[id] = target
 	}
 	return nil
 }
