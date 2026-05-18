@@ -153,7 +153,15 @@ func (r *Registry) AdoptExisting(ctx context.Context) error {
 			// operator may have placed under stores-root.
 			continue
 		}
-		r.mounted[id] = filepath.Join(r.root, id)
+		target := filepath.Join(r.root, id)
+		mounted, err := r.mp.IsMountPoint(ctx, target)
+		if err != nil || !mounted {
+			// Conservative: skip on any failure or non-mount. Worst
+			// case is a redundant mount(8) call on the next Get,
+			// which is safe.
+			continue
+		}
+		r.mounted[id] = target
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 )
@@ -243,5 +244,48 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Errorf("mount called %d times, want 2 (first failed, second retried)", calls.Load())
+	}
+}
+
+// TestRegistryAdoptExistingSkipsNonMountedDirs verifies the fix for the
+// emptyDir cache-poisoning bug: a storeID-shaped directory that exists
+// but is not currently a mountpoint must NOT be adopted. Otherwise a
+// stale leftover from a prior container run causes Get to short-circuit
+// and NodeStageVolume to fail with NotFound on the .img file. The
+// fixture wires findmnt to return exit 1 (the "not a mountpoint"
+// sentinel that pkg/mount.Mounter.IsMountPoint recognizes) and a stub
+// for the real mount(8) call that the recovery path needs.
+func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+	if err := os.MkdirAll(filepath.Join(root, cfg.ID()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{ExitCode: 1})
+	fake.Set("mount", "", nil)
+
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+
+	if err := reg.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+	if paths := reg.MountedPaths(); len(paths) != 0 {
+		t.Errorf("MountedPaths after AdoptExisting on non-mounted stale dir = %v, want empty", paths)
+	}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	mountCalls := 0
+	for _, c := range fake.Calls {
+		if c.Name == "mount" {
+			mountCalls++
+		}
+	}
+	if mountCalls != 1 {
+		t.Errorf("after non-adopted Get, mount called %d times, want 1", mountCalls)
 	}
 }
