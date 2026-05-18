@@ -17,7 +17,8 @@ func TestRegistryGetMountsOnce(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	p1, err := reg.Get(context.Background(), cfg)
@@ -49,7 +50,8 @@ func TestRegistryDistinctConfigsMountSeparately(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	a := Config{Type: TypeNFS, NFSServer: "s1", NFSPath: "/p"}
 	b := Config{Type: TypeNFS, NFSServer: "s2", NFSPath: "/p"}
 	pa, _ := reg.Get(context.Background(), a)
@@ -63,7 +65,8 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	var wg sync.WaitGroup
@@ -91,7 +94,8 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 func TestRegistryRejectsUnknownType(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	_, err := reg.Get(context.Background(), Config{Type: "smb"})
 	if err == nil {
 		t.Fatal("expected error for unknown type")
@@ -102,7 +106,8 @@ func TestRegistryConfigByStoreID(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	if _, ok := reg.ConfigByStoreID(cfg.ID()); ok {
@@ -124,7 +129,8 @@ func TestRegistryMountedPaths(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 
 	if paths := reg.MountedPaths(); len(paths) != 0 {
 		t.Fatalf("MountedPaths before any Get = %v, want empty", paths)
@@ -148,7 +154,8 @@ func TestRegistryMountedPaths(t *testing.T) {
 func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	if err := reg.AdoptExisting(); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
@@ -163,7 +170,8 @@ func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	if err := reg.AdoptExisting(); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
@@ -198,7 +206,8 @@ func TestRegistryAdoptExistingSkipsNonStoreIDDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := exectest.New()
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	if err := reg.AdoptExisting(); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
@@ -222,7 +231,8 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 		}
 		return "", nil
 	}
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mount.New(fake)))
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	if _, err := reg.Get(context.Background(), cfg); err == nil {

@@ -57,7 +57,7 @@ func main() {
 		log.Warn("reconcile failed at startup", "err", err)
 	}
 
-	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt))
+	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt), mnt)
 	if err := registry.AdoptExisting(); err != nil {
 		log.Warn("adopt existing stores failed at startup", "err", err)
 	}

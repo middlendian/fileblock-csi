@@ -9,6 +9,13 @@ import (
 	"sync"
 )
 
+// MountChecker verifies whether a path is a live mountpoint. Implemented
+// by pkg/mount.Mounter (which shells out to findmnt(8)); tests substitute
+// a fake.
+type MountChecker interface {
+	IsMountPoint(ctx context.Context, target string) (bool, error)
+}
+
 // storeIDPattern matches a 12-char lowercase hex sha256 prefix — the only
 // shape Config.ID() ever produces. AdoptExisting uses this to skip
 // directories that happen to live under r.root but were not created by
@@ -24,6 +31,7 @@ type Registry struct {
 	root   string
 	nfsM   Mounter
 	localM Mounter
+	mp     MountChecker
 
 	mu      sync.Mutex
 	mounted map[string]string      // storeID -> mounted path
@@ -32,12 +40,17 @@ type Registry struct {
 }
 
 // NewRegistry returns a Registry that mounts under root. mounters may be
-// nil if the corresponding type is not supported in this binary.
-func NewRegistry(root string, nfs Mounter, local Mounter) *Registry {
+// nil if the corresponding type is not supported in this binary. mp is
+// used by AdoptExisting to verify candidate directories are live mounts
+// before adopting them — without it, a stale <storeID> directory in an
+// emptyDir cache would poison the mounted-paths map after a container
+// restart.
+func NewRegistry(root string, nfs Mounter, local Mounter, mp MountChecker) *Registry {
 	return &Registry{
 		root:    root,
 		nfsM:    nfs,
 		localM:  local,
+		mp:      mp,
 		mounted: map[string]string{},
 		configs: map[string]Config{},
 		storeMu: map[string]*sync.Mutex{},
