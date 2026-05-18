@@ -20,8 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned `NotFound` for `.img` files that were still present on the
   NFS server. Confirmed in production on a 6-node k0s cluster after a
   multi-node reboot, 2026-05-17.
-  `TestRegistryAdoptExistingSkipsNonMountedDirs` (unit) added to guard
-  against regression.
+  `TestRegistryAdoptExistingSkipsNonMountedDirs` (unit) and
+  `TestNodeContainerRestartRecovery` (e2e) added to guard against
+  regression — the e2e variant SIGKILLs the fileblock-node container
+  in-place to reproduce the emptyDir-after-container-restart shape
+  end-to-end against kubelet.
 
 ## [0.3.7] - 2026-05-12
 
