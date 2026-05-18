@@ -328,3 +328,43 @@ func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
 		}
 	}
 }
+
+// TestRegistryAdoptExistingSkipsOnCheckError verifies that if
+// IsMountPoint returns an error that's NOT the exit-1 "not a mount"
+// sentinel (e.g. findmnt missing, or an unexpected exit code),
+// AdoptExisting skips that candidate but still returns nil. The next
+// Get(cfg) triggers a real mount(8) call — the recovery is identical
+// to the "not a mount" case.
+func TestRegistryAdoptExistingSkipsOnCheckError(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+	if err := os.MkdirAll(filepath.Join(root, cfg.ID()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{ExitCode: 2})
+	fake.Set("mount", "", nil)
+
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+
+	if err := reg.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("AdoptExisting should swallow per-candidate check errors, got %v", err)
+	}
+	if paths := reg.MountedPaths(); len(paths) != 0 {
+		t.Errorf("MountedPaths after IsMountPoint error = %v, want empty", paths)
+	}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	mountCalls := 0
+	for _, c := range fake.Calls {
+		if c.Name == "mount" {
+			mountCalls++
+		}
+	}
+	if mountCalls != 1 {
+		t.Errorf("after non-adopted Get, mount called %d times, want 1", mountCalls)
+	}
+}
