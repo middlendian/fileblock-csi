@@ -156,7 +156,7 @@ func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
 	fake := exectest.New()
 	mnt := mount.New(fake)
 	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
-	if err := reg.AdoptExisting(); err != nil {
+	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	if len(reg.MountedPaths()) != 0 {
@@ -172,7 +172,7 @@ func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
 	fake := exectest.New()
 	mnt := mount.New(fake)
 	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
-	if err := reg.AdoptExisting(); err != nil {
+	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	got := reg.MountedPaths()
@@ -208,7 +208,7 @@ func TestRegistryAdoptExistingSkipsNonStoreIDDirs(t *testing.T) {
 	fake := exectest.New()
 	mnt := mount.New(fake)
 	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
-	if err := reg.AdoptExisting(); err != nil {
+	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
 	got := reg.MountedPaths()

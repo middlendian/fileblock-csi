@@ -132,7 +132,7 @@ func (r *Registry) MountedPaths() []string {
 //     the Config is registered and Delete works.
 //   - Under emptyDir (the recommended cache shape) the directory is
 //     empty after restart, so this is always a no-op.
-func (r *Registry) AdoptExisting() error {
+func (r *Registry) AdoptExisting(ctx context.Context) error {
 	entries, err := os.ReadDir(r.root)
 	if err != nil {
 		if os.IsNotExist(err) {
