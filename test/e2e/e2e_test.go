@@ -100,14 +100,14 @@ sleep 3600
 //     source mounted, <storeID> dir populated, .img created).
 //  2. Delete the consumer pod (NodeUnstage releases the staging mount;
 //     the per-process registry cache is in-memory only).
-//  3. SIGTERM fileblock-node PID 1 on the consumer's node — same pod
-//     sandbox, fresh container, emptyDir contents preserved on disk.
-//     SIGKILL would be ideal but the kernel blocks it from within the
-//     same PID namespace unless init has a handler installed (which
-//     SIGKILL can't have); SIGTERM is delivered because fileblock-node
-//     calls signal.NotifyContext on SIGTERM, which cancels Serve's ctx
-//     and exits the binary cleanly. The container restart that follows
-//     is what we're after.
+//  3. SIGTERM the fileblock-node binary on the consumer's node — same
+//     pod sandbox, fresh container, emptyDir contents preserved on disk.
+//     The DaemonSet runs with hostPID: true, so PID 1 inside the
+//     container is the host's init; we have to locate the binary's
+//     actual PID by walking /proc and matching the comm field. SIGTERM
+//     is delivered because fileblock-node calls signal.NotifyContext
+//     on SIGTERM, which cancels Serve's ctx and exits the binary
+//     cleanly. The container restart that follows is what we're after.
 //  4. Wait for fileblock-node to come back Ready (AdoptExisting runs).
 //  5. Re-apply the consumer pod and wait for Ready. Assert the marker
 //     file from run 1 is still there — proves the new stage actually
@@ -132,14 +132,22 @@ sleep 3600
 	rcBefore := strings.TrimSpace(kubectl(t, "-n", "fileblock-system", "get", "pod", nodePod,
 		"-o", "jsonpath={.status.containerStatuses[?(@.name=='fileblock-node')].restartCount}"))
 
-	// SIGTERM PID 1 via the shell builtin (the runtime image doesn't
-	// ship the standalone /bin/kill — only sh's builtin is reliable
-	// here). fileblock-node's signal.NotifyContext handler cancels
-	// Serve's ctx, the binary exits cleanly, and kubelet restarts the
-	// container in the same pod sandbox. The exec connection drops as
-	// the container dies, so we ignore its return.
-	_, _ = kubectlRaw("-n", "fileblock-system", "exec", nodePod,
-		"-c", "fileblock-node", "--", "sh", "-c", "kill -TERM 1")
+	// With hostPID: true, PID 1 inside the container is the host init,
+	// not fileblock-node. Walk /proc and match comm to find the actual
+	// binary, then SIGTERM it via the shell builtin (the slim runtime
+	// image ships no standalone /bin/kill). fileblock-node's
+	// signal.NotifyContext handler exits Serve cleanly; the container
+	// then exits and kubelet restarts it in the same pod sandbox. The
+	// exec connection drops as the container dies; log output for
+	// post-mortem if the restart never happens.
+	out, err := kubectlRaw("-n", "fileblock-system", "exec", nodePod,
+		"-c", "fileblock-node", "--", "sh", "-c",
+		`for p in /proc/[0-9]*; do
+			[ "$(cat $p/comm 2>/dev/null)" = "fileblock-node" ] && kill -TERM "${p##*/}" && exit 0
+		done
+		echo "fileblock-node process not found" >&2
+		exit 1`)
+	t.Logf("kill exec: out=%q err=%v", out, err)
 
 	// Wait for the restart to register and the new container to become
 	// Ready. The restart-count bump is the cleanest signal that the
