@@ -22,9 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-node reboot, 2026-05-17.
   `TestRegistryAdoptExistingSkipsNonMountedDirs` (unit) and
   `TestNodeContainerRestartRecovery` (e2e) added to guard against
-  regression — the e2e variant SIGKILLs the fileblock-node container
-  in-place to reproduce the emptyDir-after-container-restart shape
-  end-to-end against kubelet.
+  regression — the e2e variant SIGTERMs PID 1 of the fileblock-node
+  container in-place (SIGKILL would be blocked by the kernel from
+  within the same PID namespace) to reproduce the
+  emptyDir-after-container-restart shape end-to-end against kubelet.
 
 ## [0.3.7] - 2026-05-12
 

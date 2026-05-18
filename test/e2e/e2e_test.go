@@ -100,8 +100,14 @@ sleep 3600
 //     source mounted, <storeID> dir populated, .img created).
 //  2. Delete the consumer pod (NodeUnstage releases the staging mount;
 //     the per-process registry cache is in-memory only).
-//  3. SIGKILL fileblock-node PID 1 on the consumer's node — same pod
+//  3. SIGTERM fileblock-node PID 1 on the consumer's node — same pod
 //     sandbox, fresh container, emptyDir contents preserved on disk.
+//     SIGKILL would be ideal but the kernel blocks it from within the
+//     same PID namespace unless init has a handler installed (which
+//     SIGKILL can't have); SIGTERM is delivered because fileblock-node
+//     calls signal.NotifyContext on SIGTERM, which cancels Serve's ctx
+//     and exits the binary cleanly. The container restart that follows
+//     is what we're after.
 //  4. Wait for fileblock-node to come back Ready (AdoptExisting runs).
 //  5. Re-apply the consumer pod and wait for Ready. Assert the marker
 //     file from run 1 is still there — proves the new stage actually
@@ -126,11 +132,14 @@ sleep 3600
 	rcBefore := strings.TrimSpace(kubectl(t, "-n", "fileblock-system", "get", "pod", nodePod,
 		"-o", "jsonpath={.status.containerStatuses[?(@.name=='fileblock-node')].restartCount}"))
 
-	// SIGKILL PID 1 — container exits, kubelet restarts it in the same
-	// pod sandbox. The exec connection drops on the kill so we ignore
-	// its return.
+	// SIGTERM PID 1 via the shell builtin (the runtime image doesn't
+	// ship the standalone /bin/kill — only sh's builtin is reliable
+	// here). fileblock-node's signal.NotifyContext handler cancels
+	// Serve's ctx, the binary exits cleanly, and kubelet restarts the
+	// container in the same pod sandbox. The exec connection drops as
+	// the container dies, so we ignore its return.
 	_, _ = kubectlRaw("-n", "fileblock-system", "exec", nodePod,
-		"-c", "fileblock-node", "--", "kill", "-9", "1")
+		"-c", "fileblock-node", "--", "sh", "-c", "kill -TERM 1")
 
 	// Wait for the restart to register and the new container to become
 	// Ready. The restart-count bump is the cleanest signal that the
