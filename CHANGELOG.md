@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-05-18
+
 ### Fixed
 
 - `Registry.AdoptExisting` now verifies each candidate directory is an
@@ -317,7 +319,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `make check` — single command that runs fmt, vet, lint, tidy-check, race
   test + coverage, build, smoke, and csi-sanity. CI runs the same target.
 
-[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/middlendian/fileblock-csi/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/middlendian/fileblock-csi/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/middlendian/fileblock-csi/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/middlendian/fileblock-csi/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/middlendian/fileblock-csi/compare/v0.3.4...v0.3.5
