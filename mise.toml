@@ -9,3 +9,19 @@ golangci-lint = "2.5.0"
 # goreleaser-action (`version: "~> v2"`). Stay on v2 here so local dry-runs
 # match what CI publishes.
 goreleaser = "2"
+
+# Drivers for `make smoke` and `make sanity`, installed from source via
+# mise's go backend. Both are shell-out dependencies of hack/smoke.sh and
+# hack/csi-sanity.sh, which also need root and loop devices — see the
+# prereq comments at the top of each script. Versions are pinned rather
+# than "latest" because resolving a floating go-backend version needs a
+# network round-trip that times out on slow links.
+"go:github.com/rexray/gocsi/csc" = "1.2.2"
+"go:github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity" = "5.6.0"
+
+# C compiler of last resort for the race detector. `go test -race` needs
+# cgo, which needs a C toolchain; container images that ship only the Go
+# toolchain fail `make test-race` and `make cover` with "-race requires
+# cgo". The race targets use the system compiler when there is one and
+# fall back to `zig cc`, so this entry only matters where cc is absent.
+zig = "0.16.0"

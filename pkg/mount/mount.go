@@ -32,8 +32,16 @@ func (m *Mounter) IsMountPoint(ctx context.Context, target string) (bool, error)
 	if err == nil {
 		// findmnt prints something — but `--target` will also resolve to the
 		// nearest ancestor mount, so confirm it is *exactly* this target.
+		// findmnt emits one row per mount entry, and a target that has been
+		// mounted over has several identical rows, so match any row rather
+		// than the output as a whole.
 		out, _ := m.exec.Run(ctx, "findmnt", "-n", "-o", "TARGET", target)
-		return strings.TrimSpace(out) == target, nil
+		for _, line := range strings.Split(out, "\n") {
+			if strings.TrimSpace(line) == target {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	var e *fbexec.Error
 	if errors.As(err, &e) && e.ExitCode == 1 {

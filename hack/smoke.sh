@@ -5,7 +5,9 @@
 #
 # Prereqs (Linux): go, losetup, mkfs.ext4, e2fsck, resize2fs, mount, umount,
 # findmnt, and `csc` (https://github.com/rexray/gocsi/tree/master/csc).
-# Run as root (loop devices and mount(8) require it).
+# `mise install` from the repo root provides go and csc; the rest come from
+# the OS. Run as root (loop devices and mount(8) require it) — `make smoke`
+# forwards PATH through sudo so mise-provided tools stay reachable.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then

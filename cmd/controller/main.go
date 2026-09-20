@@ -31,7 +31,7 @@ func main() {
 
 	exec := fbexec.New(0)
 	mnt := mount.New(exec)
-	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt), mnt)
+	registry := store.NewRegistry(*storesRoot, store.NewNFSMounter(exec), store.NewLocalMounter(mnt), mnt, log)
 	if err := registry.AdoptExisting(context.Background()); err != nil {
 		log.Warn("adopt existing stores failed at startup", "err", err)
 	}

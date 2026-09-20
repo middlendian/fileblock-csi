@@ -2,8 +2,10 @@
 # Drive csi-sanity (https://github.com/kubernetes-csi/csi-test) against the
 # controller and node binaries running on local unix sockets. No cluster.
 #
-# Requires: go, csi-sanity (`go install github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@latest`),
-#           and the same OS tools as smoke.sh. Run as root.
+# Requires: go, csi-sanity, and the same OS tools as smoke.sh. `mise install`
+#           from the repo root provides go and csi-sanity. Run as root —
+#           `make sanity` forwards PATH through sudo so mise-provided tools
+#           stay reachable.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -11,7 +13,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 if ! command -v csi-sanity >/dev/null; then
-  echo "csi-sanity not on PATH; go install github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@latest" >&2
+  echo "csi-sanity not on PATH; run \`mise install\` from the repo root" >&2
   exit 1
 fi
 
