@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Registry.Get` now verifies that a cached store path is still a live
+  mountpoint before handing it back, completing the hardening that
+  0.3.8 added to `Registry.AdoptExisting`. Adoption was verified once at
+  startup and the cache trusted unconditionally thereafter, so a
+  backing-store mount that dropped out from under a running process —
+  an NFS server interruption, a lazy unmount — left `Get` returning the
+  now-empty mountpoint directory for the rest of the process's
+  lifetime. Every subsequent `NodeStageVolume` on that node failed
+  `NotFound` on images that were present on the backing store, while
+  peer nodes staged the same images normally, until the pod was
+  recreated. A path that fails verification is evicted and remounted.
+- `NodeStageVolume` now reports `Unavailable` rather than `NotFound`
+  when the image is missing *and* the backing store is not mounted. An
+  absent `.img` and an absent store mount are indistinguishable from a
+  stat, and `NotFound` sent diagnosis to the controller and the backing
+  store, which are healthy in this failure.
+
+### Changed
+
+- `store.NewRegistry` takes a `*slog.Logger` (nil selects
+  `slog.Default()`), so a stale backing-store mount and its remount are
+  logged instead of passing silently.
+- `mise.toml` provides `csc` and `csi-sanity` from the go backend, so
+  `mise install` covers every tool `make check` shells out to. Root and
+  loop devices are still required by the smoke and sanity scripts
+  themselves.
+
 ## [0.3.8] - 2026-05-18
 
 ### Fixed

@@ -125,6 +125,18 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 	imgPath := images.ImagePath(volumeID)
 	if _, err := os.Stat(imgPath); err != nil {
+		// A backing store whose mount has gone away is an empty readable
+		// directory, so every image under it stats as absent. Reporting
+		// NotFound there points the operator at the controller and the
+		// backing store, which are both fine. Only a definitive "not a
+		// mountpoint" reclassifies — an errored check leaves the honest
+		// NotFound in place.
+		if mounted, mErr := n.mnt.IsMountPoint(ctx, backing); mErr == nil && !mounted {
+			n.log.Error("backing store is not mounted; cannot resolve image",
+				"volumeID", volumeID, "backingStore", backing)
+			return nil, status.Errorf(codes.Unavailable,
+				"backing store %s is not mounted; cannot resolve image %s", backing, imgPath)
+		}
 		return nil, status.Errorf(codes.NotFound, "image %s: %v", imgPath, err)
 	}
 

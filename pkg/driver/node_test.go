@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,7 +14,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
+	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
+	"github.com/middlendian/fileblock-csi/pkg/mount"
 	"github.com/middlendian/fileblock-csi/pkg/store"
 )
 
@@ -26,7 +30,7 @@ func discardLog() *slog.Logger {
 // registry is never asked to actually mount anything).
 func newTestNodeRegistry(t *testing.T) *store.Registry {
 	t.Helper()
-	return store.NewRegistry(t.TempDir(), nil, nil, nil)
+	return store.NewRegistry(t.TempDir(), nil, nil, nil, discardLog())
 }
 
 // TestNodeGetInfoReportsNodeSegment verifies that NodeGetInfo always reports
@@ -332,5 +336,69 @@ func TestLockVolumeDifferentVolumesParallel(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("locks on different volumes should not block each other")
+	}
+}
+
+// newStageTestNode wires a NodeServer whose registry mounts a local
+// backing store through the fake runner, so NodeStageVolume reaches the
+// image lookup. storeMounted drives findmnt(8), the only thing that
+// distinguishes a healthy store with no such image from a store whose
+// mount has gone away underneath it.
+func newStageTestNode(t *testing.T, storeMounted bool) (*NodeServer, map[string]string) {
+	t.Helper()
+	fake := exectest.New()
+	fake.Func = func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "findmnt" {
+			if !storeMounted {
+				return "", &fbexec.Error{ExitCode: 1}
+			}
+			return args[len(args)-1], nil
+		}
+		return "", nil
+	}
+	mnt := mount.New(fake)
+	reg := store.NewRegistry(t.TempDir(), nil, store.NewLocalMounter(mnt), mnt, discardLog())
+	state, err := loop.LoadState(filepath.Join(t.TempDir(), "loop-mappings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := NewNodeServer("n", fake, mnt, nil, state, discardLog(), reg)
+	cfg := store.Config{Type: store.TypeLocal, LocalPath: t.TempDir()}
+	return n, cfg.ToVolumeContext()
+}
+
+func stageReq(volumeID string, vc map[string]string) *csi.NodeStageVolumeRequest {
+	return &csi.NodeStageVolumeRequest{
+		VolumeId:          volumeID,
+		StagingTargetPath: "/staging/" + volumeID,
+		VolumeContext:     vc,
+		VolumeCapability: &csi.VolumeCapability{
+			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{FsType: "ext4"}},
+		},
+	}
+}
+
+// TestNodeStageMissingImageOnUnmountedStoreIsUnavailable pins the
+// diagnostic half of the fix. An absent .img and an absent backing-store
+// mount look identical from a stat, and reporting NotFound sends the
+// operator to the controller and the backing store, both of which are
+// healthy. Unavailable names the node as the problem.
+func TestNodeStageMissingImageOnUnmountedStoreIsUnavailable(t *testing.T) {
+	n, vc := newStageTestNode(t, false)
+	_, err := n.NodeStageVolume(context.Background(), stageReq("vol-1", vc))
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("got %v, want Unavailable", err)
+	}
+}
+
+// TestNodeStageMissingImageOnMountedStoreIsNotFound is the other half:
+// when the store really is mounted, an absent image is an honest
+// NotFound and must stay one — csi-sanity depends on it.
+func TestNodeStageMissingImageOnMountedStoreIsNotFound(t *testing.T) {
+	n, vc := newStageTestNode(t, true)
+	_, err := n.NodeStageVolume(context.Background(), stageReq("vol-1", vc))
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("got %v, want NotFound", err)
 	}
 }

@@ -206,16 +206,21 @@ Other knobs:
 | `losetup: cannot find an unused loop device`   | `modprobe loop max_loop=64` (or higher) on the affected node                       |
 | Stale `.img` on backing store after PVC delete | Reclaim policy may be `Retain`, or the controller failed mid-delete; remove by hand |
 | Want to inspect state                          | Each node writes `/var/lib/kubelet/plugins/fileblock.csi/loop-mappings.json`        |
+| One node fails every new volume `Unavailable`, peers are fine | That node's backing-store mount went away; the plugin logs `backing store is no longer mounted` and remounts on the next stage. Persisting means the remount itself is failing — check the node's connectivity to the backing store |
 
 ## Local development without a cluster
 
 ```sh
+mise install              # go, linters, and the csc / csi-sanity drivers
 sudo hack/smoke.sh        # full lifecycle against a temp directory
 sudo hack/csi-sanity.sh   # csi-test suite, also no cluster
 ```
 
 Both run the binaries directly on unix sockets — no Docker, no kind, no
-kubelet.
+kubelet. They do need root and loop devices, so neither runs inside an
+unprivileged container. Prefer `make smoke` / `make sanity` over calling
+the scripts directly: those forward `PATH` through `sudo` so the
+mise-provided `csc` and `csi-sanity` stay reachable as root.
 
 ## End-to-end tests against kind
 

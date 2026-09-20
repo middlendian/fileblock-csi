@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
+	"time"
 )
 
 // MountChecker verifies whether a path is a live mountpoint. Implemented
@@ -23,48 +25,87 @@ type MountChecker interface {
 // chose to put it under stores-root).
 var storeIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
+// defaultMountCheckTimeout bounds one staleness check in Get.
+// MountChecker implementations stat the target, and a stat against a
+// hung hard-mounted NFS target blocks indefinitely and ignores context
+// cancellation — so the check runs in its own goroutine and Get gives up
+// waiting after this long.
+const defaultMountCheckTimeout = 10 * time.Second
+
 // Registry mounts each unique store config once per process and hands
-// out the resulting paths. Concurrency: per-storeID Mutex prevents two
-// callers from racing into Mount; the global mu only guards the mounted
-// map and the per-store mutex/config maps.
+// out the resulting paths, re-verifying on each handout that the mount
+// is still there. Concurrency: per-storeID Mutex prevents two callers
+// from racing into Mount; the global mu only guards the mounted,
+// per-store mutex, config, and in-flight-check maps.
 type Registry struct {
 	root   string
 	nfsM   Mounter
 	localM Mounter
 	mp     MountChecker
+	log    *slog.Logger
 
-	mu      sync.Mutex
-	mounted map[string]string      // storeID -> mounted path
-	configs map[string]Config      // storeID -> Config that produced this storeID
-	storeMu map[string]*sync.Mutex // storeID -> per-store lock
+	// Bounds one staleness check; a field rather than a constant so
+	// tests can shorten it.
+	checkTimeout time.Duration
+
+	mu       sync.Mutex
+	mounted  map[string]string        // storeID -> mounted path
+	configs  map[string]Config        // storeID -> Config that produced this storeID
+	storeMu  map[string]*sync.Mutex   // storeID -> per-store lock
+	checking map[string]chan checkRes // storeID -> in-flight staleness check
+}
+
+// checkRes is one IsMountPoint answer handed back from the goroutine that
+// ran it.
+type checkRes struct {
+	mounted bool
+	err     error
 }
 
 // NewRegistry returns a Registry that mounts under root. nfs and local
 // mounters may be nil if the corresponding backing-store type is not
-// supported in this binary. mp is required by AdoptExisting to verify
-// each candidate directory is a live mount before adopting it; without
-// the check, a stale <storeID> directory left under an emptyDir cache
-// by a prior container would poison the mounted-paths map after a
-// container restart. mp may be nil only when the caller will not invoke
-// AdoptExisting (e.g. tests that exercise Get-only paths and pass nil
-// for all three).
-func NewRegistry(root string, nfs Mounter, local Mounter, mp MountChecker) *Registry {
+// supported in this binary.
+//
+// mp verifies that a path is a live mount. Both AdoptExisting and Get
+// depend on it: AdoptExisting will not adopt an unverified candidate,
+// and Get will not hand back a cached path whose mount has gone away.
+// Without it, a stale <storeID> directory — left under an emptyDir cache
+// by a prior container, or exposed when a backing-store mount drops out
+// from under a running process — reads as a healthy empty store and
+// every volume lookup under it fails as "not found".
+//
+// mp may be nil only when the caller accepts both gaps (e.g. tests that
+// exercise Get-only paths and pass nil for all three); a nil mp disables
+// staleness detection rather than failing.
+//
+// log may be nil, in which case slog.Default() is used.
+func NewRegistry(root string, nfs Mounter, local Mounter, mp MountChecker, log *slog.Logger) *Registry {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Registry{
-		root:    root,
-		nfsM:    nfs,
-		localM:  local,
-		mp:      mp,
-		mounted: map[string]string{},
-		configs: map[string]Config{},
-		storeMu: map[string]*sync.Mutex{},
+		root:         root,
+		nfsM:         nfs,
+		localM:       local,
+		mp:           mp,
+		log:          log,
+		checkTimeout: defaultMountCheckTimeout,
+		mounted:      map[string]string{},
+		configs:      map[string]Config{},
+		storeMu:      map[string]*sync.Mutex{},
+		checking:     map[string]chan checkRes{},
 	}
 }
 
 // Get ensures cfg's source is mounted under <root>/<storeID>/ and
 // returns that path. Idempotent: subsequent calls with the same cfg fast
-// path on the cached mount. Also caches cfg keyed by storeID so callers
-// that hold only a storeID (controller's DeleteVolume / Expand path) can
-// resolve back to a Config via ConfigByStoreID.
+// path on the cached mount, but only after re-verifying that the cached
+// path is still a live mountpoint — a backing-store mount can drop out
+// from under a running process, and the mountpoint directory it leaves
+// behind is readable and empty, so an unverified cache turns every later
+// lookup into a spurious "not found". Also caches cfg keyed by storeID
+// so callers that hold only a storeID (controller's DeleteVolume /
+// Expand path) can resolve back to a Config via ConfigByStoreID.
 func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
 	id := cfg.ID()
 	storeMu := r.lockStore(id)
@@ -72,11 +113,18 @@ func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
 	defer storeMu.Unlock()
 
 	r.mu.Lock()
-	if path, ok := r.mounted[id]; ok {
-		r.mu.Unlock()
-		return path, nil
-	}
+	path, cached := r.mounted[id]
 	r.mu.Unlock()
+	if cached {
+		if r.stillMounted(ctx, id, path) {
+			return path, nil
+		}
+		r.log.Warn("backing store is no longer mounted; remounting",
+			"storeID", id, "path", path)
+		r.mu.Lock()
+		delete(r.mounted, id)
+		r.mu.Unlock()
+	}
 
 	target := filepath.Join(r.root, id)
 	if err := os.MkdirAll(target, 0o755); err != nil {
@@ -177,6 +225,93 @@ func (r *Registry) AdoptExisting(ctx context.Context) error {
 		r.mounted[id] = target
 	}
 	return nil
+}
+
+// stillMounted reports whether the cached path for id may still be
+// handed out. Only a definitive "not a mountpoint" answers false: a
+// check error, a check that outlives its timeout, and a nil MountChecker
+// all preserve the cached path.
+//
+// That bias is the opposite of AdoptExisting's, deliberately. There, a
+// wrong guess costs one redundant mount(8) onto a directory that is not
+// mounted. Here it would stack a second mount over a target that is in
+// fact still mounted, on every Get, with nothing that ever unstacks it.
+// A definitive false cannot stack, because there is no mount under it.
+func (r *Registry) stillMounted(ctx context.Context, id, path string) bool {
+	if r.mp == nil {
+		return true
+	}
+	res, ok := r.checkMountPoint(ctx, id, path)
+	switch {
+	case !ok:
+		r.log.Warn("mountpoint check did not return in time; assuming backing store is still mounted",
+			"storeID", id, "path", path, "timeout", r.checkTimeout)
+		return true
+	case res.err != nil:
+		r.log.Warn("mountpoint check failed; assuming backing store is still mounted",
+			"storeID", id, "path", path, "err", res.err)
+		return true
+	default:
+		return res.mounted
+	}
+}
+
+// checkMountPoint runs one IsMountPoint under r.checkTimeout, keeping at
+// most one check in flight per storeID. The goroutine is necessary
+// because a stat against a hung hard-mounted NFS target blocks forever
+// and ignores context cancellation; abandoning it is the only way out.
+// A subsequent Get therefore discards an abandoned check's result and
+// re-checks, rather than starting a second concurrent check and leaking
+// a goroutine per kubelet retry. ok is false when no usable answer is
+// available.
+func (r *Registry) checkMountPoint(ctx context.Context, id, path string) (checkRes, bool) {
+	r.mu.Lock()
+	ch, inFlight := r.checking[id]
+	if !inFlight {
+		ch = make(chan checkRes, 1)
+		r.checking[id] = ch
+	}
+	r.mu.Unlock()
+
+	if inFlight {
+		// Collect an abandoned check's result only to release the slot,
+		// never to act on: it describes the mount at some unknown
+		// earlier moment, and evicting on it could tear down a mount
+		// that has since come back. The next Get starts a fresh,
+		// authoritative check.
+		select {
+		case <-ch:
+			r.clearCheck(id)
+		default:
+		}
+		return checkRes{}, false
+	}
+
+	go func() {
+		// WithoutCancel: this check outlives the Get that started it, so
+		// it must not die with that caller's RPC context — its result is
+		// what unblocks the next Get.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.checkTimeout)
+		defer cancel()
+		mounted, err := r.mp.IsMountPoint(cctx, path)
+		ch <- checkRes{mounted: mounted, err: err}
+	}()
+
+	timer := time.NewTimer(r.checkTimeout)
+	defer timer.Stop()
+	select {
+	case res := <-ch:
+		r.clearCheck(id)
+		return res, true
+	case <-timer.C:
+		return checkRes{}, false
+	}
+}
+
+func (r *Registry) clearCheck(id string) {
+	r.mu.Lock()
+	delete(r.checking, id)
+	r.mu.Unlock()
 }
 
 func (r *Registry) lockStore(id string) *sync.Mutex {

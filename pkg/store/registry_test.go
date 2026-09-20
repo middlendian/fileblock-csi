@@ -3,23 +3,41 @@ package store
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 )
 
+// findmntReportsMounted makes the fake answer findmnt(8) the way it does
+// for a live mountpoint: pkg/mount.Mounter.IsMountPoint compares the
+// trimmed output of `findmnt -n -o TARGET <path>` against the path it
+// asked about. A fake that returns empty output instead reads as "not a
+// mountpoint", which makes Get evict and remount on every call.
+func findmntReportsMounted(f *exectest.FakeRunner) {
+	f.Func = func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "findmnt" {
+			return args[len(args)-1], nil
+		}
+		return "", nil
+	}
+}
+
 func TestRegistryGetMountsOnce(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	p1, err := reg.Get(context.Background(), cfg)
@@ -52,7 +70,7 @@ func TestRegistryDistinctConfigsMountSeparately(t *testing.T) {
 	fake := exectest.New()
 	fake.SetDefault("", nil)
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	a := Config{Type: TypeNFS, NFSServer: "s1", NFSPath: "/p"}
 	b := Config{Type: TypeNFS, NFSServer: "s2", NFSPath: "/p"}
 	pa, _ := reg.Get(context.Background(), a)
@@ -66,8 +84,9 @@ func TestRegistryConcurrentGetSerializes(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	var wg sync.WaitGroup
@@ -96,7 +115,7 @@ func TestRegistryRejectsUnknownType(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	_, err := reg.Get(context.Background(), Config{Type: "smb"})
 	if err == nil {
 		t.Fatal("expected error for unknown type")
@@ -108,7 +127,7 @@ func TestRegistryConfigByStoreID(t *testing.T) {
 	fake := exectest.New()
 	fake.SetDefault("", nil)
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	if _, ok := reg.ConfigByStoreID(cfg.ID()); ok {
@@ -131,7 +150,7 @@ func TestRegistryMountedPaths(t *testing.T) {
 	fake := exectest.New()
 	fake.SetDefault("", nil)
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 
 	if paths := reg.MountedPaths(); len(paths) != 0 {
 		t.Fatalf("MountedPaths before any Get = %v, want empty", paths)
@@ -156,7 +175,7 @@ func TestRegistryAdoptExistingNoOpOnEmptyRoot(t *testing.T) {
 	root := t.TempDir()
 	fake := exectest.New()
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
@@ -174,7 +193,7 @@ func TestRegistryAdoptExistingPreloadsKnownDirs(t *testing.T) {
 	fake := exectest.New()
 	fake.Set("findmnt", dir, nil)
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
@@ -212,7 +231,7 @@ func TestRegistryAdoptExistingSkipsNonStoreIDDirs(t *testing.T) {
 	fake := exectest.New()
 	fake.Set("findmnt", validDir, nil)
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
 	}
@@ -237,7 +256,7 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 		return "", nil
 	}
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
 	if _, err := reg.Get(context.Background(), cfg); err == nil {
@@ -271,7 +290,7 @@ func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
 	fake.Set("mount", "", nil)
 
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
@@ -309,7 +328,7 @@ func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
 	fake.Set("findmnt", dir, nil)
 
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting: %v", err)
@@ -346,7 +365,7 @@ func TestRegistryAdoptExistingSkipsOnCheckError(t *testing.T) {
 	fake.Set("mount", "", nil)
 
 	mnt := mount.New(fake)
-	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 
 	if err := reg.AdoptExisting(context.Background()); err != nil {
 		t.Fatalf("AdoptExisting should swallow per-candidate check errors, got %v", err)
@@ -366,5 +385,278 @@ func TestRegistryAdoptExistingSkipsOnCheckError(t *testing.T) {
 	}
 	if mountCalls != 1 {
 		t.Errorf("after non-adopted Get, mount called %d times, want 1", mountCalls)
+	}
+}
+
+func discardLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// fakeChecker is a MountChecker scripted directly by the test. Driving
+// the real checker through findmnt strings cannot express the three
+// answers Get distinguishes — mounted, definitively not mounted, and
+// "no answer" (an error, or a call that never returns).
+type fakeChecker struct {
+	mu      sync.Mutex
+	mounted bool
+	err     error
+	entered int           // incremented on entry, before any blocking
+	block   chan struct{} // when non-nil, IsMountPoint waits on it
+	returns chan struct{} // when non-nil, one token per completed call
+}
+
+func (c *fakeChecker) IsMountPoint(_ context.Context, _ string) (bool, error) {
+	c.mu.Lock()
+	c.entered++
+	block := c.block
+	c.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	c.mu.Lock()
+	mounted, err, returns := c.mounted, c.err, c.returns
+	c.mu.Unlock()
+	if returns != nil {
+		returns <- struct{}{}
+	}
+	return mounted, err
+}
+
+func (c *fakeChecker) set(mounted bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mounted, c.err = mounted, err
+}
+
+func (c *fakeChecker) enteredCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.entered
+}
+
+func countMounts(f *exectest.FakeRunner) int {
+	n := 0
+	for _, c := range f.Calls {
+		if c.Name == "mount" {
+			n++
+		}
+	}
+	return n
+}
+
+// newCheckedRegistry wires a Registry whose staleness check is chk and
+// whose mount(8) calls are stubbed out.
+func newCheckedRegistry(t *testing.T, chk MountChecker) (*Registry, *exectest.FakeRunner) {
+	t.Helper()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	reg := NewRegistry(t.TempDir(), NewNFSMounter(fake), NewLocalMounter(mount.New(fake)), chk, discardLog())
+	return reg, fake
+}
+
+// TestRegistryGetRemountsAfterMountDisappears is the core regression: a
+// backing-store mount that drops out from under a running process must
+// not leave Get handing back the now-empty mountpoint directory forever.
+func TestRegistryGetRemountsAfterMountDisappears(t *testing.T) {
+	chk := &fakeChecker{mounted: true}
+	reg, fake := newCheckedRegistry(t, chk)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	p1, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get #1: %v", err)
+	}
+
+	// The mount goes away; the directory underneath it does not.
+	chk.set(false, nil)
+
+	p2, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get #2: %v", err)
+	}
+	if p1 != p2 {
+		t.Errorf("path changed across remount: %q vs %q", p1, p2)
+	}
+	if n := countMounts(fake); n != 2 {
+		t.Errorf("mount called %d times, want 2 (initial + remount)", n)
+	}
+}
+
+func TestRegistryGetDoesNotRemountWhileMounted(t *testing.T) {
+	chk := &fakeChecker{mounted: true}
+	reg, fake := newCheckedRegistry(t, chk)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	for i := 0; i < 3; i++ {
+		if _, err := reg.Get(context.Background(), cfg); err != nil {
+			t.Fatalf("Get #%d: %v", i, err)
+		}
+	}
+	if n := countMounts(fake); n != 1 {
+		t.Errorf("mount called %d times, want 1", n)
+	}
+	if got := chk.enteredCount(); got != 2 {
+		t.Errorf("IsMountPoint called %d times, want 2 (the first Get has nothing cached to verify)", got)
+	}
+}
+
+// TestRegistryGetKeepsCachedPathOnCheckError pins the deliberate
+// asymmetry with AdoptExisting: there, an unusable answer costs one
+// redundant mount(8) onto an unmounted directory. Here it would stack a
+// second mount on a target that is still mounted, on every Get, with
+// nothing to unstack it — so only a definitive "not mounted" evicts.
+func TestRegistryGetKeepsCachedPathOnCheckError(t *testing.T) {
+	chk := &fakeChecker{mounted: true}
+	reg, fake := newCheckedRegistry(t, chk)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get #1: %v", err)
+	}
+	chk.set(false, errors.New("findmnt exploded"))
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get #2: %v", err)
+	}
+	if n := countMounts(fake); n != 1 {
+		t.Errorf("mount called %d times, want 1 (an errored check must not evict)", n)
+	}
+}
+
+// TestRegistryGetKeepsCachedPathWhenCheckHangs covers the hung
+// hard-mounted NFS target: the stat inside IsMountPoint never returns.
+// Get must fall back to the cached path rather than block, and must not
+// spawn a fresh check while one is still outstanding.
+func TestRegistryGetKeepsCachedPathWhenCheckHangs(t *testing.T) {
+	block := make(chan struct{})
+	chk := &fakeChecker{mounted: true, block: block}
+	reg, fake := newCheckedRegistry(t, chk)
+	reg.checkTimeout = 20 * time.Millisecond
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	want, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get #1: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		done := make(chan struct{})
+		var got string
+		var gErr error
+		go func() {
+			got, gErr = reg.Get(context.Background(), cfg)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Get #%d blocked on a hung mountpoint check", i+2)
+		}
+		if gErr != nil {
+			t.Fatalf("Get #%d: %v", i+2, gErr)
+		}
+		if got != want {
+			t.Errorf("Get #%d = %q, want cached %q", i+2, got, want)
+		}
+	}
+	if n := countMounts(fake); n != 1 {
+		t.Errorf("mount called %d times, want 1 (a hung check must not evict)", n)
+	}
+	if got := chk.enteredCount(); got != 1 {
+		t.Errorf("IsMountPoint entered %d times, want 1 (checks must not pile up behind a wedged one)", got)
+	}
+	close(block)
+}
+
+// TestRegistryConcurrentGetOnStaleEntryRemountsOnce is the race the
+// issue asks about. The fake couples the checker to mount(8) so the
+// store really does come back up mid-flight, rather than reporting
+// stale forever and inviting one remount per caller.
+func TestRegistryConcurrentGetOnStaleEntryRemountsOnce(t *testing.T) {
+	chk := &fakeChecker{mounted: true}
+	reg, fake := newCheckedRegistry(t, chk)
+	fake.Func = func(_ context.Context, name string, _ ...string) (string, error) {
+		if name == "mount" {
+			chk.set(true, nil)
+		}
+		return "", nil
+	}
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get #1: %v", err)
+	}
+	chk.set(false, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := reg.Get(context.Background(), cfg); err != nil {
+				t.Errorf("concurrent Get: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := countMounts(fake); n != 2 {
+		t.Errorf("mount called %d times, want 2 (initial + exactly one remount)", n)
+	}
+}
+
+func TestRegistryGetSkipsCheckWithNilMountChecker(t *testing.T) {
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	reg := NewRegistry(t.TempDir(), NewNFSMounter(fake), nil, nil, discardLog())
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	for i := 0; i < 2; i++ {
+		if _, err := reg.Get(context.Background(), cfg); err != nil {
+			t.Fatalf("Get #%d: %v", i, err)
+		}
+	}
+	if n := countMounts(fake); n != 1 {
+		t.Errorf("mount called %d times, want 1", n)
+	}
+}
+
+// TestRegistryGetIgnoresAbandonedCheckResult pins the rule that a check
+// which outlived its timeout is never acted on. Its answer describes the
+// mount at some unknown earlier moment; here the store was gone when the
+// hung check looked and is back by the time the answer lands, so acting
+// on it would tear down a healthy mount.
+func TestRegistryGetIgnoresAbandonedCheckResult(t *testing.T) {
+	block := make(chan struct{})
+	chk := &fakeChecker{mounted: true, block: block, returns: make(chan struct{}, 4)}
+	reg, fake := newCheckedRegistry(t, chk)
+	reg.checkTimeout = 20 * time.Millisecond
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get #1: %v", err)
+	}
+
+	// Get #2 starts a check that hangs past its timeout.
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get #2: %v", err)
+	}
+
+	// The store was unmounted while that check was stuck...
+	chk.set(false, nil)
+	close(block)
+	select {
+	case <-chk.returns:
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandoned check never returned")
+	}
+	// ...and has come back by the time anyone looks again.
+	chk.set(true, nil)
+
+	for i := 0; i < 2; i++ {
+		if _, err := reg.Get(context.Background(), cfg); err != nil {
+			t.Fatalf("Get #%d: %v", i+3, err)
+		}
+	}
+	if n := countMounts(fake); n != 1 {
+		t.Errorf("mount called %d times, want 1 (a timed-out check's answer must not evict)", n)
 	}
 }

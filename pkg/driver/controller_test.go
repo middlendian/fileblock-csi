@@ -103,7 +103,7 @@ func newTestRegistry(t *testing.T) *store.Registry {
 	fake := exectest.New()
 	fake.SetDefault("", nil)
 	mnt := mount.New(fake)
-	return store.NewRegistry(t.TempDir(), store.NewNFSMounter(fake), store.NewLocalMounter(mnt), mnt)
+	return store.NewRegistry(t.TempDir(), store.NewNFSMounter(fake), store.NewLocalMounter(mnt), mnt, discardLog())
 }
 
 // newTestServer creates a ControllerServer wired to a test registry and a
