@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NotFound` on images that were present on the backing store, while
   peer nodes staged the same images normally, until the pod was
   recreated. A path that fails verification is evicted and remounted.
+- `mount.Mounter.IsMountPoint` compared the whole of findmnt's output
+  against the queried path, so a target carrying more than one mount
+  entry reported as *not* a mountpoint — findmnt prints one row per
+  entry. Any target that had been mounted over was affected, including
+  the shared stores-root the smoke and sanity harnesses set up by
+  running the controller and node against it in one mount namespace. It
+  now matches any row.
 - `NodeStageVolume` now reports `Unavailable` rather than `NotFound`
   when the image is missing *and* the backing store is not mounted. An
   absent `.img` and an absent store mount are indistinguishable from a

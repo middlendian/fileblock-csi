@@ -115,3 +115,48 @@ func TestIsMountPointFindmntExit1(t *testing.T) {
 		t.Fatal("expected false")
 	}
 }
+
+// TestIsMountPointStackedMounts: findmnt prints one row per mount entry,
+// so a target that has been mounted over — two processes sharing one
+// stores-root each bind-mount it independently, which is exactly what
+// hack/csi-sanity.sh sets up — yields N identical rows. Comparing the
+// whole output against the path reports such a target as "not mounted",
+// which invites a caller to mount it yet again.
+func TestIsMountPointStackedMounts(t *testing.T) {
+	dir := t.TempDir()
+	fake := exectest.New()
+	fake.Func = func(_ context.Context, _ string, args ...string) (string, error) {
+		if args[len(args)-2] == "--target" {
+			return dir + "\n", nil
+		}
+		return dir + "\n" + dir + "\n", nil
+	}
+	got, err := New(fake).IsMountPoint(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("IsMountPoint: %v", err)
+	}
+	if !got {
+		t.Fatal("expected true: a target with two stacked mounts is still a mountpoint")
+	}
+}
+
+// TestIsMountPointAncestorOnly: `findmnt --target` resolves to the
+// nearest ancestor mount, so a plain directory under a mounted parent
+// must still report false.
+func TestIsMountPointAncestorOnly(t *testing.T) {
+	dir := t.TempDir()
+	fake := exectest.New()
+	fake.Func = func(_ context.Context, _ string, args ...string) (string, error) {
+		if args[len(args)-2] == "--target" {
+			return "/\n", nil
+		}
+		return "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1, Err: errors.New("exit status 1")}
+	}
+	got, err := New(fake).IsMountPoint(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("IsMountPoint: %v", err)
+	}
+	if got {
+		t.Fatal("expected false for a directory under a mounted ancestor")
+	}
+}
