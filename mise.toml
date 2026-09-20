@@ -18,3 +18,10 @@ goreleaser = "2"
 # network round-trip that times out on slow links.
 "go:github.com/rexray/gocsi/csc" = "1.2.2"
 "go:github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity" = "5.6.0"
+
+# C compiler of last resort for the race detector. `go test -race` needs
+# cgo, which needs a C toolchain; container images that ship only the Go
+# toolchain fail `make test-race` and `make cover` with "-race requires
+# cgo". The race targets use the system compiler when there is one and
+# fall back to `zig cc`, so this entry only matters where cc is absent.
+zig = "0.16.0"

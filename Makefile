@@ -62,14 +62,22 @@ $(BIN_DIR)/fileblock-node: $(shell find cmd/node pkg -name '*.go') go.mod go.sum
 test:
 	go test $(GO_PACKAGES)
 
+# -race needs cgo, and cgo needs a C compiler. Use the system one when
+# there is one; otherwise fall back to `zig cc` from mise.toml, so the
+# race gate still runs in an image that ships only the Go toolchain.
+# Machines with cc are unaffected, CI runners included.
+# Empty when a system compiler exists, so CI and dev machines keep Go's
+# own defaults untouched; set only for the fallback.
+RACE_ENV := $(shell command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || printf 'CGO_ENABLED=1 CC=%s' '"zig cc"')
+
 .PHONY: test-race
 test-race:
-	go test -race $(GO_PACKAGES)
+	$(RACE_ENV) go test -race $(GO_PACKAGES)
 
 .PHONY: cover
 cover:
 	@pkgs=$$(go list -f '{{if (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./...); \
-	go test -race -covermode=atomic -coverprofile=$(COVER_OUT) -coverpkg=./... $$pkgs
+	$(RACE_ENV) go test -race -covermode=atomic -coverprofile=$(COVER_OUT) -coverpkg=./... $$pkgs
 	@go tool cover -func=$(COVER_OUT) | tail -n 1
 
 .PHONY: vet

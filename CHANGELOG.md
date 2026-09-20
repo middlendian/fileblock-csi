@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mise install` covers every tool `make check` shells out to. Root and
   loop devices are still required by the smoke and sanity scripts
   themselves.
+- `mise.toml` also provides `zig`, and `make test-race` / `make cover`
+  fall back to `zig cc` when no system C compiler is present, so the
+  race gate runs in an image that ships only the Go toolchain. Machines
+  and CI runners that have `cc` or `gcc` are unaffected — nothing is
+  set for them.
 
 ## [0.3.8] - 2026-05-18
 

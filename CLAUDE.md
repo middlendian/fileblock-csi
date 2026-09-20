@@ -59,8 +59,10 @@ included, `make check` needs root and loop devices, plus `csc` and
 they stay reachable as root. On machines without root or loop devices
 (most containers), run the lighter gates individually
 (`make fmt-check vet lint tidy-check test build`) before pushing.
-`make test-race` additionally needs a C toolchain, since `-race`
-requires cgo.
+`make test-race` and `make cover` need a C toolchain, since `-race`
+requires cgo; they use the system compiler when there is one and
+otherwise fall back to `zig cc` from `mise.toml`, so they run even in
+an image that ships only Go.
 
 The smoke and sanity scripts must run as root (loop devices and mount(8)).
 They use plain temp directories — no kind, no kubelet.
