@@ -660,3 +660,135 @@ func TestRegistryGetIgnoresAbandonedCheckResult(t *testing.T) {
 		t.Errorf("mount called %d times, want 1 (a timed-out check's answer must not evict)", n)
 	}
 }
+
+func TestRegistryGetReturnsSubDirPath(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "team-a/fileblock"}
+
+	got, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := filepath.Join(root, cfg.MountID(), "team-a", "fileblock")
+	if got != want {
+		t.Errorf("Get = %q, want %q", got, want)
+	}
+	// The namespace directory does not exist until the first volume lands
+	// in it, and nothing else is positioned to create it.
+	st, err := os.Stat(got)
+	if err != nil || !st.IsDir() {
+		t.Errorf("subDir was not created: %v", err)
+	}
+}
+
+// Mounting one export once per namespace would be wasteful and would
+// multiply the blast radius of a hung mount.
+func TestRegistrySubDirsShareOneMount(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
+
+	a := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "ns-a/fileblock"}
+	b := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "ns-b/fileblock"}
+
+	pa, err := reg.Get(context.Background(), a)
+	if err != nil {
+		t.Fatalf("Get(a): %v", err)
+	}
+	pb, err := reg.Get(context.Background(), b)
+	if err != nil {
+		t.Fatalf("Get(b): %v", err)
+	}
+	if pa == pb {
+		t.Fatalf("distinct subDirs returned the same path %q", pa)
+	}
+	if filepath.Dir(filepath.Dir(pa)) != filepath.Dir(filepath.Dir(pb)) {
+		t.Errorf("subDirs must live under one mount: %q vs %q", pa, pb)
+	}
+
+	mountCalls := 0
+	for _, c := range fake.Calls {
+		if c.Name == "mount" {
+			mountCalls++
+		}
+	}
+	if mountCalls != 1 {
+		t.Errorf("mount called %d times, want 1", mountCalls)
+	}
+}
+
+func TestRegistryConfigByStoreIDResolvesSubDir(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "team-a/fileblock"}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got, ok := reg.ConfigByStoreID(cfg.StoreID())
+	if !ok {
+		t.Fatal("ConfigByStoreID did not find the store")
+	}
+	if got.NFSSubDir != "team-a/fileblock" {
+		t.Errorf("recovered subDir = %q, want %q", got.NFSSubDir, "team-a/fileblock")
+	}
+}
+
+// ListVolumes iterates MountedPaths. A subDir store whose path is missing
+// from it has its volumes silently disappear from ListVolumes.
+func TestMountedPathsIncludesSubDirStores(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "team-a/fileblock"}
+
+	p, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var found bool
+	for _, got := range reg.MountedPaths() {
+		if got == p {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("MountedPaths %v does not contain store path %q", reg.MountedPaths(), p)
+	}
+}
+
+// With no subDir the store path and the mount root are the same string;
+// reporting it twice would list every volume twice.
+func TestMountedPathsDeduplicates(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+
+	p, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	paths := reg.MountedPaths()
+	if len(paths) != 1 || paths[0] != p {
+		t.Errorf("MountedPaths = %v, want exactly [%q]", paths, p)
+	}
+}

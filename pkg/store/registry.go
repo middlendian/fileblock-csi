@@ -18,11 +18,11 @@ type MountChecker interface {
 	IsMountPoint(ctx context.Context, target string) (bool, error)
 }
 
-// storeIDPattern matches a 12-char lowercase hex sha256 prefix — the only
-// shape Config.ID() ever produces. AdoptExisting uses this to skip
-// directories that happen to live under r.root but were not created by
-// the Registry (e.g. an operator's local-backing source dir if they
-// chose to put it under stores-root).
+// storeIDPattern matches a 12-char lowercase hex sha256 prefix — the
+// shape Config.MountID() and Config.StoreID() both produce. AdoptExisting
+// uses this to skip directories that happen to live under r.root but were
+// not created by the Registry (e.g. an operator's local-backing source
+// dir if they chose to put it under stores-root).
 var storeIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 // defaultMountCheckTimeout bounds one staleness check in Get.
@@ -49,10 +49,11 @@ type Registry struct {
 	checkTimeout time.Duration
 
 	mu       sync.Mutex
-	mounted  map[string]string        // storeID -> mounted path
+	mounted  map[string]string        // mountID -> mounted path
+	stores   map[string]string        // storeID -> mounted path + subDir
 	configs  map[string]Config        // storeID -> Config that produced this storeID
-	storeMu  map[string]*sync.Mutex   // storeID -> per-store lock
-	checking map[string]chan checkRes // storeID -> in-flight staleness check
+	storeMu  map[string]*sync.Mutex   // mountID -> per-mount lock
+	checking map[string]chan checkRes // mountID -> in-flight staleness check
 }
 
 // checkRes is one IsMountPoint answer handed back from the goroutine that
@@ -91,63 +92,82 @@ func NewRegistry(root string, nfs Mounter, local Mounter, mp MountChecker, log *
 		log:          log,
 		checkTimeout: defaultMountCheckTimeout,
 		mounted:      map[string]string{},
+		stores:       map[string]string{},
 		configs:      map[string]Config{},
 		storeMu:      map[string]*sync.Mutex{},
 		checking:     map[string]chan checkRes{},
 	}
 }
 
-// Get ensures cfg's source is mounted under <root>/<storeID>/ and
-// returns that path. Idempotent: subsequent calls with the same cfg fast
-// path on the cached mount, but only after re-verifying that the cached
-// path is still a live mountpoint — a backing-store mount can drop out
-// from under a running process, and the mountpoint directory it leaves
-// behind is readable and empty, so an unverified cache turns every later
-// lookup into a spurious "not found". Also caches cfg keyed by storeID
-// so callers that hold only a storeID (controller's DeleteVolume /
-// Expand path) can resolve back to a Config via ConfigByStoreID.
+// Get ensures cfg's source is mounted under <root>/<mountID>/ and returns
+// the store path inside it — <root>/<mountID>/<subDir>, or the mount
+// itself when cfg sets no subDir. Idempotent: subsequent calls with the
+// same cfg fast path on the cached mount, but only after re-verifying
+// that the cached path is still a live mountpoint — a backing-store mount
+// can drop out from under a running process, and the mountpoint directory
+// it leaves behind is readable and empty, so an unverified cache turns
+// every later lookup into a spurious "not found".
+//
+// Mount bookkeeping is keyed by MountID, so every subDir on one export
+// shares a single mount and a single staleness check. The store path and
+// cfg are cached by StoreID so callers holding only a storeID (the
+// controller's DeleteVolume / Expand path) can resolve back to a Config
+// via ConfigByStoreID.
 func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
-	id := cfg.StoreID()
-	storeMu := r.lockStore(id)
-	storeMu.Lock()
-	defer storeMu.Unlock()
+	mountID := cfg.MountID()
+	mountMu := r.lockStore(mountID)
+	mountMu.Lock()
+	defer mountMu.Unlock()
 
 	r.mu.Lock()
-	path, cached := r.mounted[id]
+	path, cached := r.mounted[mountID]
 	r.mu.Unlock()
-	if cached {
-		if r.stillMounted(ctx, id, path) {
-			return path, nil
-		}
+	if cached && !r.stillMounted(ctx, mountID, path) {
 		r.log.Warn("backing store is no longer mounted; remounting",
-			"storeID", id, "path", path)
+			"mountID", mountID, "path", path)
 		r.mu.Lock()
-		delete(r.mounted, id)
+		delete(r.mounted, mountID)
 		r.mu.Unlock()
+		cached = false
 	}
 
-	target := filepath.Join(r.root, id)
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir %s: %w", target, err)
+	if !cached {
+		target := filepath.Join(r.root, mountID)
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return "", fmt.Errorf("mkdir %s: %w", target, err)
+		}
+		mnt, err := r.mounterFor(cfg.Type)
+		if err != nil {
+			return "", err
+		}
+		if err := mnt.Mount(ctx, target, cfg); err != nil {
+			return "", err
+		}
+		r.mu.Lock()
+		r.mounted[mountID] = target
+		r.mu.Unlock()
+		path = target
 	}
-	mnt, err := r.mounterFor(cfg.Type)
-	if err != nil {
-		return "", err
-	}
-	if err := mnt.Mount(ctx, target, cfg); err != nil {
-		return "", err
+
+	// After the mount, never before: creating the subDir first would
+	// populate the directory the mount then hides. Repeated on every Get
+	// rather than only on first mount, so a namespace directory removed
+	// out-of-band comes back.
+	sub := filepath.Join(path, cfg.NFSSubDir)
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", sub, err)
 	}
 
 	r.mu.Lock()
-	r.mounted[id] = target
-	r.configs[id] = cfg
+	r.stores[cfg.StoreID()] = sub
+	r.configs[cfg.StoreID()] = cfg
 	r.mu.Unlock()
-	return target, nil
+	return sub, nil
 }
 
 // ConfigByStoreID returns the Config that produced the given storeID,
-// if this Registry has seen it (i.e. Get(cfg) where cfg.ID() == id has
-// previously succeeded in this process). Used by the controller to
+// if this Registry has seen it (i.e. Get(cfg) where cfg.StoreID() == id
+// has previously succeeded in this process). Used by the controller to
 // resolve DeleteVolume and ControllerExpandVolume — both of which carry
 // only a volumeID, with the storeID encoded in the volumeID prefix.
 func (r *Registry) ConfigByStoreID(id string) (Config, bool) {
@@ -157,14 +177,29 @@ func (r *Registry) ConfigByStoreID(id string) (Config, bool) {
 	return cfg, ok
 }
 
-// MountedPaths returns the absolute paths of every store currently
-// mounted by this Registry. Order is unspecified.
+// MountedPaths returns the absolute paths this Registry can hand to
+// image.New: every store path it has resolved, plus every mount root it
+// has mounted or adopted. Order is unspecified.
+//
+// Store paths are what ListVolumes actually needs — with a subDir the
+// .img files live below the mount root, so returning roots alone would
+// hide those volumes. Roots stay in the union because AdoptExisting
+// recovers a mount directory without a Config, and its volumes must
+// still be listable. For a store with no subDir the two coincide, hence
+// the dedupe: a duplicate path would report every volume in it twice.
 func (r *Registry) MountedPaths() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]string, 0, len(r.mounted))
-	for _, p := range r.mounted {
-		out = append(out, p)
+	seen := make(map[string]struct{}, len(r.stores)+len(r.mounted))
+	out := make([]string, 0, len(r.stores)+len(r.mounted))
+	for _, m := range []map[string]string{r.stores, r.mounted} {
+		for _, p := range m {
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
 	}
 	return out
 }
@@ -193,6 +228,10 @@ func (r *Registry) MountedPaths() []string {
 //   - Per-candidate IsMountPoint errors are absorbed silently and treated
 //     as "not adopted". The worst case is a redundant mount(8) on the
 //     next Get, which is safe.
+//   - Adopts mount directories, which are named by MountID. A subDir
+//     store's path is one level below and is only recorded by Get, so an
+//     adopted mount contributes its root to MountedPaths but no subDir
+//     stores until the next CreateVolume against that SC.
 func (r *Registry) AdoptExisting(ctx context.Context) error {
 	entries, err := os.ReadDir(r.root)
 	if err != nil {
