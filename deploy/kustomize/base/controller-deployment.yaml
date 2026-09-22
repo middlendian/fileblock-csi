@@ -60,6 +60,11 @@ spec:
             # mountd RPC roundtrips). Match csi-driver-nfs's posture
             # so CreateVolume doesn't get killed mid-mount.
             - --timeout=1200s
+            # Injects csi.storage.k8s.io/pvc/{name,namespace} and
+            # .../pv/name into CreateVolume parameters. Without it the
+            # ${pvc.metadata.namespace} token in backingStore.nfs.subDir
+            # never resolves and CreateVolume fails by design.
+            - --extra-create-metadata=true
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

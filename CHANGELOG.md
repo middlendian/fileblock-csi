@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `backingStore.nfs.subDir` StorageClass parameter places a store's
+  `.img` files in a subdirectory of the NFS export instead of at its
+  root, so one export and one StorageClass can give every namespace its
+  own backing directory. Supports the `${pvc.metadata.namespace}`,
+  `${pvc.metadata.name}` and `${pv.metadata.name}` tokens, spelled as
+  csi-driver-nfs spells them. The export is still mounted exactly once
+  per node: `Config` now carries a mount identity (`MountID`, shared
+  across subDirs) separate from its store identity (`StoreID`).
+- The `csi-provisioner` sidecar now runs with
+  `--extra-create-metadata=true`, which is what injects the pvc/pv
+  metadata the tokens above are substituted from. A `subDir` token that
+  cannot be resolved fails `CreateVolume` with `InvalidArgument` rather
+  than creating a directory named after the literal token.
+
+### Changed
+
+- `store.Config`'s `Canonical()` and `ID()` are replaced by `MountID()`
+  and `StoreID()`. Internal API only; no on-disk or wire change.
+  `StoreID()` equals the old `ID()` byte-for-byte for any config without
+  a `subDir`, so existing volumeIDs, volume contexts and mount
+  directories are untouched and no migration is required.
+
 ## [0.3.9] - 2026-09-20
 
 ### Fixed
