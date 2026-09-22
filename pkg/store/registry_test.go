@@ -714,14 +714,8 @@ func TestRegistrySubDirsShareOneMount(t *testing.T) {
 		t.Errorf("subDirs must live under one mount: %q vs %q", pa, pb)
 	}
 
-	mountCalls := 0
-	for _, c := range fake.Calls {
-		if c.Name == "mount" {
-			mountCalls++
-		}
-	}
-	if mountCalls != 1 {
-		t.Errorf("mount called %d times, want 1", mountCalls)
+	if n := countMounts(fake); n != 1 {
+		t.Errorf("mount called %d times, want 1", n)
 	}
 }
 
@@ -790,5 +784,112 @@ func TestMountedPathsDeduplicates(t *testing.T) {
 	paths := reg.MountedPaths()
 	if len(paths) != 1 || paths[0] != p {
 		t.Errorf("MountedPaths = %v, want exactly [%q]", paths, p)
+	}
+}
+
+// mountRecorderMounter is a Mounter stub that records whether its mount
+// target already had entries when Mount was invoked. It pins the
+// invariant that the subDir is created strictly after mount(8) succeeds,
+// never before -- creating it first would populate the directory the
+// mount then hides, so Mount seeing a non-empty target is the failure
+// signal.
+type mountRecorderMounter struct {
+	called           bool
+	targetHadEntries bool
+}
+
+func (m *mountRecorderMounter) Mount(_ context.Context, target string, _ Config) error {
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return err
+	}
+	m.called = true
+	m.targetHadEntries = len(entries) > 0
+	return nil
+}
+
+func TestRegistryCreatesSubDirAfterMountNotBefore(t *testing.T) {
+	root := t.TempDir()
+	rec := &mountRecorderMounter{}
+	reg := NewRegistry(root, rec, nil, nil, nil)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "team-a/fileblock"}
+
+	if _, err := reg.Get(context.Background(), cfg); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !rec.called {
+		t.Fatal("Mount was never called")
+	}
+	if rec.targetHadEntries {
+		t.Error("mount target already contained the subDir when mount(8) ran -- subDir must be created after Mount, not before")
+	}
+}
+
+// A second config that shares an already-mounted export via the cached
+// fast path must still get its own subDir created: only its storeID is
+// new, not the mount. A naive "only mkdir on a fresh mount" fix would
+// leave this subDir missing on disk.
+func TestRegistryCachedMountCreatesNewSubDir(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
+
+	a := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "ns-a/fileblock"}
+	b := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "ns-b/fileblock"}
+
+	if _, err := reg.Get(context.Background(), a); err != nil {
+		t.Fatalf("Get(a): %v", err)
+	}
+	pb, err := reg.Get(context.Background(), b)
+	if err != nil {
+		t.Fatalf("Get(b): %v", err)
+	}
+	st, err := os.Stat(pb)
+	if err != nil || !st.IsDir() {
+		t.Errorf("b's subDir was not created on the cached-mount fast path: %v", err)
+	}
+	if n := countMounts(fake); n != 1 {
+		t.Errorf("mount called %d times, want 1", n)
+	}
+}
+
+// A remount must evict the stale subDir path from r.stores -- otherwise
+// MountedPaths keeps handing ListVolumes a path under the gone mount, and
+// the next Get for that subDir would wrongly skip recreating it on the
+// fresh mount because its storeID still looked "seen".
+func TestRegistryRemountEvictsStaleStorePaths(t *testing.T) {
+	chk := &fakeChecker{mounted: true}
+	reg, fake := newCheckedRegistry(t, chk)
+	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p", NFSSubDir: "team-a/fileblock"}
+
+	p1, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get #1: %v", err)
+	}
+
+	// The mount goes away, and so does the directory tree underneath it
+	// -- a bad "skip mkdir, storeID already seen" bug would then hand
+	// back a path that no longer exists. chk stays false so this second
+	// Get evicts and remounts rather than fast-pathing on the cache.
+	chk.set(false, nil)
+	if err := os.RemoveAll(filepath.Dir(filepath.Dir(p1))); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	p2, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get #2: %v", err)
+	}
+	if p1 != p2 {
+		t.Errorf("path changed across remount: %q vs %q", p1, p2)
+	}
+	if st, err := os.Stat(p2); err != nil || !st.IsDir() {
+		t.Errorf("subDir was not recreated after remount: %v", err)
+	}
+	if n := countMounts(fake); n != 2 {
+		t.Errorf("mount called %d times, want 2", n)
 	}
 }

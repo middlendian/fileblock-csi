@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,9 +35,9 @@ const defaultMountCheckTimeout = 10 * time.Second
 
 // Registry mounts each unique store config once per process and hands
 // out the resulting paths, re-verifying on each handout that the mount
-// is still there. Concurrency: per-storeID Mutex prevents two callers
-// from racing into Mount; the global mu only guards the mounted,
-// per-store mutex, config, and in-flight-check maps.
+// is still there. Concurrency: per-mountID Mutex prevents two callers
+// from racing into Mount; the global mu only guards the mounted, stores,
+// per-mount mutex, config, and in-flight-check maps.
 type Registry struct {
 	root   string
 	nfsM   Mounter
@@ -70,7 +71,7 @@ type checkRes struct {
 // mp verifies that a path is a live mount. Both AdoptExisting and Get
 // depend on it: AdoptExisting will not adopt an unverified candidate,
 // and Get will not hand back a cached path whose mount has gone away.
-// Without it, a stale <storeID> directory — left under an emptyDir cache
+// Without it, a stale <mountID> directory — left under an emptyDir cache
 // by a prior container, or exposed when a backing-store mount drops out
 // from under a running process — reads as a healthy empty store and
 // every volume lookup under it fails as "not found".
@@ -127,6 +128,7 @@ func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
 			"mountID", mountID, "path", path)
 		r.mu.Lock()
 		delete(r.mounted, mountID)
+		r.evictStores(path)
 		r.mu.Unlock()
 		cached = false
 	}
@@ -149,20 +151,47 @@ func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
 		path = target
 	}
 
-	// After the mount, never before: creating the subDir first would
-	// populate the directory the mount then hides. Repeated on every Get
-	// rather than only on first mount, so a namespace directory removed
-	// out-of-band comes back.
-	sub := filepath.Join(path, cfg.NFSSubDir)
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir %s: %w", sub, err)
+	storeID := cfg.StoreID()
+	sub := path
+	if cfg.NFSSubDir != "" {
+		sub = filepath.Join(path, cfg.NFSSubDir)
+		r.mu.Lock()
+		_, seen := r.stores[storeID]
+		r.mu.Unlock()
+		// Once per storeID per process, not on every Get: MkdirAll stats
+		// the path, and a stat against a hung hard-mounted NFS target
+		// blocks forever ignoring context cancellation. Doing that while
+		// holding mountMu would wedge every later Get for this export,
+		// across every namespace on it, rather than just this RPC. A
+		// remount clears the storeID from r.stores (see evictStores), so
+		// this still recreates the subDir on a fresh mount.
+		if !seen {
+			if err := os.MkdirAll(sub, 0o755); err != nil {
+				return "", fmt.Errorf("mkdir %s: %w", sub, err)
+			}
+		}
 	}
 
 	r.mu.Lock()
-	r.stores[cfg.StoreID()] = sub
-	r.configs[cfg.StoreID()] = cfg
+	r.stores[storeID] = sub
+	r.configs[storeID] = cfg
 	r.mu.Unlock()
 	return sub, nil
+}
+
+// evictStores drops every r.stores entry rooted at the given mount path —
+// the mount root itself plus any subDir beneath it — after that mount is
+// found to be gone. Without this, MountedPaths keeps handing ListVolumes
+// a path whose mount no longer exists, and the next Get for a subDir
+// under it would wrongly skip recreating that subDir on the fresh mount.
+// Callers must hold r.mu.
+func (r *Registry) evictStores(path string) {
+	prefix := path + string(os.PathSeparator)
+	for storeID, p := range r.stores {
+		if p == path || strings.HasPrefix(p, prefix) {
+			delete(r.stores, storeID)
+		}
+	}
 }
 
 // ConfigByStoreID returns the Config that produced the given storeID,
@@ -284,11 +313,11 @@ func (r *Registry) stillMounted(ctx context.Context, id, path string) bool {
 	switch {
 	case !ok:
 		r.log.Warn("mountpoint check did not return in time; assuming backing store is still mounted",
-			"storeID", id, "path", path, "timeout", r.checkTimeout)
+			"mountID", id, "path", path, "timeout", r.checkTimeout)
 		return true
 	case res.err != nil:
 		r.log.Warn("mountpoint check failed; assuming backing store is still mounted",
-			"storeID", id, "path", path, "err", res.err)
+			"mountID", id, "path", path, "err", res.err)
 		return true
 	default:
 		return res.mounted
