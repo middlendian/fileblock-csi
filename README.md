@@ -167,6 +167,10 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
    the existing behaviour: the export root. Existing volumes are unaffected
    — a store with no `subDir` keeps the storeID it has always had.
 
+   A namespace directory removed out-of-band is not recreated until that
+   export's mount is re-established or the driver process restarts, so
+   `CreateVolume` returns `Internal` for that store in the meantime.
+
    Pre-built example overlays live at:
    - `deploy/kustomize/overlays/example-localdir/`
    - `deploy/kustomize/overlays/example-nfs-shared/`

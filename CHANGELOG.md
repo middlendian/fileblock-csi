@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata the tokens above are substituted from. A `subDir` token that
   cannot be resolved fails `CreateVolume` with `InvalidArgument` rather
   than creating a directory named after the literal token.
+- Known limitations of `subDir`: rolling back to 0.3.x after using it
+  leaves 0.3.x unable to reconstruct those volumeIDs (0.3.x's `ID()`
+  cannot produce them), so its `DeleteVolume` returns OK per CSI
+  idempotency without finding the `.img` — orphaning it on the backing
+  store — and its `NodeStageVolume` looks for the image at the export
+  root, where it never was. After a controller restart, `AdoptExisting`
+  recovers mount roots but not subDir store paths, so subDir volumes are
+  absent from `ListVolumes` until the next `CreateVolume` against each
+  affected StorageClass re-registers its storeID.
 
 ### Changed
 
