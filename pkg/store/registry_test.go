@@ -51,8 +51,8 @@ func TestRegistryGetMountsOnce(t *testing.T) {
 	if p1 != p2 {
 		t.Errorf("path mismatch: %q vs %q", p1, p2)
 	}
-	if p1 != filepath.Join(root, cfg.StoreID()) {
-		t.Errorf("path = %q, want %q", p1, filepath.Join(root, cfg.StoreID()))
+	if p1 != filepath.Join(root, cfg.MountID()) {
+		t.Errorf("path = %q, want %q", p1, filepath.Join(root, cfg.MountID()))
 	}
 	mountCalls := 0
 	for _, c := range fake.Calls {
@@ -281,7 +281,7 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
-	if err := os.MkdirAll(filepath.Join(root, cfg.StoreID()), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, cfg.MountID()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -320,7 +320,7 @@ func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
 func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
-	dir := filepath.Join(root, cfg.StoreID())
+	dir := filepath.Join(root, cfg.MountID())
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
 func TestRegistryAdoptExistingSkipsOnCheckError(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
-	if err := os.MkdirAll(filepath.Join(root, cfg.StoreID()), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, cfg.MountID()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fake := exectest.New()
@@ -784,6 +784,57 @@ func TestMountedPathsDeduplicates(t *testing.T) {
 	paths := reg.MountedPaths()
 	if len(paths) != 1 || paths[0] != p {
 		t.Errorf("MountedPaths = %v, want exactly [%q]", paths, p)
+	}
+}
+
+// TestMountedPathsCombinesAdoptedRootsAndSubDirStores covers the one
+// combination the two tests above don't: an AdoptExisting-populated
+// mount root (the shape a controller restart leaves behind, no Config
+// attached) alongside a Get-populated subDir store path, in a single
+// MountedPaths() call. Both must be listed, and as distinct entries --
+// ListVolumes needs the adopted root for its own (root-level) volumes
+// and the subDir path for the namespaced ones; collapsing either away
+// would hide volumes.
+func TestMountedPathsCombinesAdoptedRootsAndSubDirStores(t *testing.T) {
+	root := t.TempDir()
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	findmntReportsMounted(fake)
+	mnt := mount.New(fake)
+	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
+
+	// Simulate a controller restart: a mount root recovered by
+	// AdoptExisting, with no Config ever registered for it in this
+	// process.
+	adoptedRoot := filepath.Join(root, "0123456789ab")
+	if err := os.MkdirAll(adoptedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("AdoptExisting: %v", err)
+	}
+
+	// A live subDir store, populated the normal way via Get, under a
+	// different export so it doesn't collide with the adopted root. Get
+	// also mounts this export's own root (mountID != storeID once a
+	// subDir is set), so it contributes two distinct MountedPaths
+	// entries: the mount root and the subDir store path below it.
+	cfg := Config{Type: TypeNFS, NFSServer: "s2", NFSPath: "/p2", NFSSubDir: "team-a/fileblock"}
+	subPath, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	mountRoot := filepath.Join(root, cfg.MountID())
+
+	got := reg.MountedPaths()
+	want := map[string]bool{adoptedRoot: true, mountRoot: true, subPath: true}
+	if len(got) != len(want) {
+		t.Fatalf("MountedPaths = %v, want exactly %v", got, want)
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Errorf("MountedPaths contains unexpected path %q", p)
+		}
 	}
 }
 
