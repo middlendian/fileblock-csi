@@ -965,6 +965,14 @@ func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
 }
 ```
 
+(Superseded during execution: the shipped `Get` only runs the subDir
+`MkdirAll` once per storeID per process, guarded by a `seen` check on
+`r.stores`, plus again after a remount — not on every `Get` as the
+comment above says. A stat against a hung hard mount would otherwise
+block while `mountMu` is held, wedging every namespace sharing that
+export. See the spec's §3 for the shipped behavior and its consequence
+for out-of-band directory removal.)
+
 - [ ] **Step 5: Rewrite `Registry.MountedPaths`**
 
 ```go

@@ -218,18 +218,39 @@ A new `stores map[string]string` maps storeID to the resolved store path.
 1. Lock on `cfg.MountID()`.
 2. Establish or re-verify the mount at `<root>/<mountID>` — unchanged
    logic, including the staleness check and its timeout semantics.
-3. `sub := filepath.Join(mountPath, cfg.NFSSubDir)`; `os.MkdirAll(sub,
+3. `sub := filepath.Join(mountPath, cfg.NFSSubDir)`. If `NFSSubDir` is
+   set and `cfg.StoreID()` is not already in `stores`, `os.MkdirAll(sub,
    0o755)`.
 4. Record `stores[cfg.StoreID()] = sub` and
    `configs[cfg.StoreID()] = cfg`.
 5. Return `sub`.
 
-Step 3 must run **after** the mount is confirmed live, never before:
-creating the directory first would populate the underlying directory
-that the mount then hides. Running it on every `Get` rather than only on
-first mount is deliberate — it costs one `mkdir` syscall against an
-existing directory and it repairs a namespace directory removed
-out-of-band. For `NFSSubDir == ""` it is a no-op on the mount root.
+**This diverges from the original plan, which called for step 3 to run
+on every `Get`.** During execution that was changed to run only once per
+storeID per process (guarded by the `stores` membership check above),
+plus again after a remount. The reason: `MkdirAll` stats the target
+first, and a stat against a hung hard-mounted NFS target blocks
+indefinitely, ignoring context cancellation. `Get` holds `mountMu` (the
+per-mountID lock from step 1) across the whole call, so a hang there
+would wedge every later `Get` for every namespace sharing that export,
+not just the RPC that triggered it — a much larger blast radius than the
+single stuck RPC the original design accepted.
+
+The consequence: a namespace directory removed out-of-band is **not**
+restored until the mount is re-established (a remount clears that
+storeID from `stores` via `evictStores`, so the next `Get` recreates it)
+or the process restarts. Until then, `image.New`'s stat of the missing
+directory fails and `CreateVolume` returns `Internal` for that store.
+This is a real behavior change from the "repairs itself on every Get"
+design intent above, traded deliberately for bounding the blast radius
+of a hung stat. See `pkg/store/registry.go`'s `Get` and `evictStores`
+for the shipped implementation.
+
+Step 3 must still run **after** the mount is confirmed live, never
+before: creating the directory first would populate the underlying
+directory that the mount then hides. For `NFSSubDir == ""` it is a
+no-op on the mount root (the `if NFSSubDir is set` guard above skips it
+entirely).
 
 Two namespaces on one export therefore share one mount, one per-store
 lock and one staleness check, while holding distinct storeIDs.
