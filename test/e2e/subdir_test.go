@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -47,16 +46,29 @@ func TestNFSSubDirPerNamespace(t *testing.T) {
 			wantImg, err, wantDir, dirNames(wantDir))
 	}
 
-	// 2. Nothing at the export root — that separation is the whole point.
-	for _, name := range dirNames(export) {
-		if strings.HasSuffix(name, ".img") {
-			t.Errorf("found %s at the export root; subDir did not take effect", name)
-		}
+	// 2. This volume's .img is not at the export root — that separation
+	// is the whole point. Scoped to this volume's handle rather than
+	// asserting the export root holds no .img at all: every other test
+	// in this suite provisions through the `fileblock` StorageClass
+	// whose backingStore.nfs.path IS the export root, namespace teardown
+	// uses --wait=false, and Go runs test files in alphabetical order —
+	// so a prior test's PV reclamation can still be in flight here,
+	// leaving a stray .img at the root that has nothing to do with this
+	// test. A per-handle check still fails if Registry.Get ignored the
+	// subDir and wrote this volume at the root, but is immune to that
+	// unrelated residue.
+	if _, err := os.Stat(filepath.Join(export, handle+".img")); err == nil {
+		t.Errorf("found %s.img at the export root; subDir did not take effect", handle)
 	}
 
-	// 3. The directory is named for the namespace, not for the token. A
-	// literal directory here means the provisioner is missing
-	// --extra-create-metadata=true and every namespace would share it.
+	// 3. Belt-and-braces: a literal-token directory would mean the
+	// provisioner is missing --extra-create-metadata=true. In practice
+	// this can never trigger — an unresolved token is fatal at
+	// CreateVolume (see store.resolveSubDir), so the PVC never binds and
+	// waitPodReady above fails long before this Stat runs. The real
+	// detector for a missing --extra-create-metadata=true is that
+	// waitPodReady timeout, not this assertion; this stays only in case
+	// the design ever changes to tolerate unresolved tokens.
 	if _, err := os.Stat(filepath.Join(export, "${pvc.metadata.namespace}")); err == nil {
 		t.Error("export has a directory named after the literal token; substitution did not happen")
 	}
