@@ -138,6 +138,38 @@ func TestSidecarTimeouts(t *testing.T) {
 	}
 }
 
+// TestSidecarExtraCreateMetadata asserts the csi-provisioner container's
+// args include --extra-create-metadata=true. This is load-bearing for
+// the backingStore.nfs.subDir feature: it is what makes external-
+// provisioner inject the csi.storage.k8s.io/pvc/namespace (and
+// pvc/name, pv/name) keys into CreateVolume's parameters, which is the
+// metadata the ${pvc.metadata.namespace} token is substituted from.
+// Without this flag every templated subDir fails CreateVolume with an
+// unresolved-token error. make e2e-nfs is the only other layer that
+// would catch its removal, and that workflow only runs on push to main
+// and via workflow_dispatch — not on every PR — so this unit test is
+// the PR-gated backstop.
+func TestSidecarExtraCreateMetadata(t *testing.T) {
+	data, err := os.ReadFile("kustomize/base/controller-deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	const sidecar = "csi-provisioner"
+	idx := strings.Index(text, "name: "+sidecar)
+	if idx == -1 {
+		t.Fatalf("controller-deployment.yaml: missing sidecar %q", sidecar)
+	}
+	end := strings.Index(text[idx+1:], "- name:")
+	if end == -1 {
+		end = len(text) - idx - 1
+	}
+	block := text[idx : idx+1+end]
+	if !strings.Contains(block, "--extra-create-metadata=true") {
+		t.Errorf("controller-deployment.yaml: %s sidecar must include --extra-create-metadata=true arg", sidecar)
+	}
+}
+
 // TestCSIDriverFsGroupPolicyIsFile asserts the CSIDriver resource sets
 // fsGroupPolicy: File. Without an explicit policy, the API server
 // defaults to ReadWriteOnceWithFSType, which tells kubelet to skip
