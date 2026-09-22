@@ -221,9 +221,14 @@ build path is exercised by plain `make docker` against the top-level
 ## On-disk contract
 
 `pkg/image` is the **only** package that writes `.img` files. `pkg/store`
-creates store root directories (`Registry.Get` creates a `subDir` after
-its mount is live, since the namespace directory does not exist until the
-first volume lands in it) and writes nothing else.
+creates store root directories and writes nothing else: `Registry.Get`
+creates a `subDir` after its mount is live — never before, which would
+populate the directory the mount then hides — the first time that store
+is seen in this process, and again after a remount. It is deliberately
+not recreated on every `Get`: `MkdirAll` stats, and a stat against a hung
+hard mount blocks indefinitely while the per-mount lock is held. A
+namespace directory removed out-of-band is therefore not restored until
+the mount is re-established or the process restarts.
 
 Every volume is a single file in `${backingStorePath}`:
 

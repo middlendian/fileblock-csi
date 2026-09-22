@@ -161,7 +161,8 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
    namespace would otherwise share it, and nothing would reveal that short
    of listing the export by hand.
 
-   `subDir` must be relative and must not contain `..`. It is NFS-only;
+   `subDir` must be relative, must not contain `..`, must not contain NUL
+   bytes, and must not clean to `.`. It is NFS-only;
    setting it with `backingStore.type: local` is rejected. Omitting it is
    the existing behaviour: the export root. Existing volumes are unaffected
    — a store with no `subDir` keeps the storeID it has always had.
