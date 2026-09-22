@@ -88,8 +88,8 @@ func TestVolumeContextRoundTripNFS(t *testing.T) {
 	if vc[ParamType] != "nfs" {
 		t.Errorf("vc[%s] = %q", ParamType, vc[ParamType])
 	}
-	if vc[VolumeContextStoreID] != c.ID() {
-		t.Errorf("vc[storeID] = %q, want %q", vc[VolumeContextStoreID], c.ID())
+	if vc[VolumeContextStoreID] != c.StoreID() {
+		t.Errorf("vc[storeID] = %q, want %q", vc[VolumeContextStoreID], c.StoreID())
 	}
 	got, err := ConfigFromVolumeContext(vc)
 	if err != nil {
@@ -117,5 +117,212 @@ func TestVolumeContextOmitsEmptyMountOptions(t *testing.T) {
 	vc := c.ToVolumeContext()
 	if _, present := vc[ParamNFSMountOptions]; present {
 		t.Errorf("mountOptions key should be absent when empty, got %+v", vc)
+	}
+}
+
+func nfsParams(extra map[string]string) map[string]string {
+	p := map[string]string{
+		"backingStore.type":       "nfs",
+		"backingStore.nfs.server": "nfs.example.internal",
+		"backingStore.nfs.path":   "/exports/k8s_ns",
+	}
+	for k, v := range extra {
+		p[k] = v
+	}
+	return p
+}
+
+func TestConfigFromParamsSubDirAbsentIsEmpty(t *testing.T) {
+	c, err := ConfigFromParams(nfsParams(nil))
+	if err != nil {
+		t.Fatalf("ConfigFromParams: %v", err)
+	}
+	if c.NFSSubDir != "" {
+		t.Errorf("NFSSubDir = %q, want empty", c.NFSSubDir)
+	}
+}
+
+func TestConfigFromParamsSubDirLiteral(t *testing.T) {
+	c, err := ConfigFromParams(nfsParams(map[string]string{
+		"backingStore.nfs.subDir": "team-a/fileblock",
+	}))
+	if err != nil {
+		t.Fatalf("ConfigFromParams: %v", err)
+	}
+	if c.NFSSubDir != "team-a/fileblock" {
+		t.Errorf("NFSSubDir = %q, want %q", c.NFSSubDir, "team-a/fileblock")
+	}
+}
+
+func TestConfigFromParamsSubDirSubstitutesNamespace(t *testing.T) {
+	c, err := ConfigFromParams(nfsParams(map[string]string{
+		"backingStore.nfs.subDir":          "${pvc.metadata.namespace}/fileblock",
+		"csi.storage.k8s.io/pvc/namespace": "team-a",
+	}))
+	if err != nil {
+		t.Fatalf("ConfigFromParams: %v", err)
+	}
+	if c.NFSSubDir != "team-a/fileblock" {
+		t.Errorf("NFSSubDir = %q, want %q", c.NFSSubDir, "team-a/fileblock")
+	}
+}
+
+func TestConfigFromParamsSubDirSubstitutesPVCAndPVName(t *testing.T) {
+	c, err := ConfigFromParams(nfsParams(map[string]string{
+		"backingStore.nfs.subDir":     "${pvc.metadata.name}/${pv.metadata.name}",
+		"csi.storage.k8s.io/pvc/name": "my-claim",
+		"csi.storage.k8s.io/pv/name":  "pv-123",
+	}))
+	if err != nil {
+		t.Fatalf("ConfigFromParams: %v", err)
+	}
+	if c.NFSSubDir != "my-claim/pv-123" {
+		t.Errorf("NFSSubDir = %q, want %q", c.NFSSubDir, "my-claim/pv-123")
+	}
+}
+
+// Without --extra-create-metadata=true the metadata keys are absent, the
+// token survives, and every namespace would land in one shared directory
+// whose name looks like a template. That is the exact isolation failure
+// the parameter exists to prevent, so it is fatal.
+func TestConfigFromParamsSubDirUnresolvedTokenIsFatal(t *testing.T) {
+	_, err := ConfigFromParams(nfsParams(map[string]string{
+		"backingStore.nfs.subDir": "${pvc.metadata.namespace}/fileblock",
+	}))
+	if err == nil {
+		t.Fatal("expected an error for an unresolved token")
+	}
+	for _, want := range []string{
+		"backingStore.nfs.subDir",
+		"${pvc.metadata.namespace}",
+		"--extra-create-metadata=true",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestConfigFromParamsSubDirMistypedTokenIsFatal(t *testing.T) {
+	_, err := ConfigFromParams(nfsParams(map[string]string{
+		"backingStore.nfs.subDir":          "${pvc.namespace}/fileblock",
+		"csi.storage.k8s.io/pvc/namespace": "team-a",
+	}))
+	if err == nil {
+		t.Fatal("expected an error for the mistyped ${pvc.namespace} token")
+	}
+	if !strings.Contains(err.Error(), "${pvc.namespace}") {
+		t.Errorf("error %q should quote the unresolved token", err)
+	}
+}
+
+func TestConfigFromParamsSubDirRejectsTraversal(t *testing.T) {
+	for _, bad := range []string{
+		"../escape",
+		"team-a/../../escape",
+		"a/../b",
+	} {
+		_, err := ConfigFromParams(nfsParams(map[string]string{
+			"backingStore.nfs.subDir": bad,
+		}))
+		if err == nil {
+			t.Errorf("subDir %q was accepted; traversal defeats the isolation the feature provides", bad)
+		}
+	}
+}
+
+func TestConfigFromParamsSubDirRejectsAbsolute(t *testing.T) {
+	_, err := ConfigFromParams(nfsParams(map[string]string{
+		"backingStore.nfs.subDir": "/exports/elsewhere",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "relative") {
+		t.Fatalf("expected a 'relative' error, got %v", err)
+	}
+}
+
+func TestConfigFromParamsSubDirRejectsDot(t *testing.T) {
+	for _, bad := range []string{".", "./"} {
+		_, err := ConfigFromParams(nfsParams(map[string]string{
+			"backingStore.nfs.subDir": bad,
+		}))
+		if err == nil {
+			t.Errorf("subDir %q was accepted; it names the mount root under a distinct StoreID", bad)
+		}
+	}
+}
+
+func TestConfigFromParamsSubDirRejectsNUL(t *testing.T) {
+	_, err := ConfigFromParams(nfsParams(map[string]string{
+		"backingStore.nfs.subDir": "team-a\x00/fileblock",
+	}))
+	if err == nil {
+		t.Fatal("expected an error for a NUL byte in subDir")
+	}
+}
+
+// Trailing slashes and a leading ./ must not mint separate StoreIDs for
+// one directory.
+func TestConfigFromParamsSubDirNormalizes(t *testing.T) {
+	var ids []string
+	for _, in := range []string{"team-a/fileblock", "team-a/fileblock/", "./team-a/fileblock"} {
+		c, err := ConfigFromParams(nfsParams(map[string]string{
+			"backingStore.nfs.subDir": in,
+		}))
+		if err != nil {
+			t.Fatalf("ConfigFromParams(%q): %v", in, err)
+		}
+		if c.NFSSubDir != "team-a/fileblock" {
+			t.Errorf("subDir %q normalized to %q, want %q", in, c.NFSSubDir, "team-a/fileblock")
+		}
+		ids = append(ids, c.StoreID())
+	}
+	for _, id := range ids {
+		if id != ids[0] {
+			t.Errorf("normalization produced distinct StoreIDs: %v", ids)
+			break
+		}
+	}
+}
+
+func TestConfigFromParamsSubDirRejectedForLocal(t *testing.T) {
+	_, err := ConfigFromParams(map[string]string{
+		"backingStore.type":       "local",
+		"backingStore.local.path": "/var/lib/fileblock",
+		"backingStore.nfs.subDir": "team-a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "backingStore.nfs.subDir") {
+		t.Fatalf("expected a subDir-not-supported error, got %v", err)
+	}
+}
+
+// The node receives an already-resolved subDir in volume context and must
+// re-parse it without metadata keys present.
+func TestVolumeContextRoundTripsSubDir(t *testing.T) {
+	c := Config{
+		Type:      TypeNFS,
+		NFSServer: "nfs.example.internal",
+		NFSPath:   "/exports/k8s_ns",
+		NFSSubDir: "team-a/fileblock",
+	}
+	vc := c.ToVolumeContext()
+	if vc["backingStore.nfs.subDir"] != "team-a/fileblock" {
+		t.Fatalf("volume context subDir = %q", vc["backingStore.nfs.subDir"])
+	}
+	back, err := ConfigFromVolumeContext(vc)
+	if err != nil {
+		t.Fatalf("ConfigFromVolumeContext: %v", err)
+	}
+	if back.NFSSubDir != c.NFSSubDir {
+		t.Errorf("subDir round-trip: %q -> %q", c.NFSSubDir, back.NFSSubDir)
+	}
+	if back.StoreID() != c.StoreID() {
+		t.Errorf("StoreID round-trip: %q -> %q", c.StoreID(), back.StoreID())
+	}
+}
+
+func TestVolumeContextOmitsEmptySubDir(t *testing.T) {
+	c := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
+	if _, ok := c.ToVolumeContext()["backingStore.nfs.subDir"]; ok {
+		t.Error("volume context must omit subDir when it is empty")
 	}
 }

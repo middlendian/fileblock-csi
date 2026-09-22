@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -361,6 +362,49 @@ func TestDeleteVolume(t *testing.T) {
 	}
 	if _, err := c.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+}
+
+// TestCreateDeleteVolumeSubDirRoundTrip is the pkg/driver-level test for
+// the reason MountID and StoreID were split: DeleteVolume must resolve a
+// subDir volume from the storeID encoded in its volumeID prefix, and
+// until now that path was exercised only at the pkg/store layer (see
+// TestRegistryConfigByStoreIDResolvesSubDir) plus an e2e test that does
+// not run on PRs (test/e2e/subdir_test.go, nfs-only, push-to-main /
+// workflow_dispatch).
+func TestCreateDeleteVolumeSubDirRoundTrip(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[store.ParamNFSSubDir] = "${pvc.metadata.namespace}/fileblock"
+	params["csi.storage.k8s.io/pvc/namespace"] = "team-a"
+
+	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "vol1",
+		Parameters:         params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	volumeID := resp.Volume.VolumeId
+
+	// The token must have resolved against the injected namespace, and
+	// the volumeID's storeID segment must be the StoreID() of the
+	// equivalent already-resolved config -- that prefix is exactly what
+	// DeleteVolume parses back out to find the store.
+	wantCfg := store.Config{
+		Type:      store.TypeNFS,
+		NFSServer: "s",
+		NFSPath:   "/p",
+		NFSSubDir: "team-a/fileblock",
+	}
+	wantPrefix := "fb-" + wantCfg.StoreID() + "-"
+	if !strings.HasPrefix(volumeID, wantPrefix) {
+		t.Fatalf("volumeID = %q, want prefix %q", volumeID, wantPrefix)
+	}
+
+	if _, err := c.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: volumeID}); err != nil {
+		t.Fatalf("DeleteVolume: %v", err)
 	}
 }
 

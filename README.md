@@ -133,6 +133,44 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
    the driver pod — without `nolock`, `mount.nfs` refuses with
    "rpc.statd is not running but is required for remote locking".
 
+   ### Per-namespace backing directories
+
+   One export can hold a separate backing directory per namespace.
+   `backingStore.nfs.subDir` accepts the same pv/pvc metadata tokens
+   csi-driver-nfs uses:
+
+   ```yaml
+   parameters:
+     backingStore.type: nfs
+     backingStore.nfs.server: nfs.example.internal
+     backingStore.nfs.path: /exports/k8s_ns
+     backingStore.nfs.subDir: ${pvc.metadata.namespace}/fileblock
+   ```
+
+   A PVC in namespace `team-a` then lands at
+   `/exports/k8s_ns/team-a/fileblock/fb-<uuid>.img`. The export is still
+   mounted exactly once per node — every `subDir` under one export shares a
+   single mount.
+
+   Supported tokens are `${pvc.metadata.namespace}`, `${pvc.metadata.name}`
+   and `${pv.metadata.name}`. They are substituted by the driver from
+   metadata that external-provisioner injects only when it runs with
+   `--extra-create-metadata=true`; the shipped manifests set that flag. If a
+   token cannot be resolved, `CreateVolume` fails with `InvalidArgument`
+   rather than creating a directory named after the literal token — every
+   namespace would otherwise share it, and nothing would reveal that short
+   of listing the export by hand.
+
+   `subDir` must be relative, must not contain `..`, must not contain NUL
+   bytes, and must not clean to `.`. It is NFS-only;
+   setting it with `backingStore.type: local` is rejected. Omitting it is
+   the existing behaviour: the export root. Existing volumes are unaffected
+   — a store with no `subDir` keeps the storeID it has always had.
+
+   A namespace directory removed out-of-band is not recreated until that
+   export's mount is re-established or the driver process restarts, so
+   `CreateVolume` returns `Internal` for that store in the meantime.
+
    Pre-built example overlays live at:
    - `deploy/kustomize/overlays/example-localdir/`
    - `deploy/kustomize/overlays/example-nfs-shared/`
@@ -164,6 +202,7 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
 | `backingStore.nfs.server`     | when type=nfs     | NFS server hostname or IP                                     |
 | `backingStore.nfs.path`       | when type=nfs     | Exported path on the server                                   |
 | `backingStore.nfs.mountOptions` | no (type=nfs)  | Mount options string, e.g. `"nfsvers=4.1,hard,timeo=600"`    |
+| `backingStore.nfs.subDir`     | no (type=nfs)     | Subdirectory of the export to hold this store's `.img` files; supports `${pvc.metadata.namespace}` |
 | `backingStore.local.path`     | when type=local   | Absolute path on every node that can read & write the store   |
 
 Multiple StorageClasses with distinct backing stores can coexist in a

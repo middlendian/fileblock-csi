@@ -220,12 +220,30 @@ build path is exercised by plain `make docker` against the top-level
 
 ## On-disk contract
 
-`pkg/image` is the **only** package that writes to the backing store. Every
-volume is a single file in `${backingStorePath}`:
+`pkg/image` is the **only** package that writes `.img` files. `pkg/store`
+creates store root directories and writes nothing else: `Registry.Get`
+creates a `subDir` after its mount is live — never before, which would
+populate the directory the mount then hides — the first time that store
+is seen in this process, and again after a remount. It is deliberately
+not recreated on every `Get`: `MkdirAll` stats, and a stat against a hung
+hard mount blocks indefinitely while the per-mount lock is held. A
+namespace directory removed out-of-band is therefore not restored until
+the mount is re-established or the process restarts.
+
+Every volume is a single file in `${backingStorePath}`:
 
 ```
 fb-<uuid>.img      sparse ext4 image
 ```
+
+With `backingStore.nfs.subDir` set, that file lives one level down:
+
+```
+<export>/<subDir>/fb-<uuid>.img
+```
+
+`subDir` participates in `Config.StoreID()` but not `Config.MountID()`,
+so each namespace is a distinct store while the export is mounted once.
 
 The `.img` is the source of truth. Capacity is read from `os.Stat().Size()`
 (the apparent size we `truncate(2)` to — matches what `losetup` exposes and
