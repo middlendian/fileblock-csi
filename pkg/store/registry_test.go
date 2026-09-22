@@ -51,8 +51,8 @@ func TestRegistryGetMountsOnce(t *testing.T) {
 	if p1 != p2 {
 		t.Errorf("path mismatch: %q vs %q", p1, p2)
 	}
-	if p1 != filepath.Join(root, cfg.ID()) {
-		t.Errorf("path = %q, want %q", p1, filepath.Join(root, cfg.ID()))
+	if p1 != filepath.Join(root, cfg.StoreID()) {
+		t.Errorf("path = %q, want %q", p1, filepath.Join(root, cfg.StoreID()))
 	}
 	mountCalls := 0
 	for _, c := range fake.Calls {
@@ -130,13 +130,13 @@ func TestRegistryConfigByStoreID(t *testing.T) {
 	reg := NewRegistry(root, NewNFSMounter(fake), NewLocalMounter(mnt), mnt, nil)
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
 
-	if _, ok := reg.ConfigByStoreID(cfg.ID()); ok {
+	if _, ok := reg.ConfigByStoreID(cfg.StoreID()); ok {
 		t.Fatal("ConfigByStoreID returned true before any Get")
 	}
 	if _, err := reg.Get(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := reg.ConfigByStoreID(cfg.ID())
+	got, ok := reg.ConfigByStoreID(cfg.StoreID())
 	if !ok {
 		t.Fatal("ConfigByStoreID returned false after Get")
 	}
@@ -281,7 +281,7 @@ func TestRegistryDoesNotCacheOnMountFailure(t *testing.T) {
 func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
-	if err := os.MkdirAll(filepath.Join(root, cfg.ID()), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, cfg.StoreID()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -320,7 +320,7 @@ func TestRegistryAdoptExistingSkipsNonMountedDirs(t *testing.T) {
 func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
-	dir := filepath.Join(root, cfg.ID())
+	dir := filepath.Join(root, cfg.StoreID())
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestRegistryAdoptExistingAdoptsMountedDirs(t *testing.T) {
 func TestRegistryAdoptExistingSkipsOnCheckError(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{Type: TypeNFS, NFSServer: "s", NFSPath: "/p"}
-	if err := os.MkdirAll(filepath.Join(root, cfg.ID()), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, cfg.StoreID()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fake := exectest.New()

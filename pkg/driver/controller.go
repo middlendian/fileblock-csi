@@ -270,7 +270,7 @@ func volumeIDFromName(cfg store.Config, name string) (string, error) {
 	if strings.ContainsAny(name, "/\\\x00") {
 		return "", status.Errorf(codes.InvalidArgument, "name %q contains invalid characters", name)
 	}
-	return "fb-" + cfg.ID() + "-" + name, nil
+	return "fb-" + cfg.StoreID() + "-" + name, nil
 }
 
 // parseStoreIDFromVolumeID extracts the 12-char storeID from a volumeID

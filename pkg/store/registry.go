@@ -107,7 +107,7 @@ func NewRegistry(root string, nfs Mounter, local Mounter, mp MountChecker, log *
 // so callers that hold only a storeID (controller's DeleteVolume /
 // Expand path) can resolve back to a Config via ConfigByStoreID.
 func (r *Registry) Get(ctx context.Context, cfg Config) (string, error) {
-	id := cfg.ID()
+	id := cfg.StoreID()
 	storeMu := r.lockStore(id)
 	storeMu.Lock()
 	defer storeMu.Unlock()

@@ -56,7 +56,7 @@ func ConfigFromParams(params map[string]string) (Config, error) {
 func (c Config) ToVolumeContext() map[string]string {
 	vc := map[string]string{
 		ParamType:            string(c.Type),
-		VolumeContextStoreID: c.ID(),
+		VolumeContextStoreID: c.StoreID(),
 	}
 	switch c.Type {
 	case TypeNFS:

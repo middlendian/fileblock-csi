@@ -88,8 +88,8 @@ func TestVolumeContextRoundTripNFS(t *testing.T) {
 	if vc[ParamType] != "nfs" {
 		t.Errorf("vc[%s] = %q", ParamType, vc[ParamType])
 	}
-	if vc[VolumeContextStoreID] != c.ID() {
-		t.Errorf("vc[storeID] = %q, want %q", vc[VolumeContextStoreID], c.ID())
+	if vc[VolumeContextStoreID] != c.StoreID() {
+		t.Errorf("vc[storeID] = %q, want %q", vc[VolumeContextStoreID], c.StoreID())
 	}
 	got, err := ConfigFromVolumeContext(vc)
 	if err != nil {
