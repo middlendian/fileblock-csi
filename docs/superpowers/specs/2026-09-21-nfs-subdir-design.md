@@ -40,17 +40,52 @@ identity. But every `subDir` under one export shares a single NFS mount:
 mounting the same export N times for N namespaces would be wasteful and
 would multiply the blast radius of a hung mount.
 
-`Config` therefore grows two keys rather than one.
+`Config` therefore carries two identities rather than one, and exposes
+exactly two methods:
 
-| method | value | identifies |
+| method | identifies | used for |
 |---|---|---|
-| `MountKey() string` | the 0.3.x canonical form, verbatim | the **mount source**: type, server, path, mount options |
-| `MountID() string` | `sha256(MountKey())[:12]` | the mount directory under `--stores-root` |
-| `Canonical() []byte` | `MountKey()`, plus `"\|" + NFSSubDir` when non-empty | the **store** |
-| `ID() string` | `sha256(Canonical())[:12]` | the storeID in the volumeID prefix and volume context |
+| `MountID() string` | the **mount source**: type, server, path, mount options | the mount directory under `--stores-root`, and the Registry's mount-keyed maps |
+| `StoreID() string` | the **store**: mount source plus `subDir` | the storeID in a volumeID's `fb-<storeID>-` prefix and in volume context |
 
-Two configs differing only in `subDir` share one `MountID` and one
-mount, and have distinct `ID`s.
+Two configs differing only in `subDir` share one `MountID` — and so one
+mount — while holding distinct `StoreID`s.
+
+Each is a 12-char hex truncation of `sha256` over a canonical string.
+Those strings are hash input and nothing else, so they stay unexported:
+
+```go
+// mountKey is the 0.3.x canonical form, verbatim.
+func (c Config) mountKey() string
+
+func (c Config) storeKey() string {
+    if c.NFSSubDir == "" {
+        return c.mountKey()
+    }
+    return c.mountKey() + "|" + c.NFSSubDir
+}
+
+func hashID(key string) string {
+    sum := sha256.Sum256([]byte(key))
+    return hex.EncodeToString(sum[:])[:12]
+}
+
+func (c Config) MountID() string { return hashID(c.mountKey()) }
+func (c Config) StoreID() string { return hashID(c.storeKey()) }
+```
+
+This replaces 0.3.x's `Canonical() []byte` and `ID() string`.
+`Canonical` had no caller outside `pkg/store` — its only non-test use
+was `ID()` itself — so unexporting it costs nothing. `ID()` is renamed
+to `StoreID()` at three non-test call sites (`controller.go:273`,
+`registry.go:110`, `parse.go:59`) and in `pkg/store`'s tests.
+
+The rename is worth its diff. `ID()` sitting beside `MountID()` reads as
+though `MountID` were a *kind* of ID rather than its sibling, which is
+the whole ambiguity; and the codebase already says "storeID" everywhere
+else that matters — `ConfigByStoreID`, `parseStoreIDFromVolumeID`, and
+the `VolumeContextStoreID = "storeID"` wire key. Only the Go method
+didn't.
 
 ### The backwards-compatibility hazard
 
@@ -60,20 +95,16 @@ is quiet and bad: `DeleteVolume` computes a storeID that resolves to
 nothing, returns OK per the idempotency rule, and the `.img` is orphaned
 on the export forever.
 
-The empty case must stay byte-identical to 0.3.x:
+The empty case must stay byte-identical to 0.3.x. That is what the
+`NFSSubDir == ""` branch of `storeKey()` above is for, and it makes the
+compatibility rule expressible as a one-line invariant:
 
-```go
-func (c Config) Canonical() []byte {
-    if c.NFSSubDir == "" {
-        return []byte(c.MountKey())
-    }
-    return []byte(c.MountKey() + "|" + c.NFSSubDir)
-}
-```
+> `StoreID() == MountID()` exactly when no `subDir` is set, and both
+> equal the value 0.3.x produced.
 
-So for any 0.3.x config, `ID() == MountID() ==` the value 0.3.x
-produced. Existing mount directories, volumeIDs and volume contexts are
-untouched.
+Existing mount directories, volumeIDs and volume contexts are therefore
+untouched. The invariant belongs in `StoreID`'s doc comment — it is the
+reason the branch exists, and the branch looks removable without it.
 
 This needs a regression test pinning a literal storeID, and **the pinned
 value must be computed from the v0.3.8 tag, not from the working tree** —
@@ -90,7 +121,7 @@ $ printf 'nfs|nfs.example.internal|/exports/k8s_ns|' | sha256sum | cut -c1-12
 The test pins that literal for a `Config{Type: TypeNFS, NFSServer:
 "nfs.example.internal", NFSPath: "/exports/k8s_ns"}` with `NFSSubDir`
 empty, and asserts the same config with a `NFSSubDir` set produces a
-different `ID()` but the same `MountID()`.
+different `StoreID()` but the same `MountID()`.
 
 ## Template substitution is ours, not the sidecar's
 
@@ -137,8 +168,8 @@ absent, and nothing would reveal it short of listing the export by hand.
 ### 1. `pkg/store` — config
 
 `Config` gains `NFSSubDir string`, documented NFS-only alongside the
-other `NFS*` fields. `MountKey()`, `MountID()`, `Canonical()` and `ID()`
-as tabulated above.
+other `NFS*` fields. `MountID()` and `StoreID()` as above, over
+unexported `mountKey()` / `storeKey()`.
 
 ### 2. `pkg/store/parse.go` — parsing, substitution, validation
 
@@ -158,7 +189,7 @@ constants for the three injected metadata keys and the three tokens.
    storeID distinct from the no-subDir config for that same directory.
    Store the cleaned value.
 
-Normalization happens **before** the value reaches `Canonical()`, so
+Normalization happens **before** the value reaches `storeKey()`, so
 `a/b`, `a/b/` and `./a/b` do not mint three storeIDs for one directory.
 The `..` rejection precedes `Clean` deliberately: `Clean` would collapse
 `a/../../b` to `../b`, which the check still catches, but rejecting on
@@ -189,7 +220,8 @@ A new `stores map[string]string` maps storeID to the resolved store path.
    logic, including the staleness check and its timeout semantics.
 3. `sub := filepath.Join(mountPath, cfg.NFSSubDir)`; `os.MkdirAll(sub,
    0o755)`.
-4. Record `stores[cfg.ID()] = sub` and `configs[cfg.ID()] = cfg`.
+4. Record `stores[cfg.StoreID()] = sub` and
+   `configs[cfg.StoreID()] = cfg`.
 5. Return `sub`.
 
 Step 3 must run **after** the mount is confirmed live, never before:
@@ -243,8 +275,9 @@ code positioned to do it at the one moment it is safe.
 ### 7. `pkg/driver`
 
 No change. `CreateVolume` already passes `Registry.Get`'s return value
-straight to `image.New`, and `volumeIDFromName` already uses `cfg.ID()`,
-which now varies per `subDir`.
+straight to `image.New`, and `volumeIDFromName` already uses the store
+identity, which now varies per `subDir` — it just spells it
+`cfg.StoreID()`.
 
 ### 8. Deployment
 
@@ -275,13 +308,14 @@ The on-disk contract section gains the subDir layout:
 
 - The pinned legacy storeID, `2a355b61d5f7`, computed from v0.3.8 and
   asserted for an empty `NFSSubDir`.
-- `ID()` differs and `MountID()` agrees between two configs differing
-  only in `subDir`.
+- `StoreID()` differs and `MountID()` agrees between two configs
+  differing only in `subDir`.
+- `StoreID() == MountID()` when no `subDir` is set.
 - Substitution of each of the three tokens from its injected key.
 - An unresolved token is rejected, with the sidecar flag named in the
   message.
 - Absolute path, `..` element, NUL and `.` are rejected.
-- `a/b`, `a/b/` and `./a/b` normalize to one `ID()`.
+- `a/b`, `a/b/` and `./a/b` normalize to one `StoreID()`.
 - `backingStore.nfs.subDir` with `type: local` is rejected.
 - `ToVolumeContext` → `ConfigFromVolumeContext` round-trips a resolved
   `subDir`.
