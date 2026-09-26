@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
@@ -27,7 +28,7 @@ func TestRoundTrip(t *testing.T) {
 	const cap1 = 8 * 1024 * 1024  // 8 MiB
 	const cap2 = 16 * 1024 * 1024 // 16 MiB
 
-	meta, err := mgr.Create(ctx, "fb-test", cap1)
+	meta, err := mgr.Create(ctx, "fb-test", cap1, CreateOptions{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -41,7 +42,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	// Idempotent Create adopts the existing .img without rewriting it.
-	meta2, err := mgr.Create(ctx, "fb-test", cap1)
+	meta2, err := mgr.Create(ctx, "fb-test", cap1, CreateOptions{})
 	if err != nil {
 		t.Fatalf("Create not idempotent: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	// Mismatched capacity is AlreadyExists.
-	if _, err := mgr.Create(ctx, "fb-test", cap2); err == nil {
+	if _, err := mgr.Create(ctx, "fb-test", cap2, CreateOptions{}); err == nil {
 		t.Fatal("expected CapacityMismatchError")
 	} else {
 		var m *CapacityMismatchError
@@ -124,7 +125,7 @@ func TestCreateAdoptsExistingImage(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	meta, err := mgr.Create(context.Background(), "fb-pre", size)
+	meta, err := mgr.Create(context.Background(), "fb-pre", size, CreateOptions{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -156,7 +157,7 @@ func TestCreateMismatchOnDiskSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = mgr.Create(context.Background(), "fb-mm", 8*1024*1024)
+	_, err = mgr.Create(context.Background(), "fb-mm", 8*1024*1024, CreateOptions{})
 	var mm *CapacityMismatchError
 	if !errors.As(err, &mm) {
 		t.Fatalf("want CapacityMismatchError, got %T: %v", err, err)
@@ -241,6 +242,43 @@ func TestCapacityMismatchErrorMessage(t *testing.T) {
 	e := &CapacityMismatchError{Requested: 100, Existing: 200}
 	if e.Error() == "" {
 		t.Fatal("empty Error()")
+	}
+}
+
+func TestMkfsArgs(t *testing.T) {
+	fake := exectest.New()
+	fake.SetDefault("", nil)
+	if err := Mkfs(context.Background(), fake, "/dev/mapper/fbcrypt-x"); err != nil {
+		t.Fatalf("Mkfs: %v", err)
+	}
+	want := []string{"-q", "-F", "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1", "/dev/mapper/fbcrypt-x"}
+	if len(fake.Calls) != 1 || fake.Calls[0].Name != "mkfs.ext4" || !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("calls = %+v", fake.Calls)
+	}
+}
+
+// Encrypted volumes are formatted by the node inside the LUKS mapping, so
+// the controller must leave the sparse file exactly as truncated: all
+// zeros, which is what the node's blank-header check relies on.
+func TestCreateUnformattedSkipsMkfs(t *testing.T) {
+	fake := exectest.New() // any call fails the test via "unexpected call"
+	mgr, err := New(t.TempDir(), fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := mgr.Create(context.Background(), "fb-enc", 32<<20, CreateOptions{Unformatted: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if meta.CapacityBytes != 32<<20 {
+		t.Fatalf("capacity %d", meta.CapacityBytes)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("unexpected shell-outs: %+v", fake.Calls)
+	}
+	st, err := os.Stat(mgr.ImagePath("fb-enc"))
+	if err != nil || st.Size() != 32<<20 {
+		t.Fatalf("stat: %v size=%v", err, st)
 	}
 }
 

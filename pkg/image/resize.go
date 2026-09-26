@@ -8,6 +8,18 @@ import (
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 )
 
+// Mkfs makes the ext4 filesystem every fileblock volume uses on target,
+// which is either an .img file or a block device.
+func Mkfs(ctx context.Context, r fbexec.Runner, target string) error {
+	if _, err := r.Run(ctx, "mkfs.ext4", "-q", "-F",
+		"-m", "0",
+		"-E", "lazy_itable_init=1,lazy_journal_init=1",
+		target); err != nil {
+		return fmt.Errorf("mkfs.ext4 %s: %w", target, err)
+	}
+	return nil
+}
+
 // Fsck runs `e2fsck -p` on the given block device. Exit codes 0 (clean) and 1
 // (errors corrected) are treated as success. Anything >= 2 is fatal — callers
 // should detach the loop device and surface the error.

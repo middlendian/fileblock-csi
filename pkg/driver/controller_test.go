@@ -20,20 +20,22 @@ import (
 
 // fakeImages is an in-memory image.Manager for unit tests.
 type fakeImages struct {
-	mu        sync.Mutex
-	root      string
-	store     map[string]*image.Metadata
-	createErr error
-	resizeErr error
+	mu             sync.Mutex
+	root           string
+	store          map[string]*image.Metadata
+	createErr      error
+	resizeErr      error
+	lastCreateOpts image.CreateOptions
 }
 
 func newFakeImages() *fakeImages {
 	return &fakeImages{root: "/srv/fb", store: map[string]*image.Metadata{}}
 }
 
-func (f *fakeImages) Create(_ context.Context, volumeID string, capacityBytes int64) (*image.Metadata, error) {
+func (f *fakeImages) Create(_ context.Context, volumeID string, capacityBytes int64, opts image.CreateOptions) (*image.Metadata, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastCreateOpts = opts
 	if f.createErr != nil {
 		return nil, f.createErr
 	}

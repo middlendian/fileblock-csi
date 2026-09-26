@@ -95,7 +95,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err != nil {
 		return nil, err
 	}
-	meta, err := images.Create(ctx, volumeID, int64(capacity))
+	meta, err := images.Create(ctx, volumeID, int64(capacity), image.CreateOptions{})
 	if err != nil {
 		var mismatch *image.CapacityMismatchError
 		if errors.As(err, &mismatch) {
