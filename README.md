@@ -27,10 +27,11 @@ with a genuine local filesystem.
   PVC ──┐
         │   controller (one Deployment per cluster)
         │     truncate ─► /backing/${vol}.img    (sparse)
-        │     mkfs.ext4 ─► same
+        │     mkfs.ext4 -b 4096 ─► same
         │
    pod ─┤   node plugin  (one DaemonSet pod per node)
-        │     losetup --find --show /backing/${vol}.img  ─► /dev/loopN
+        │     losetup --find --show --sector-size 4096 \
+        │             /backing/${vol}.img                ─► /dev/loopN
         │     e2fsck -p /dev/loopN                       (always)
         │     mount -t ext4 /dev/loopN <staging>
         │     mount --bind <staging> <pod target>
@@ -41,6 +42,16 @@ with a genuine local filesystem.
 Each PV is a single sparse `fb-<uuid>.img` file on the backing store —
 actual disk usage grows only with real writes. There is no separate metadata
 sidecar; capacity is read from the file's apparent size (`stat().Size()`).
+
+Every volume uses one 4 KiB unit throughout: image sizes round up to a
+multiple of 4 KiB, ext4 is made with 4 KiB blocks, the loop device
+exposes 4 KiB sectors, and encrypted volumes use 4 KiB LUKS2 sectors.
+For a volume that already exists, the loop sector size is read from the
+image itself at every stage — its ext4 block size, or its LUKS2 header's
+sector size — so volumes made before this was pinned (for example with
+1 KiB ext4 blocks, or an image size that isn't a multiple of 4 KiB) keep
+mounting exactly as they were made. The node logs the sector size
+whenever it isn't 4096.
 
 ## Requirements
 
@@ -318,8 +329,8 @@ rejects smaller requests with `OutOfRange`. Encrypted volumes use
 4096-byte encryption sectors (one cipher operation per ext4 block rather
 than eight), whatever the cipher; like the cipher, the sector size is
 recorded in the LUKS header. Every volume's size is rounded up to a
-multiple of 4 KiB to fit, so a `1G` PVC gets 1,000,001,536 bytes. Nodes need the `dm_crypt`
-kernel module loaded. Existing plaintext volumes are not converted;
+multiple of 4 KiB to fit, so a `1G` PVC gets 1,000,001,536 bytes. Nodes
+need the `dm_crypt` kernel module loaded. Existing plaintext volumes are not converted;
 encryption applies only to volumes created with `encrypted: "true"`.
 
 ### Choosing a cipher

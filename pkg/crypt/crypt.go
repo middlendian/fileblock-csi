@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,11 +29,6 @@ const (
 	labelFormatted   = "fileblock"
 	blankCheckBytes  = 16 << 20 // the LUKS2 header area
 	pbkdfIterations  = "1000"
-	// 4 KiB sectors mean one cipher operation per ext4 block instead of
-	// eight. Pinned rather than left to cryptsetup, which picks it only
-	// when the device reports 4 KiB physical sectors; image sizes are
-	// rounded to match (image.SizeAlign).
-	sectorSize = "4096"
 )
 
 var (
@@ -129,7 +125,7 @@ func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys, f Format)
 		}
 		if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, "luksFormat", "--batch-mode",
 			"--type", "luks2", "--cipher", f.Cipher, "--key-size", strconv.Itoa(f.KeySize),
-			"--sector-size", sectorSize, "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
+			"--sector-size", strconv.Itoa(image.DefaultBlockSize), "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
 			"--label", labelUnformatted, "--key-file", fbexec.SecretFD(0), dev); err != nil {
 			return "", OutcomeNone, fmt.Errorf("luksFormat %s: %w", dev, err)
 		}
@@ -275,6 +271,34 @@ func isBlank(dev string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// SectorSize returns the encryption sector size recorded in dev's LUKS2
+// header, or 0 when dev has no header yet (a blank image before its first
+// stage). New volumes are formatted with image.DefaultBlockSize — one cipher
+// operation per ext4 block — rather than whatever cryptsetup would detect.
+func (c *Crypt) SectorSize(ctx context.Context, dev string) (int, error) {
+	luks, err := c.isLuks(ctx, dev)
+	if err != nil || !luks {
+		return 0, err
+	}
+	out, err := c.cryptsetup(ctx, nil, "luksDump", "--dump-json-metadata", dev)
+	if err != nil {
+		return 0, fmt.Errorf("luksDump %s: %w", dev, err)
+	}
+	var meta struct {
+		Segments map[string]struct {
+			SectorSize int `json:"sector_size"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal([]byte(out), &meta); err != nil {
+		return 0, fmt.Errorf("parse LUKS2 metadata of %s: %w", dev, err)
+	}
+	seg, ok := meta.Segments["0"]
+	if !ok || seg.SectorSize <= 0 {
+		return 0, fmt.Errorf("LUKS2 metadata of %s has no data segment sector size", dev)
+	}
+	return seg.SectorSize, nil
 }
 
 // Close is idempotent: cryptsetup exits 4 (ENODEV) for an inactive name.

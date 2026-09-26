@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
+	"github.com/middlendian/fileblock-csi/pkg/image"
 )
 
 var (
@@ -29,6 +31,7 @@ type fakeLUKS struct {
 	label  string
 	slots  [][]byte
 	opened bool
+	sector int        // LUKS2 segment sector size; set by luksFormat
 	subs   []string   // cryptsetup subcommands (and "mkfs") in call order
 	argv   [][]string // full argv for each entry in subs, index-aligned
 }
@@ -86,6 +89,7 @@ func (f *fakeLUKS) run(_ context.Context, c fbexec.Cmd) (string, error) {
 		return "", exitErr(1)
 	case "luksFormat":
 		f.luks, f.label, f.slots = true, argAfter(c.Args, "--label"), [][]byte{c.Secrets[0]}
+		f.sector, _ = strconv.Atoi(argAfter(c.Args, "--sector-size"))
 	case "open":
 		if !f.has(c.Secrets[0]) {
 			return "", exitErr(2)
@@ -105,6 +109,12 @@ func (f *fakeLUKS) run(_ context.Context, c fbexec.Cmd) (string, error) {
 		}
 		f.slots = slices.Delete(f.slots, i, i+1)
 	case "luksDump":
+		if slices.Contains(c.Args, "--dump-json-metadata") {
+			if !f.luks {
+				return "", exitErr(1)
+			}
+			return fmt.Sprintf(`{"keyslots":{},"segments":{"0":{"type":"crypt","offset":"16777216","size":"dynamic","encryption":"aes-xts-plain64","sector_size":%d}}}`, f.sector), nil
+		}
 		return "LUKS header information\nVersion:       \t2\nLabel:          " + f.label + "\nSubsystem:      (no subsystem)\n", nil
 	case "config":
 		f.label = argAfter(c.Args, "--label")
@@ -169,7 +179,7 @@ func TestPrepareFormatsBlankDevice(t *testing.T) {
 	// present — a dropped flag would silently fall back to cryptsetup's
 	// argon2id default, which is too expensive for a node plugin.
 	want := []string{"luksFormat", "--batch-mode", "--type", "luks2", "--cipher", "aes-xts-plain64",
-		"--key-size", "512", "--sector-size", "4096", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		"--key-size", "512", "--sector-size", strconv.Itoa(image.DefaultBlockSize), "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
 		"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev}
 	if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
 		t.Fatalf("luksFormat argv = %v, want %v", got, want)
@@ -377,10 +387,40 @@ func TestPrepareFormatOptions(t *testing.T) {
 			t.Fatalf("%+v: Prepare: %v", tc.f, err)
 		}
 		want := append([]string{"luksFormat", "--batch-mode", "--type", "luks2"}, tc.want...)
-		want = append(want, "--sector-size", "4096", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		want = append(want, "--sector-size", strconv.Itoa(image.DefaultBlockSize), "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
 			"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev)
 		if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
 			t.Fatalf("%+v: luksFormat argv = %v, want %v", tc.f, got, want)
 		}
+	}
+}
+
+func TestSectorSizeReadsHeader(t *testing.T) {
+	for _, want := range []int{512, 4096} {
+		f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA}, sector: want}
+		c := newFake(t, f)
+		if got, err := c.SectorSize(context.Background(), "/srv/fb-x.img"); err != nil || got != want {
+			t.Fatalf("got %d, %v; want %d", got, err, want)
+		}
+	}
+}
+
+// A blank image (first stage) has no header yet: 0 means "nothing
+// recorded", so the caller uses the default.
+func TestSectorSizeNotLUKS(t *testing.T) {
+	c := newFake(t, &fakeLUKS{})
+	if got, err := c.SectorSize(context.Background(), "/srv/fb-x.img"); err != nil || got != 0 {
+		t.Fatalf("got %d, %v; want 0", got, err)
+	}
+}
+
+func TestPrepareRecordsSectorSize(t *testing.T) {
+	f := &fakeLUKS{}
+	c := newFake(t, f)
+	if _, _, err := c.Prepare(context.Background(), blankDev(t), "fbcrypt-x", Keys{Current: keyA}, DefaultFormat); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.SectorSize(context.Background(), "/srv/fb-x.img"); err != nil || got != image.DefaultBlockSize {
+		t.Fatalf("after format: got %d, %v; want %d", got, err, image.DefaultBlockSize)
 	}
 }

@@ -256,9 +256,15 @@ so each namespace is a distinct store while the export is mounted once.
 The `.img` is the source of truth. Capacity is read from `os.Stat().Size()`
 (the apparent size we `truncate(2)` to — matches what `losetup` exposes and
 what ext4 sizes itself against). `Create` and `Resize` round the requested
-size up to a multiple of `image.SizeAlign` (4 KiB) so encrypted volumes'
+size up to a multiple of `image.DefaultBlockSize` (4 KiB) so encrypted volumes'
 4096-byte LUKS2 sectors fit; a request that rounds to the current size is a
-no-op. `Create` is idempotent: if the `.img` exists at the requested size
+no-op. `image.DefaultBlockSize` is also the ext4 block size (`Mkfs -b`) and the
+LUKS2 sector size of every new volume. The loop device's sector size is
+never assumed for an existing image: `NodeStageVolume` reads what the image
+records (`image.FSBlockSize` from the ext4 superblock, or
+`crypt.SectorSize` from the LUKS2 header) and `loop.SectorSizeFor` caps it
+at the page size and halves it until it divides the image size. A device
+sector larger than the ext4 block size would not mount. `Create` is idempotent: if the `.img` exists at the requested size
 (rounded, or unrounded for images that predate rounding) it is adopted
 as-is; mismatched on-disk size is
 `AlreadyExists`; if the `.img` is corrupt or otherwise unusable, the failure

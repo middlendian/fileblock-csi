@@ -2,9 +2,13 @@ package image
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
@@ -251,7 +255,7 @@ func TestMkfsArgs(t *testing.T) {
 	if err := Mkfs(context.Background(), fake, "/dev/mapper/fbcrypt-x"); err != nil {
 		t.Fatalf("Mkfs: %v", err)
 	}
-	want := []string{"-q", "-F", "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1", "/dev/mapper/fbcrypt-x"}
+	want := []string{"-q", "-F", "-b", strconv.Itoa(DefaultBlockSize), "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1", "/dev/mapper/fbcrypt-x"}
 	if len(fake.Calls) != 1 || fake.Calls[0].Name != "mkfs.ext4" || !slices.Equal(fake.Calls[0].Args, want) {
 		t.Fatalf("calls = %+v", fake.Calls)
 	}
@@ -318,14 +322,14 @@ func fileSize(t *testing.T, mgr Manager, id string) int64 {
 	return st.Size()
 }
 
-// A 4096-byte LUKS2 sector needs the image to be whole 4 KiB sectors, and
+// A DefaultBlockSize LUKS2 sector needs the image to be whole sectors, and
 // a PVC can ask for any byte count ("1G" is 10^9). Create rounds up; CSI
 // allows returning more than was required.
 func TestCreateRoundsUpToAlignment(t *testing.T) {
 	mgr := newUnformattedMgr(t)
 	ctx := context.Background()
 	const req = 32<<20 + 1
-	const want = 32<<20 + SizeAlign
+	const want = 32<<20 + DefaultBlockSize
 	meta, err := mgr.Create(ctx, "fb-odd", req, CreateOptions{Unformatted: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -364,7 +368,7 @@ func TestResizeRoundsUpAndRetryIsNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	const req = 40_000_001
-	const want = 40_001_536 // 9766 * 4096
+	const want = 40_001_536 // 9766 blocks of 4 KiB
 	meta, err := mgr.Resize(ctx, "fb-grow", req)
 	if err != nil || meta.CapacityBytes != want || fileSize(t, mgr, "fb-grow") != want {
 		t.Fatalf("Resize: %+v, %v, file %d; want %d", meta, err, fileSize(t, mgr, "fb-grow"), want)
@@ -374,5 +378,75 @@ func TestResizeRoundsUpAndRetryIsNoop(t *testing.T) {
 	}
 	if _, err := mgr.Resize(ctx, "fb-grow", 32<<20); err == nil {
 		t.Fatal("expected a real shrink to be refused")
+	}
+}
+
+// writeSuperblock writes just enough of an ext4 superblock for
+// FSBlockSize: the magic and s_log_block_size.
+func writeSuperblock(t *testing.T, path string, size int64, logBlockSize uint32) {
+	t.Helper()
+	if err := truncateSparse(path, size); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sb := make([]byte, 1024)
+	binary.LittleEndian.PutUint32(sb[24:], logBlockSize)
+	binary.LittleEndian.PutUint16(sb[56:], 0xEF53)
+	if _, err := f.WriteAt(sb, 1024); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFSBlockSize(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		log  uint32
+		want int
+	}{{"4k", 2, 4096}, {"1k", 0, 1024}, {"2k", 1, 2048}} {
+		p := filepath.Join(dir, tc.name+".img")
+		writeSuperblock(t, p, 1<<20, tc.log)
+		if got, err := FSBlockSize(p); err != nil || got != tc.want {
+			t.Errorf("%s: got %d, %v; want %d", tc.name, got, err, tc.want)
+		}
+	}
+	blank := filepath.Join(dir, "blank.img")
+	if err := truncateSparse(blank, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FSBlockSize(blank); err != nil || got != 0 {
+		t.Errorf("blank image: got %d, %v; want 0 (no ext4 magic)", got, err)
+	}
+	short := filepath.Join(dir, "short.img")
+	if err := truncateSparse(short, 512); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FSBlockSize(short); err != nil || got != 0 {
+		t.Errorf("short image: got %d, %v; want 0", got, err)
+	}
+	if _, err := FSBlockSize(filepath.Join(dir, "missing.img")); err == nil {
+		t.Error("missing image: expected an error")
+	}
+}
+
+// A real mkfs.ext4 through Mkfs yields 4 KiB blocks even for a small
+// filesystem, where some mke2fs configs would pick 1 KiB.
+func TestMkfsPinsBlockSize(t *testing.T) {
+	if _, err := osexec.LookPath("mkfs.ext4"); err != nil {
+		t.Skip("mkfs.ext4 not installed")
+	}
+	p := filepath.Join(t.TempDir(), "small.img")
+	if err := truncateSparse(p, 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := Mkfs(context.Background(), fbexec.New(0), p); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FSBlockSize(p); err != nil || got != DefaultBlockSize {
+		t.Fatalf("got %d, %v; want %d", got, err, DefaultBlockSize)
 	}
 }

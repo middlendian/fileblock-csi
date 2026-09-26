@@ -25,6 +25,10 @@ BIN="$WORK/bin"
 CTL_SOCK="$WORK/ctl.sock"
 NODE_SOCK="$WORK/node.sock"
 LOG="$WORK/log"
+# The block size every new volume uses: image.DefaultBlockSize, mirrored
+# here and kept in step by hack/smoke_test.go. Other sizes below (1024,
+# 512) are deliberately legacy formats, not defaults.
+DEFAULT_BLOCK_SIZE=4096
 
 cleanup() {
   set +e
@@ -213,7 +217,17 @@ grep -q '^node-a-was-here$' "$STAGE_B/who" || {
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE_B" "$VOL3"
 csc controller del "$VOL3"
 
-echo "::: encrypted volume: first-stage format, ciphertext at rest, rotation"
+# loop_ss prints the logical sector size of the loop device backing $1.
+loop_ss() {
+  local dev
+  dev=$(losetup --noheadings --output NAME --associated "$1" | head -n1)
+  [[ -n "$dev" ]] || { echo "no loop device for $1" >&2; return 1; }
+  blockdev --getss "$dev"
+}
+
+echo "::: loop sector size follows the on-disk format"
+# restart_node brings the node plugin back as "local"; the takeover test
+# above left it running as node-b.
 restart_node() {
   kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
   "$BIN/fileblock-node" \
@@ -225,6 +239,53 @@ restart_node() {
   NODE_PID=$!
   for _ in $(seq 1 20); do [[ -S "$NODE_SOCK" ]] && break; sleep 0.1; done
 }
+restart_node
+CREATE_OUT=$(csc controller new \
+  --cap "SINGLE_NODE_WRITER,mount,ext4" \
+  --req-bytes $((128*1024*1024)) \
+  --params "backingStore.type=local" \
+  --params "backingStore.local.path=$BACKING" \
+  sector-vol)
+VOL6=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
+IMG6="$BACKING/$VOL6.img"
+STAGE6="$STATE/staging/$VOL6"
+mkdir -p "$STAGE6"
+stage6() {
+  CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
+    --cap "SINGLE_NODE_WRITER,mount,ext4" \
+    --staging-target-path "$STAGE6" \
+    --vol-context "backingStore.type=local" \
+    --vol-context "backingStore.local.path=$BACKING" \
+    "$VOL6"
+}
+unstage6() {
+  CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE6" "$VOL6"
+}
+# expect_ss <case> <want>: stage, check the loop sector size and the mount,
+# unstage.
+expect_ss() {
+  stage6
+  local got
+  got=$(loop_ss "$IMG6")
+  [[ "$got" == "$2" ]] || { echo "$1: loop sector size $got, want $2"; exit 1; }
+  findmnt -no FSTYPE "$STAGE6" | grep -q '^ext4$' || { echo "$1: not mounted as ext4"; exit 1; }
+  unstage6
+}
+dumpe2fs -h "$IMG6" 2>/dev/null | grep -Eq "^Block size:[[:space:]]+$DEFAULT_BLOCK_SIZE\$" \
+  || { echo "new volume's ext4 does not use $DEFAULT_BLOCK_SIZE-byte blocks"; exit 1; }
+expect_ss "new plaintext volume" "$DEFAULT_BLOCK_SIZE"
+# A volume made by an older mke2fs config with 1 KiB blocks must keep
+# mounting: its loop may not use sectors larger than its blocks.
+mkfs.ext4 -q -F -b 1024 -m 0 "$IMG6"
+expect_ss "legacy 1 KiB-block volume" 1024
+# An image that predates 4 KiB size rounding: the sector size must divide
+# the image size.
+mkfs.ext4 -q -F -b "$DEFAULT_BLOCK_SIZE" -m 0 "$IMG6"
+truncate -s +512 "$IMG6"
+expect_ss "unaligned legacy image" 512
+csc controller del "$VOL6"
+
+echo "::: encrypted volume: first-stage format, ciphertext at rest, rotation"
 restart_node
 # Hex keys: csc parses X_CSI_SECRETS as k=v pairs and base64 padding is '='.
 KEY1=$(openssl rand -hex 32)
@@ -256,8 +317,10 @@ cmp -s <(head -c 16777216 "$IMG4") <(head -c 16777216 /dev/zero) \
   || { echo "controller wrote to an encrypted image"; exit 1; }
 stage_enc "key=$KEY1"
 cryptsetup isLuks "$IMG4" || { echo "image is not LUKS after first stage"; exit 1; }
-cryptsetup luksDump "$IMG4" | grep -Eq 'sector:[[:space:]]+4096' \
-  || { echo "LUKS data segment does not use 4096-byte sectors"; exit 1; }
+[[ $(loop_ss "$IMG4") == "$DEFAULT_BLOCK_SIZE" ]] \
+  || { echo "encrypted volume's loop is not $DEFAULT_BLOCK_SIZE-byte sectors"; exit 1; }
+cryptsetup luksDump "$IMG4" | grep -Eq "sector:[[:space:]]+$DEFAULT_BLOCK_SIZE" \
+  || { echo "LUKS data segment does not use $DEFAULT_BLOCK_SIZE-byte sectors"; exit 1; }
 findmnt -no FSTYPE "$STAGE4" | grep -q '^ext4$' || { echo "encrypted fs not ext4"; exit 1; }
 CANARY="fileblock-smoke-canary-$(openssl rand -hex 8)"
 echo "$CANARY" >"$STAGE4/canary"
@@ -310,8 +373,8 @@ for spec in "cbc aes-cbc-essiv:sha256 256 100000001 100003840" \
   [[ $(stat -c %s "$BACKING/$VOL5.img") == "$CIMG" ]] \
     || { echo "image is $(stat -c %s "$BACKING/$VOL5.img") bytes, want $CIMG"; exit 1; }
   DUMP=$(cryptsetup luksDump "$BACKING/$VOL5.img")
-  grep -Eq 'sector:[[:space:]]+4096' <<<"$DUMP" \
-    || { echo "$CIPHER data segment does not use 4096-byte sectors"; exit 1; }
+  grep -Eq "sector:[[:space:]]+$DEFAULT_BLOCK_SIZE" <<<"$DUMP" \
+    || { echo "$CIPHER data segment does not use $DEFAULT_BLOCK_SIZE-byte sectors"; exit 1; }
   grep -Eq "cipher:[[:space:]]+$CIPHER\$" <<<"$DUMP" \
     || { echo "LUKS header does not record $CIPHER"; exit 1; }
   # A keyslot's "Key:" line is the volume key; "Cipher key:" is the slot's own.

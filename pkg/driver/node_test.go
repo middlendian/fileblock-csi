@@ -3,11 +3,14 @@ package driver
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +24,7 @@ import (
 	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
+	"github.com/middlendian/fileblock-csi/pkg/image"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 	"github.com/middlendian/fileblock-csi/pkg/store"
@@ -438,6 +442,9 @@ func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string,
 		return "", nil
 	}
 	fake.CmdFunc = func(_ context.Context, c fbexec.Cmd) (string, error) {
+		if slices.Contains(c.Args, "--dump-json-metadata") {
+			return luksJSON(image.DefaultBlockSize), nil
+		}
 		if cryptFn != nil {
 			return cryptFn(c)
 		}
@@ -499,6 +506,9 @@ func TestNodeStageEncryptedHappyPath(t *testing.T) {
 	}
 	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))
 	calls := e.fake.Calls
+	if callIndex(calls, "losetup", "--find", "--show", "--sector-size", strconv.Itoa(image.DefaultBlockSize)) < 0 {
+		t.Fatalf("loop not attached with the header's default-size sectors: %+v", calls)
+	}
 	setCap := callIndex(calls, "losetup", "--set-capacity")
 	open := callIndex(calls, "cryptsetup", "open", "--type")
 	if setCap < 0 || open < 0 || setCap > open {
@@ -673,7 +683,7 @@ func TestNodeStagePlaintextSequenceUnchanged(t *testing.T) {
 		seq = append(seq, strings.TrimSpace(c.Name+" "+strings.Join(c.Args, " ")))
 	}
 	want := []string{
-		"losetup --find --show " + imgPath,
+		"losetup --find --show --sector-size " + strconv.Itoa(image.DefaultBlockSize) + " " + imgPath,
 		"e2fsck -p -f /dev/loop7",
 		"losetup --set-capacity /dev/loop7",
 		"resize2fs /dev/loop7",
@@ -757,5 +767,62 @@ func TestNodeExpandEncryptedResizesMapper(t *testing.T) {
 	f := callIndex(e.fake.Calls, "resize2fs", mapper)
 	if r < 0 || f < 0 || r > f {
 		t.Fatalf("want cryptsetup resize then resize2fs %s: %+v", mapper, e.fake.Calls)
+	}
+}
+
+func luksJSON(sector int) string {
+	return fmt.Sprintf(`{"segments":{"0":{"type":"crypt","sector_size":%d}}}`, sector)
+}
+
+// writeExt4Superblock writes the ext4 magic and s_log_block_size, which is
+// all the node reads to size the loop device's sectors.
+func writeExt4Superblock(t *testing.T, path string, size int64, logBlockSize uint32) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	sb := make([]byte, 1024)
+	binary.LittleEndian.PutUint32(sb[24:], logBlockSize)
+	binary.LittleEndian.PutUint16(sb[56:], 0xEF53)
+	if _, err := f.WriteAt(sb, 1024); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An existing volume keeps whatever its filesystem was made with: a
+// device sector larger than the ext4 block size would not mount.
+func TestNodeStagePlaintextUsesFilesystemBlockSize(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	writeExt4Superblock(t, filepath.Join(e.backing, "vol-1.img"), 64<<20, 0) // 1 KiB blocks
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(nil)); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find", "--show", "--sector-size", "1024") < 0 {
+		t.Fatalf("want a 1024-byte loop for a 1 KiB-block ext4: %+v", e.fake.Calls)
+	}
+	if !strings.Contains(e.log.String(), "sectorSize=1024") {
+		t.Fatalf("expected the non-default sector size to be logged, got: %s", e.log.String())
+	}
+}
+
+func TestNodeStageEncryptedUsesHeaderSectorSize(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	inner := e.fake.CmdFunc
+	e.fake.CmdFunc = func(ctx context.Context, c fbexec.Cmd) (string, error) {
+		if slices.Contains(c.Args, "--dump-json-metadata") {
+			return luksJSON(512), nil
+		}
+		return inner(ctx, c)
+	}
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find", "--show", "--sector-size", "512") < 0 {
+		t.Fatalf("want the header's 512-byte sectors: %+v", e.fake.Calls)
 	}
 }
