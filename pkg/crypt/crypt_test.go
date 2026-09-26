@@ -169,7 +169,7 @@ func TestPrepareFormatsBlankDevice(t *testing.T) {
 	// present — a dropped flag would silently fall back to cryptsetup's
 	// argon2id default, which is too expensive for a node plugin.
 	want := []string{"luksFormat", "--batch-mode", "--type", "luks2", "--cipher", "aes-xts-plain64",
-		"--key-size", "512", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		"--key-size", "512", "--sector-size", "4096", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
 		"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev}
 	if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
 		t.Fatalf("luksFormat argv = %v, want %v", got, want)
@@ -377,7 +377,7 @@ func TestPrepareFormatOptions(t *testing.T) {
 			t.Fatalf("%+v: Prepare: %v", tc.f, err)
 		}
 		want := append([]string{"luksFormat", "--batch-mode", "--type", "luks2"}, tc.want...)
-		want = append(want, "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		want = append(want, "--sector-size", "4096", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
 			"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev)
 		if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
 			t.Fatalf("%+v: luksFormat argv = %v, want %v", tc.f, got, want)

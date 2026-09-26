@@ -255,8 +255,12 @@ so each namespace is a distinct store while the export is mounted once.
 
 The `.img` is the source of truth. Capacity is read from `os.Stat().Size()`
 (the apparent size we `truncate(2)` to — matches what `losetup` exposes and
-what ext4 sizes itself against). `Create` is idempotent: if the `.img` exists
-at the requested size it is adopted as-is; mismatched on-disk size is
+what ext4 sizes itself against). `Create` and `Resize` round the requested
+size up to a multiple of `image.SizeAlign` (4 KiB) so encrypted volumes'
+4096-byte LUKS2 sectors fit; a request that rounds to the current size is a
+no-op. `Create` is idempotent: if the `.img` exists at the requested size
+(rounded, or unrounded for images that predate rounding) it is adopted
+as-is; mismatched on-disk size is
 `AlreadyExists`; if the `.img` is corrupt or otherwise unusable, the failure
 surfaces at `NodeStageVolume`'s `e2fsck` step as a mount error rather than
 being silently re-`mkfs`'d.

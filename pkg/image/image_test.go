@@ -299,3 +299,80 @@ func TestValidateVolumeID(t *testing.T) {
 		}
 	}
 }
+
+func newUnformattedMgr(t *testing.T) Manager {
+	t.Helper()
+	mgr, err := New(t.TempDir(), exectest.New()) // no shell-outs expected
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mgr
+}
+
+func fileSize(t *testing.T, mgr Manager, id string) int64 {
+	t.Helper()
+	st, err := os.Stat(mgr.ImagePath(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Size()
+}
+
+// A 4096-byte LUKS2 sector needs the image to be whole 4 KiB sectors, and
+// a PVC can ask for any byte count ("1G" is 10^9). Create rounds up; CSI
+// allows returning more than was required.
+func TestCreateRoundsUpToAlignment(t *testing.T) {
+	mgr := newUnformattedMgr(t)
+	ctx := context.Background()
+	const req = 32<<20 + 1
+	const want = 32<<20 + SizeAlign
+	meta, err := mgr.Create(ctx, "fb-odd", req, CreateOptions{Unformatted: true})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if meta.CapacityBytes != want || fileSize(t, mgr, "fb-odd") != want {
+		t.Fatalf("capacity %d, file %d, want %d", meta.CapacityBytes, fileSize(t, mgr, "fb-odd"), want)
+	}
+	// A retried CreateVolume with the original request adopts the image.
+	again, err := mgr.Create(ctx, "fb-odd", req, CreateOptions{Unformatted: true})
+	if err != nil || again.CapacityBytes != want {
+		t.Fatalf("retry: %+v, %v", again, err)
+	}
+}
+
+// Images created before rounding existed may be unaligned; a retried
+// CreateVolume for one must still adopt it rather than report a mismatch.
+func TestCreateAdoptsPreexistingUnalignedImage(t *testing.T) {
+	mgr := newUnformattedMgr(t)
+	const size = 10_000_001
+	if err := truncateSparse(mgr.ImagePath("fb-old"), size); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := mgr.Create(context.Background(), "fb-old", size, CreateOptions{})
+	if err != nil || meta.CapacityBytes != size {
+		t.Fatalf("got %+v, %v; want adoption at %d", meta, err, size)
+	}
+}
+
+// ControllerExpandVolume can't tell whether a volume is encrypted, so
+// every resize rounds up, and the resizer's retry with the original
+// request must be a no-op rather than a "shrink".
+func TestResizeRoundsUpAndRetryIsNoop(t *testing.T) {
+	mgr := newUnformattedMgr(t)
+	ctx := context.Background()
+	if _, err := mgr.Create(ctx, "fb-grow", 32<<20, CreateOptions{Unformatted: true}); err != nil {
+		t.Fatal(err)
+	}
+	const req = 40_000_001
+	const want = 40_001_536 // 9766 * 4096
+	meta, err := mgr.Resize(ctx, "fb-grow", req)
+	if err != nil || meta.CapacityBytes != want || fileSize(t, mgr, "fb-grow") != want {
+		t.Fatalf("Resize: %+v, %v, file %d; want %d", meta, err, fileSize(t, mgr, "fb-grow"), want)
+	}
+	if meta, err := mgr.Resize(ctx, "fb-grow", req); err != nil || meta.CapacityBytes != want {
+		t.Fatalf("retry: %+v, %v", meta, err)
+	}
+	if _, err := mgr.Resize(ctx, "fb-grow", 32<<20); err == nil {
+		t.Fatal("expected a real shrink to be refused")
+	}
+}

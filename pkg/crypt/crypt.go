@@ -28,6 +28,11 @@ const (
 	labelFormatted   = "fileblock"
 	blankCheckBytes  = 16 << 20 // the LUKS2 header area
 	pbkdfIterations  = "1000"
+	// 4 KiB sectors mean one cipher operation per ext4 block instead of
+	// eight. Pinned rather than left to cryptsetup, which picks it only
+	// when the device reports 4 KiB physical sectors; image sizes are
+	// rounded to match (image.SizeAlign).
+	sectorSize = "4096"
 )
 
 var (
@@ -124,7 +129,7 @@ func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys, f Format)
 		}
 		if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, "luksFormat", "--batch-mode",
 			"--type", "luks2", "--cipher", f.Cipher, "--key-size", strconv.Itoa(f.KeySize),
-			"--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
+			"--sector-size", sectorSize, "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
 			"--label", labelUnformatted, "--key-file", fbexec.SecretFD(0), dev); err != nil {
 			return "", OutcomeNone, fmt.Errorf("luksFormat %s: %w", dev, err)
 		}

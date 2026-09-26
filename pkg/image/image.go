@@ -19,7 +19,15 @@ import (
 const (
 	ImageExt  = ".img"
 	DefaultFs = "ext4"
+
+	// SizeAlign is what image sizes round up to: an encrypted volume's
+	// 4096-byte LUKS2 sectors need a whole number of them, and ext4 uses
+	// 4 KiB blocks anyway.
+	SizeAlign = 4096
 )
+
+// AlignUp rounds n up to a multiple of SizeAlign.
+func AlignUp(n int64) int64 { return (n + SizeAlign - 1) / SizeAlign * SizeAlign }
 
 // Metadata describes a volume to callers. It is derived on read from the
 // .img file's name and stat — there is no separate persisted metadata.
@@ -79,9 +87,11 @@ func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes i
 		return nil, fmt.Errorf("capacityBytes must be > 0")
 	}
 	imgPath := m.ImagePath(volumeID)
+	size := AlignUp(capacityBytes)
 
 	if st, err := os.Stat(imgPath); err == nil {
-		if st.Size() != capacityBytes {
+		// Images from before rounding may sit at the unrounded size.
+		if st.Size() != size && st.Size() != capacityBytes {
 			return nil, &CapacityMismatchError{
 				Requested: capacityBytes,
 				Existing:  st.Size(),
@@ -92,17 +102,17 @@ func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes i
 		return nil, fmt.Errorf("stat %s: %w", imgPath, err)
 	}
 
-	if err := truncateSparse(imgPath, capacityBytes); err != nil {
+	if err := truncateSparse(imgPath, size); err != nil {
 		return nil, err
 	}
 	if opts.Unformatted {
-		return &Metadata{VolumeID: volumeID, CapacityBytes: capacityBytes}, nil
+		return &Metadata{VolumeID: volumeID, CapacityBytes: size}, nil
 	}
 	if err := Mkfs(ctx, m.exec, imgPath); err != nil {
 		_ = os.Remove(imgPath)
 		return nil, err
 	}
-	return &Metadata{VolumeID: volumeID, CapacityBytes: capacityBytes}, nil
+	return &Metadata{VolumeID: volumeID, CapacityBytes: size}, nil
 }
 
 func (m *fsManager) Delete(ctx context.Context, volumeID string) error {
@@ -160,16 +170,17 @@ func (m *fsManager) Resize(ctx context.Context, volumeID string, capacityBytes i
 	if err != nil {
 		return nil, err
 	}
-	if capacityBytes < meta.CapacityBytes {
+	size := AlignUp(capacityBytes)
+	if size < meta.CapacityBytes {
 		return nil, fmt.Errorf("shrink not supported: %d < %d", capacityBytes, meta.CapacityBytes)
 	}
-	if capacityBytes == meta.CapacityBytes {
+	if size == meta.CapacityBytes {
 		return meta, nil
 	}
-	if err := truncateSparse(m.ImagePath(volumeID), capacityBytes); err != nil {
+	if err := truncateSparse(m.ImagePath(volumeID), size); err != nil {
 		return nil, err
 	}
-	return &Metadata{VolumeID: volumeID, CapacityBytes: capacityBytes}, nil
+	return &Metadata{VolumeID: volumeID, CapacityBytes: size}, nil
 }
 
 func truncateSparse(path string, size int64) error {

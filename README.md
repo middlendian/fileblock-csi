@@ -314,7 +314,11 @@ sudo mount /dev/mapper/recovered /mnt
 
 **Overhead:** the LUKS2 header takes 16 MiB inside the requested
 capacity, so encrypted volumes must be at least 32 MiB — `CreateVolume`
-rejects smaller requests with `OutOfRange`. Nodes need the `dm_crypt`
+rejects smaller requests with `OutOfRange`. Encrypted volumes use
+4096-byte encryption sectors (one cipher operation per ext4 block rather
+than eight), whatever the cipher; like the cipher, the sector size is
+recorded in the LUKS header. Every volume's size is rounded up to a
+multiple of 4 KiB to fit, so a `1G` PVC gets 1,000,001,536 bytes. Nodes need the `dm_crypt`
 kernel module loaded. Existing plaintext volumes are not converted;
 encryption applies only to volumes created with `encrypted: "true"`.
 

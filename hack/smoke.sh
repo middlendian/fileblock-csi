@@ -256,6 +256,8 @@ cmp -s <(head -c 16777216 "$IMG4") <(head -c 16777216 /dev/zero) \
   || { echo "controller wrote to an encrypted image"; exit 1; }
 stage_enc "key=$KEY1"
 cryptsetup isLuks "$IMG4" || { echo "image is not LUKS after first stage"; exit 1; }
+cryptsetup luksDump "$IMG4" | grep -Eq 'sector:[[:space:]]+4096' \
+  || { echo "LUKS data segment does not use 4096-byte sectors"; exit 1; }
 findmnt -no FSTYPE "$STAGE4" | grep -q '^ext4$' || { echo "encrypted fs not ext4"; exit 1; }
 CANARY="fileblock-smoke-canary-$(openssl rand -hex 8)"
 echo "$CANARY" >"$STAGE4/canary"
@@ -276,15 +278,18 @@ stage_enc "key=$(openssl rand -hex 32)" && { echo "stage with a wrong key succee
 losetup --noheadings --output BACK-FILE | grep -qF "$IMG4" \
   && { echo "loop left attached after wrong-key stage"; exit 1; }
 
-# name cipher keySize. Adiantum is the reason the parameter exists; AES-CBC
-# is a second, structurally different spec. Driven by hack/csi-call, not
-# csc: csc splits key=val lists on commas, and Adiantum's spec has one.
-for spec in "cbc aes-cbc-essiv:sha256 256" "adiantum xchacha12,aes-adiantum-plain64 256"; do
-  read -r CNAME CIPHER CKEYSIZE <<<"$spec"
-  echo "::: configurable cipher: $CIPHER ($CKEYSIZE-bit key) is what luksFormat writes"
+# name cipher keySize requestBytes imageBytes. Adiantum is the reason the
+# parameter exists; AES-CBC is a second, structurally different spec and
+# also requests an unaligned size (like a "1G" PVC), which must round up
+# to whole 4 KiB LUKS2 sectors. Driven by hack/csi-call, not csc: csc
+# splits key=val lists on commas, and Adiantum's spec has one.
+for spec in "cbc aes-cbc-essiv:sha256 256 100000001 100003840" \
+            "adiantum xchacha12,aes-adiantum-plain64 256 134217728 134217728"; do
+  read -r CNAME CIPHER CKEYSIZE CREQ CIMG <<<"$spec"
+  echo "::: configurable cipher: $CIPHER ($CKEYSIZE-bit key, $CREQ bytes requested)"
   CREATE_OUT=$("$BIN/csi-call" -endpoint "unix://$CTL_SOCK" create \
     -name "cipher-$CNAME" \
-    -bytes $((128*1024*1024)) \
+    -bytes "$CREQ" \
     -p "backingStore.type=local" \
     -p "backingStore.local.path=$BACKING" \
     -p "encrypted=true" \
@@ -302,7 +307,11 @@ for spec in "cbc aes-cbc-essiv:sha256 256" "adiantum xchacha12,aes-adiantum-plai
     -volume "$VOL5" -staging "$STAGE5" "${CTX_ARGS[@]}" -secret "key=$KEY2"
   findmnt -no FSTYPE "$STAGE5" | grep -q '^ext4$' || { echo "$CIPHER volume fs not ext4"; exit 1; }
   CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE5" "$VOL5"
+  [[ $(stat -c %s "$BACKING/$VOL5.img") == "$CIMG" ]] \
+    || { echo "image is $(stat -c %s "$BACKING/$VOL5.img") bytes, want $CIMG"; exit 1; }
   DUMP=$(cryptsetup luksDump "$BACKING/$VOL5.img")
+  grep -Eq 'sector:[[:space:]]+4096' <<<"$DUMP" \
+    || { echo "$CIPHER data segment does not use 4096-byte sectors"; exit 1; }
   grep -Eq "cipher:[[:space:]]+$CIPHER\$" <<<"$DUMP" \
     || { echo "LUKS header does not record $CIPHER"; exit 1; }
   # A keyslot's "Key:" line is the volume key; "Cipher key:" is the slot's own.
