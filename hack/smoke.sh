@@ -25,6 +25,10 @@ BIN="$WORK/bin"
 CTL_SOCK="$WORK/ctl.sock"
 NODE_SOCK="$WORK/node.sock"
 LOG="$WORK/log"
+# The block size every new volume uses: image.DefaultBlockSize, mirrored
+# here and kept in step by hack/smoke_test.go. Other sizes below (1024,
+# 512) are deliberately legacy formats, not defaults.
+DEFAULT_BLOCK_SIZE=4096
 
 cleanup() {
   set +e
@@ -267,16 +271,16 @@ expect_ss() {
   findmnt -no FSTYPE "$STAGE6" | grep -q '^ext4$' || { echo "$1: not mounted as ext4"; exit 1; }
   unstage6
 }
-dumpe2fs -h "$IMG6" 2>/dev/null | grep -Eq '^Block size:[[:space:]]+4096$' \
-  || { echo "new volume's ext4 does not use 4096-byte blocks"; exit 1; }
-expect_ss "new plaintext volume" 4096
+dumpe2fs -h "$IMG6" 2>/dev/null | grep -Eq "^Block size:[[:space:]]+$DEFAULT_BLOCK_SIZE\$" \
+  || { echo "new volume's ext4 does not use $DEFAULT_BLOCK_SIZE-byte blocks"; exit 1; }
+expect_ss "new plaintext volume" "$DEFAULT_BLOCK_SIZE"
 # A volume made by an older mke2fs config with 1 KiB blocks must keep
 # mounting: its loop may not use sectors larger than its blocks.
 mkfs.ext4 -q -F -b 1024 -m 0 "$IMG6"
 expect_ss "legacy 1 KiB-block volume" 1024
 # An image that predates 4 KiB size rounding: the sector size must divide
 # the image size.
-mkfs.ext4 -q -F -b 4096 -m 0 "$IMG6"
+mkfs.ext4 -q -F -b "$DEFAULT_BLOCK_SIZE" -m 0 "$IMG6"
 truncate -s +512 "$IMG6"
 expect_ss "unaligned legacy image" 512
 csc controller del "$VOL6"
@@ -313,9 +317,10 @@ cmp -s <(head -c 16777216 "$IMG4") <(head -c 16777216 /dev/zero) \
   || { echo "controller wrote to an encrypted image"; exit 1; }
 stage_enc "key=$KEY1"
 cryptsetup isLuks "$IMG4" || { echo "image is not LUKS after first stage"; exit 1; }
-[[ $(loop_ss "$IMG4") == 4096 ]] || { echo "encrypted volume's loop is not 4096-byte sectors"; exit 1; }
-cryptsetup luksDump "$IMG4" | grep -Eq 'sector:[[:space:]]+4096' \
-  || { echo "LUKS data segment does not use 4096-byte sectors"; exit 1; }
+[[ $(loop_ss "$IMG4") == "$DEFAULT_BLOCK_SIZE" ]] \
+  || { echo "encrypted volume's loop is not $DEFAULT_BLOCK_SIZE-byte sectors"; exit 1; }
+cryptsetup luksDump "$IMG4" | grep -Eq "sector:[[:space:]]+$DEFAULT_BLOCK_SIZE" \
+  || { echo "LUKS data segment does not use $DEFAULT_BLOCK_SIZE-byte sectors"; exit 1; }
 findmnt -no FSTYPE "$STAGE4" | grep -q '^ext4$' || { echo "encrypted fs not ext4"; exit 1; }
 CANARY="fileblock-smoke-canary-$(openssl rand -hex 8)"
 echo "$CANARY" >"$STAGE4/canary"
@@ -368,8 +373,8 @@ for spec in "cbc aes-cbc-essiv:sha256 256 100000001 100003840" \
   [[ $(stat -c %s "$BACKING/$VOL5.img") == "$CIMG" ]] \
     || { echo "image is $(stat -c %s "$BACKING/$VOL5.img") bytes, want $CIMG"; exit 1; }
   DUMP=$(cryptsetup luksDump "$BACKING/$VOL5.img")
-  grep -Eq 'sector:[[:space:]]+4096' <<<"$DUMP" \
-    || { echo "$CIPHER data segment does not use 4096-byte sectors"; exit 1; }
+  grep -Eq "sector:[[:space:]]+$DEFAULT_BLOCK_SIZE" <<<"$DUMP" \
+    || { echo "$CIPHER data segment does not use $DEFAULT_BLOCK_SIZE-byte sectors"; exit 1; }
   grep -Eq "cipher:[[:space:]]+$CIPHER\$" <<<"$DUMP" \
     || { echo "LUKS header does not record $CIPHER"; exit 1; }
   # A keyslot's "Key:" line is the volume key; "Cipher key:" is the slot's own.

@@ -182,7 +182,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read sector size of %s: %v", imgPath, err)
 	}
-	if sector != image.SizeAlign {
+	if sector != image.DefaultBlockSize {
 		n.log.Info("loop sector size follows the image's on-disk format",
 			"volumeID", volumeID, "sectorSize", sector)
 	}

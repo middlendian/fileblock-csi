@@ -19,7 +19,7 @@ import (
 // later be attached with (see loop.SectorSizeFor).
 func Mkfs(ctx context.Context, r fbexec.Runner, target string) error {
 	if _, err := r.Run(ctx, "mkfs.ext4", "-q", "-F",
-		"-b", strconv.Itoa(SizeAlign),
+		"-b", strconv.Itoa(DefaultBlockSize),
 		"-m", "0",
 		"-E", "lazy_itable_init=1,lazy_journal_init=1",
 		target); err != nil {

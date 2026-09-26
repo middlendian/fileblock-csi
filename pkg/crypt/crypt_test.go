@@ -14,6 +14,7 @@ import (
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
+	"github.com/middlendian/fileblock-csi/pkg/image"
 )
 
 var (
@@ -178,7 +179,7 @@ func TestPrepareFormatsBlankDevice(t *testing.T) {
 	// present — a dropped flag would silently fall back to cryptsetup's
 	// argon2id default, which is too expensive for a node plugin.
 	want := []string{"luksFormat", "--batch-mode", "--type", "luks2", "--cipher", "aes-xts-plain64",
-		"--key-size", "512", "--sector-size", "4096", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		"--key-size", "512", "--sector-size", strconv.Itoa(image.DefaultBlockSize), "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
 		"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev}
 	if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
 		t.Fatalf("luksFormat argv = %v, want %v", got, want)
@@ -386,7 +387,7 @@ func TestPrepareFormatOptions(t *testing.T) {
 			t.Fatalf("%+v: Prepare: %v", tc.f, err)
 		}
 		want := append([]string{"luksFormat", "--batch-mode", "--type", "luks2"}, tc.want...)
-		want = append(want, "--sector-size", "4096", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		want = append(want, "--sector-size", strconv.Itoa(image.DefaultBlockSize), "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
 			"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev)
 		if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
 			t.Fatalf("%+v: luksFormat argv = %v, want %v", tc.f, got, want)
@@ -419,7 +420,7 @@ func TestPrepareRecordsSectorSize(t *testing.T) {
 	if _, _, err := c.Prepare(context.Background(), blankDev(t), "fbcrypt-x", Keys{Current: keyA}, DefaultFormat); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := c.SectorSize(context.Background(), "/srv/fb-x.img"); err != nil || got != 4096 {
-		t.Fatalf("after format: got %d, %v; want 4096", got, err)
+	if got, err := c.SectorSize(context.Background(), "/srv/fb-x.img"); err != nil || got != image.DefaultBlockSize {
+		t.Fatalf("after format: got %d, %v; want %d", got, err, image.DefaultBlockSize)
 	}
 }

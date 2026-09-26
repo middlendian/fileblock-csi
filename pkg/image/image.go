@@ -20,15 +20,16 @@ const (
 	ImageExt  = ".img"
 	DefaultFs = "ext4"
 
-	// SizeAlign is the one block size every new volume uses: image sizes
-	// round up to it, ext4 is made with it, encrypted volumes use it as
-	// their LUKS2 sector size, and loop devices attach with it unless the
-	// image on disk records something else.
-	SizeAlign = 4096
+	// DefaultBlockSize is the one block size every new volume uses, and the
+	// only place its value is written: image sizes round up to it, ext4 is
+	// made with it, encrypted volumes use it as their LUKS2 sector size, and
+	// loop devices attach with it unless the image on disk records something
+	// else. hack/smoke.sh mirrors it (TestSmokeBlockSizeMatches).
+	DefaultBlockSize = 4096
 )
 
-// AlignUp rounds n up to a multiple of SizeAlign.
-func AlignUp(n int64) int64 { return (n + SizeAlign - 1) / SizeAlign * SizeAlign }
+// AlignUp rounds n up to a multiple of DefaultBlockSize.
+func AlignUp(n int64) int64 { return (n + DefaultBlockSize - 1) / DefaultBlockSize * DefaultBlockSize }
 
 // Metadata describes a volume to callers. It is derived on read from the
 // .img file's name and stat — there is no separate persisted metadata.

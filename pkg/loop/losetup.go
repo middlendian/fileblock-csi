@@ -48,7 +48,7 @@ const minSectorSize = 512
 // SectorSizeFor picks the loop device sector size for an image whose
 // on-disk format records recorded bytes (its ext4 block size, or its LUKS2
 // sector size; 0 when nothing is recorded yet). New images get
-// image.SizeAlign. The result never exceeds the page size, the largest a
+// image.DefaultBlockSize. The result never exceeds the page size, the largest a
 // loop device supports, and always divides imageSize, halving for images
 // that predate 4 KiB size rounding. Never exceeding recorded is what keeps
 // existing volumes mountable: the kernel refuses a filesystem whose block
@@ -56,7 +56,7 @@ const minSectorSize = 512
 func SectorSizeFor(recorded int, imageSize int64) int {
 	s := recorded
 	if s <= 0 {
-		s = image.SizeAlign
+		s = image.DefaultBlockSize
 	}
 	s = min(s, os.Getpagesize())
 	for s > minSectorSize && imageSize%int64(s) != 0 {

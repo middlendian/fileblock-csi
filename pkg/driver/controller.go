@@ -128,7 +128,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 }
 
 // alignedCapacity picks the image size for a capacity range: required
-// bytes (else the limit, else the default) rounded up to image.SizeAlign,
+// bytes (else the limit, else the default) rounded up to image.DefaultBlockSize,
 // or down when rounding up would pass limit_bytes. A range with no aligned
 // size in it is OutOfRange.
 func alignedCapacity(r *csi.CapacityRange) (int64, error) {
@@ -140,11 +140,11 @@ func alignedCapacity(r *csi.CapacityRange) (int64, error) {
 	}
 	size := image.AlignUp(want)
 	if limit := r.GetLimitBytes(); limit > 0 && size > limit {
-		size = limit / image.SizeAlign * image.SizeAlign
+		size = limit / image.DefaultBlockSize * image.DefaultBlockSize
 		if size == 0 || size < r.GetRequiredBytes() {
 			return 0, status.Errorf(codes.OutOfRange,
 				"no multiple of %d bytes lies between required %d and limit %d",
-				image.SizeAlign, r.GetRequiredBytes(), limit)
+				image.DefaultBlockSize, r.GetRequiredBytes(), limit)
 		}
 	}
 	return size, nil

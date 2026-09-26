@@ -8,6 +8,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
@@ -254,7 +255,7 @@ func TestMkfsArgs(t *testing.T) {
 	if err := Mkfs(context.Background(), fake, "/dev/mapper/fbcrypt-x"); err != nil {
 		t.Fatalf("Mkfs: %v", err)
 	}
-	want := []string{"-q", "-F", "-b", "4096", "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1", "/dev/mapper/fbcrypt-x"}
+	want := []string{"-q", "-F", "-b", strconv.Itoa(DefaultBlockSize), "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1", "/dev/mapper/fbcrypt-x"}
 	if len(fake.Calls) != 1 || fake.Calls[0].Name != "mkfs.ext4" || !slices.Equal(fake.Calls[0].Args, want) {
 		t.Fatalf("calls = %+v", fake.Calls)
 	}
@@ -321,14 +322,14 @@ func fileSize(t *testing.T, mgr Manager, id string) int64 {
 	return st.Size()
 }
 
-// A 4096-byte LUKS2 sector needs the image to be whole 4 KiB sectors, and
+// A DefaultBlockSize LUKS2 sector needs the image to be whole sectors, and
 // a PVC can ask for any byte count ("1G" is 10^9). Create rounds up; CSI
 // allows returning more than was required.
 func TestCreateRoundsUpToAlignment(t *testing.T) {
 	mgr := newUnformattedMgr(t)
 	ctx := context.Background()
 	const req = 32<<20 + 1
-	const want = 32<<20 + SizeAlign
+	const want = 32<<20 + DefaultBlockSize
 	meta, err := mgr.Create(ctx, "fb-odd", req, CreateOptions{Unformatted: true})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -367,7 +368,7 @@ func TestResizeRoundsUpAndRetryIsNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	const req = 40_000_001
-	const want = 40_001_536 // 9766 * 4096
+	const want = 40_001_536 // 9766 blocks of 4 KiB
 	meta, err := mgr.Resize(ctx, "fb-grow", req)
 	if err != nil || meta.CapacityBytes != want || fileSize(t, mgr, "fb-grow") != want {
 		t.Fatalf("Resize: %+v, %v, file %d; want %d", meta, err, fileSize(t, mgr, "fb-grow"), want)
@@ -445,7 +446,7 @@ func TestMkfsPinsBlockSize(t *testing.T) {
 	if err := Mkfs(context.Background(), fbexec.New(0), p); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := FSBlockSize(p); err != nil || got != 4096 {
-		t.Fatalf("got %d, %v; want 4096", got, err)
+	if got, err := FSBlockSize(p); err != nil || got != DefaultBlockSize {
+		t.Fatalf("got %d, %v; want %d", got, err, DefaultBlockSize)
 	}
 }

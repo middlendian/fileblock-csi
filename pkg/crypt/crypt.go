@@ -125,7 +125,7 @@ func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys, f Format)
 		}
 		if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, "luksFormat", "--batch-mode",
 			"--type", "luks2", "--cipher", f.Cipher, "--key-size", strconv.Itoa(f.KeySize),
-			"--sector-size", strconv.Itoa(image.SizeAlign), "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
+			"--sector-size", strconv.Itoa(image.DefaultBlockSize), "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
 			"--label", labelUnformatted, "--key-file", fbexec.SecretFD(0), dev); err != nil {
 			return "", OutcomeNone, fmt.Errorf("luksFormat %s: %w", dev, err)
 		}
@@ -275,7 +275,7 @@ func isBlank(dev string) (bool, error) {
 
 // SectorSize returns the encryption sector size recorded in dev's LUKS2
 // header, or 0 when dev has no header yet (a blank image before its first
-// stage). New volumes are formatted with image.SizeAlign — one cipher
+// stage). New volumes are formatted with image.DefaultBlockSize — one cipher
 // operation per ext4 block — rather than whatever cryptsetup would detect.
 func (c *Crypt) SectorSize(ctx context.Context, dev string) (int, error) {
 	luks, err := c.isLuks(ctx, dev)

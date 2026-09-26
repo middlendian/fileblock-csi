@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
+	"github.com/middlendian/fileblock-csi/pkg/image"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 	"github.com/middlendian/fileblock-csi/pkg/store"
@@ -441,7 +443,7 @@ func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string,
 	}
 	fake.CmdFunc = func(_ context.Context, c fbexec.Cmd) (string, error) {
 		if slices.Contains(c.Args, "--dump-json-metadata") {
-			return luksJSON(4096), nil
+			return luksJSON(image.DefaultBlockSize), nil
 		}
 		if cryptFn != nil {
 			return cryptFn(c)
@@ -504,8 +506,8 @@ func TestNodeStageEncryptedHappyPath(t *testing.T) {
 	}
 	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))
 	calls := e.fake.Calls
-	if callIndex(calls, "losetup", "--find", "--show", "--sector-size", "4096") < 0 {
-		t.Fatalf("loop not attached with the header's 4096-byte sectors: %+v", calls)
+	if callIndex(calls, "losetup", "--find", "--show", "--sector-size", strconv.Itoa(image.DefaultBlockSize)) < 0 {
+		t.Fatalf("loop not attached with the header's default-size sectors: %+v", calls)
 	}
 	setCap := callIndex(calls, "losetup", "--set-capacity")
 	open := callIndex(calls, "cryptsetup", "open", "--type")
@@ -681,7 +683,7 @@ func TestNodeStagePlaintextSequenceUnchanged(t *testing.T) {
 		seq = append(seq, strings.TrimSpace(c.Name+" "+strings.Join(c.Args, " ")))
 	}
 	want := []string{
-		"losetup --find --show --sector-size 4096 " + imgPath,
+		"losetup --find --show --sector-size " + strconv.Itoa(image.DefaultBlockSize) + " " + imgPath,
 		"e2fsck -p -f /dev/loop7",
 		"losetup --set-capacity /dev/loop7",
 		"resize2fs /dev/loop7",
