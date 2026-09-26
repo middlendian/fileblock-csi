@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional LUKS2 encryption. A StorageClass with `encrypted: "true"` and
+  the standard `csi.storage.k8s.io/node-stage-secret-name` /
+  `-namespace` parameters gets volumes whose `.img` is only ever
+  ciphertext on the backing store. The node formats on first stage and
+  never overwrites a header it cannot open. Rotation: put the old key in
+  the Secret's `previousKey` and the new one in `key`; each volume moves
+  its key slot on its next stage. The runtime image now includes
+  `cryptsetup-bin`; nodes need the `dm_crypt` kernel module. No RBAC
+  change — the kubelet reads the Secret.
+
+### Changed
+
+- **Breaking:** `backingStore.nfs.subDir` tokens are now spelled
+  `${pvc.namespace}`, `${pvc.name}` and `${pv.name}` — the spelling
+  external-provisioner uses for the node-stage secret parameters, so a
+  StorageClass uses one vocabulary throughout. The `${pvc.metadata.*}`
+  spelling is no longer accepted. Existing volumes are unaffected (subDir
+  is resolved once, at creation); a StorageClass still using the old
+  tokens fails new provisioning with `InvalidArgument`. StorageClass
+  parameters are immutable: delete and recreate the class under the same
+  name with the new tokens — bound PVCs are unaffected.
+
 ## [0.4.0] - 2026-09-22
 
 ### Added

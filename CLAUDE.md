@@ -17,8 +17,9 @@ pkg/image/              .img CRUD; ext4 fsck + resize2fs helpers
 pkg/loop/               losetup wrappers, loop-mappings.json state file, reconciler
 pkg/mount/              mount / bind / unmount / findmnt wrappers
 pkg/exec/               os/exec wrapper with timeout + structured Error
+pkg/crypt/              LUKS2 via cryptsetup: format-on-first-stage, key-slot rotation, dm mapping list
 deploy/kustomize/       base manifests + example-localdir, example-nfs-shared, e2e overlays
-examples/               PVC + Pod manifests (no overlay-specific values)
+examples/               PVC + Pod + encrypted StorageClass/Secret manifests (no overlay-specific values)
 test/e2e/               kubelet-driven end-to-end tests (build tag: e2e)
 hack/                   smoke.sh, csi-sanity.sh, e2e.sh, e2e-kind.yaml
 Dockerfile              single multi-stage image used by both binaries
@@ -220,15 +221,22 @@ build path is exercised by plain `make docker` against the top-level
 
 ## On-disk contract
 
-`pkg/image` is the **only** package that writes `.img` files. `pkg/store`
-creates store root directories and writes nothing else: `Registry.Get`
-creates a `subDir` after its mount is live — never before, which would
-populate the directory the mount then hides — the first time that store
-is seen in this process, and again after a remount. It is deliberately
-not recreated on every `Get`: `MkdirAll` stats, and a stat against a hung
-hard mount blocks indefinitely while the per-mount lock is held. A
-namespace directory removed out-of-band is therefore not restored until
-the mount is re-established or the process restarts.
+`pkg/image` is the **only** package that writes `.img` files — it alone
+creates, truncates and deletes them. `pkg/crypt` writes *inside* an
+encrypted image, through the loop device, exactly as `e2fsck`/`resize2fs`
+already do: the LUKS2 header and, inside the mapping, ext4. Encrypted
+images are created unformatted (all zeros); the node formats them on
+first stage.
+
+`pkg/store` creates store root directories and writes nothing else:
+`Registry.Get` creates a `subDir` after its mount is live — never
+before, which would populate the directory the mount then hides — the
+first time that store is seen in this process, and again after a
+remount. It is deliberately not recreated on every `Get`: `MkdirAll`
+stats, and a stat against a hung hard mount blocks indefinitely while
+the per-mount lock is held. A namespace directory removed out-of-band
+is therefore not restored until the mount is re-established or the
+process restarts.
 
 Every volume is a single file in `${backingStorePath}`:
 
@@ -263,7 +271,9 @@ without a separate "in use" check.
 ## State file invariants (`pkg/loop`)
 
 `/var/lib/kubelet/plugins/fileblock.csi/loop-mappings.json` is a JSON map
-`volumeID -> {LoopDev, ImagePath, StagePath}`. Invariants:
+`volumeID -> {LoopDev, ImagePath, StagePath, CryptDev}`. `CryptDev` is
+optional: the `/dev/mapper/fbcrypt-…` path for an encrypted volume's
+dm-crypt mapping, empty for a plaintext one. Invariants:
 
 1. Every entry must correspond to a `losetup --json --list` row whose
    `back-file` matches `ImagePath`. Otherwise the reconciler drops it.
@@ -271,6 +281,9 @@ without a separate "in use" check.
    *not* present in the state file gets detached on plugin start.
 3. Concurrent in-process Stage/Unstage on the same volume is serialized by
    `NodeServer.lockVolume`.
+4. Every `fbcrypt-*` mapping over a loop backed by our store and absent
+   from the state file is closed on plugin start, before orphan loops
+   are detached.
 
 ## Conventions
 
@@ -286,6 +299,10 @@ without a separate "in use" check.
   `golang.org/x/sys/unix` and live in files that already require Linux
   semantically. We don't currently need build tags because nothing builds on
   non-Linux in CI.
+- Secrets reach child processes only via `exec.Cmd.Secrets` (`/dev/fd/N`),
+  never argv.
+- `crypt.ErrWrongKey` → `PermissionDenied`; `crypt.ErrNotBlank` →
+  `FailedPrecondition`.
 
 ## CSI surface (advertised)
 
@@ -295,6 +312,8 @@ without a separate "in use" check.
 - Node: `STAGE_UNSTAGE_VOLUME`, `GET_VOLUME_STATS`, `EXPAND_VOLUME`.
 - Access modes: `SINGLE_NODE_WRITER` only.
 - fsType: `ext4` only.
+- Encryption: opt-in via SC `encrypted: "true"` + node-stage secret
+  (`key`, optional `previousKey`).
 
 If you add a capability, also update `controller.go::ControllerGetCapabilities`
 or `node.go::NodeGetCapabilities` AND the README's *Limitations* section.

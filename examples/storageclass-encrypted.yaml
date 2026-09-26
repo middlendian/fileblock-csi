@@ -1,0 +1,27 @@
+# Encrypted fileblock StorageClass. Each namespace keeps its own key in a
+# Secret named fileblock-luks; the kubelet hands it to the node plugin at
+# stage time. Generate a key with: openssl rand -base64 32
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fileblock-encrypted
+provisioner: fileblock.csi
+parameters:
+  backingStore.type: nfs
+  backingStore.nfs.server: nfs.example.internal
+  backingStore.nfs.path: /exports/fileblock
+  backingStore.nfs.mountOptions: "nfsvers=4.1,hard,timeo=600"
+  encrypted: "true"
+  csi.storage.k8s.io/node-stage-secret-name: fileblock-luks
+  csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fileblock-luks
+  namespace: default
+stringData:
+  key: "REPLACE-WITH-openssl-rand-base64-32"
