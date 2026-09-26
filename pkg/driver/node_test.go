@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -418,6 +419,8 @@ type encStage struct {
 	vc      map[string]string
 	sysRoot string
 	stage   string
+	backing string
+	log     *bytes.Buffer
 }
 
 func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string, error)) *encStage {
@@ -449,7 +452,9 @@ func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string,
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := NewNodeServer("n", fake, mnt, loop.NewLosetup(fake), state, discardLog(), reg)
+	var logBuf bytes.Buffer
+	lg := slog.New(slog.NewTextHandler(&logBuf, nil))
+	n := NewNodeServer("n", fake, mnt, loop.NewLosetup(fake), state, lg, reg)
 	sysRoot := t.TempDir()
 	n.luks = crypt.NewAt(fake, sysRoot)
 	cfg := store.Config{Type: store.TypeLocal, LocalPath: t.TempDir()}
@@ -466,7 +471,7 @@ func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string,
 	}
 	// Drop setup's bind mount so tests see only the stage's own calls.
 	fake.Reset()
-	return &encStage{n: n, fake: fake, vc: vc, sysRoot: sysRoot, stage: filepath.Join(t.TempDir(), "stage")}
+	return &encStage{n: n, fake: fake, vc: vc, sysRoot: sysRoot, stage: filepath.Join(t.TempDir(), "stage"), backing: backing, log: &logBuf}
 }
 
 func (e *encStage) req(secrets map[string]string) *csi.NodeStageVolumeRequest {
@@ -514,6 +519,41 @@ func TestNodeStageEncryptedHappyPath(t *testing.T) {
 	m, ok := e.n.state.Get("vol-1")
 	if !ok || m.CryptDev != mapper || m.LoopDev != "/dev/loop7" {
 		t.Fatalf("state = %+v", m)
+	}
+}
+
+// Review finding 1: the state-file idempotency check must stay above the
+// IsOpen guard. A retried stage of a volume that is already mounted at
+// this path must succeed even though its mapper is (correctly) still
+// open — if the IsOpen guard ran first it would refuse with
+// FailedPrecondition instead.
+func TestNodeStageEncryptedIdempotentRetrySucceedsWithMappingOpen(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	mapper := crypt.MapperName("vol-1")
+	d := filepath.Join(e.sysRoot, "block", "dm-0")
+	if err := os.MkdirAll(filepath.Join(d, "dm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "dm", "name"), []byte(mapper+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(e.stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.n.state.Put(loop.Mapping{
+		VolumeID:  "vol-1",
+		LoopDev:   "/dev/loop7",
+		ImagePath: filepath.Join(e.backing, "vol-1.img"),
+		StagePath: e.stage,
+		CryptDev:  crypt.MapperPath(mapper),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if callIndex(e.fake.Calls, "losetup") >= 0 || callIndex(e.fake.Calls, "cryptsetup") >= 0 {
+		t.Fatalf("idempotent restage should not touch losetup/cryptsetup: %+v", e.fake.Calls)
 	}
 }
 
@@ -579,20 +619,30 @@ func TestNodeStageEncryptedFailureClosesMapping(t *testing.T) {
 	}
 }
 
-// The plaintext path must be byte-for-byte what it was before encryption.
+// The plaintext path must be byte-for-byte what it was before encryption:
+// every call's full argv, not just its name and first flag, in order and
+// excluding findmnt (IsMountPoint probing is unrelated to the stage
+// sequence and its call count is incidental).
 func TestNodeStagePlaintextSequenceUnchanged(t *testing.T) {
 	e := newEncStage(t, false, nil)
 	if _, err := e.n.NodeStageVolume(context.Background(), e.req(nil)); err != nil {
 		t.Fatalf("NodeStageVolume: %v", err)
 	}
+	imgPath := filepath.Join(e.backing, "vol-1.img")
 	var seq []string
 	for _, c := range e.fake.Calls {
 		if c.Name == "findmnt" {
 			continue
 		}
-		seq = append(seq, c.Name+" "+c.Args[0])
+		seq = append(seq, strings.TrimSpace(c.Name+" "+strings.Join(c.Args, " ")))
 	}
-	want := []string{"losetup --find", "e2fsck -p", "losetup --set-capacity", "resize2fs /dev/loop7", "mount -t"}
+	want := []string{
+		"losetup --find --show " + imgPath,
+		"e2fsck -p -f /dev/loop7",
+		"losetup --set-capacity /dev/loop7",
+		"resize2fs /dev/loop7",
+		"mount -t ext4 /dev/loop7 " + e.stage,
+	}
 	if !slices.Equal(seq, want) {
 		t.Fatalf("sequence = %v, want %v", seq, want)
 	}

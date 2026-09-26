@@ -29,7 +29,8 @@ type fakeLUKS struct {
 	label  string
 	slots  [][]byte
 	opened bool
-	subs   []string // cryptsetup subcommands (and "mkfs") in call order
+	subs   []string   // cryptsetup subcommands (and "mkfs") in call order
+	argv   [][]string // full argv for each entry in subs, index-aligned
 }
 
 func exitErr(code int) error { return &fbexec.Error{Cmd: "cryptsetup", ExitCode: code} }
@@ -46,6 +47,15 @@ func (f *fakeLUKS) has(k []byte) bool {
 	return slices.ContainsFunc(f.slots, func(s []byte) bool { return bytes.Equal(s, k) })
 }
 
+// argvFor returns the full argv of the first call to sub, or nil.
+func (f *fakeLUKS) argvFor(sub string) []string {
+	i := slices.Index(f.subs, sub)
+	if i < 0 {
+		return nil
+	}
+	return f.argv[i]
+}
+
 func (f *fakeLUKS) run(_ context.Context, c fbexec.Cmd) (string, error) {
 	for _, s := range c.Secrets {
 		for _, a := range c.Args {
@@ -56,6 +66,7 @@ func (f *fakeLUKS) run(_ context.Context, c fbexec.Cmd) (string, error) {
 	}
 	if c.Name == "mkfs.ext4" {
 		f.subs = append(f.subs, "mkfs")
+		f.argv = append(f.argv, append([]string(nil), c.Args...))
 		return "", nil
 	}
 	if c.Name != "cryptsetup" {
@@ -66,6 +77,7 @@ func (f *fakeLUKS) run(_ context.Context, c fbexec.Cmd) (string, error) {
 	}
 	sub := c.Args[0]
 	f.subs = append(f.subs, sub)
+	f.argv = append(f.argv, append([]string(nil), c.Args...))
 	switch sub {
 	case "isLuks":
 		if f.luks {
@@ -136,7 +148,8 @@ func blankDev(t *testing.T) string {
 func TestPrepareFormatsBlankDevice(t *testing.T) {
 	f := &fakeLUKS{}
 	c := newFake(t, f)
-	path, err := c.Prepare(context.Background(), blankDev(t), "fbcrypt-x", Keys{Current: keyA})
+	dev := blankDev(t)
+	path, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -148,6 +161,15 @@ func TestPrepareFormatsBlankDevice(t *testing.T) {
 	}
 	if !slices.Contains(f.subs, "luksFormat") || !slices.Contains(f.subs, "mkfs") {
 		t.Fatalf("subs = %v", f.subs)
+	}
+	// Review finding 2: the PBKDF hardening and label are exact, not just
+	// present — a dropped flag would silently fall back to cryptsetup's
+	// argon2id default, which is too expensive for a node plugin.
+	want := []string{"luksFormat", "--batch-mode", "--type", "luks2", "--cipher", "aes-xts-plain64",
+		"--key-size", "512", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev}
+	if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
+		t.Fatalf("luksFormat argv = %v, want %v", got, want)
 	}
 }
 
@@ -203,6 +225,13 @@ func TestPrepareRotatesPreviousToCurrent(t *testing.T) {
 	add, rm := slices.Index(f.subs, "luksAddKey"), slices.Index(f.subs, "luksRemoveKey")
 	if add < 0 || rm < 0 || add > rm {
 		t.Fatalf("want luksAddKey before luksRemoveKey, subs = %v", f.subs)
+	}
+	// Review finding 2: same PBKDF hardening as luksFormat, plus the two
+	// key fds (old key authorizes, new key is added) in order.
+	want := []string{"luksAddKey", "--batch-mode", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+		"--key-file", "/dev/fd/3", "/dev/loop9", "/dev/fd/4"}
+	if got := f.argvFor("luksAddKey"); !slices.Equal(got, want) {
+		t.Fatalf("luksAddKey argv = %v, want %v", got, want)
 	}
 }
 
