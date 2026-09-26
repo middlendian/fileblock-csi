@@ -168,6 +168,15 @@ trap cleanup EXIT
 # the node DaemonSet sees.
 $SUDO modprobe loop 2>/dev/null || true
 
+# Encrypted volumes: the node plugin needs dm_crypt in the shared kernel;
+# the e2e test inspects .img headers on the runner with cryptsetup.
+$SUDO modprobe dm_crypt 2>/dev/null || true
+if ! command -v cryptsetup >/dev/null; then
+  log "installing cryptsetup-bin (one-shot)"
+  $SUDO apt-get update -qq
+  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cryptsetup-bin
+fi
+
 case "$BACKING_KIND" in
   local) log "backing-store kind: local directory"; prepare_backing_local ;;
   nfs)   log "backing-store kind: NFSv3";            prepare_backing_nfs   ;;
