@@ -39,11 +39,16 @@ func TestEncryptedVolumeRotation(t *testing.T) {
 	waitPodGone(t, ns, "writer", 60*time.Second)
 
 	// 1. Only ciphertext on the backing store.
-	if err := sudo(nil, "cryptsetup", "isLuks", img); err != nil {
-		t.Fatalf("%s is not a LUKS volume: %v", img, err)
+	if out, err := sudo(nil, "cryptsetup", "isLuks", img); err != nil {
+		t.Fatalf("%s is not a LUKS volume: %v\n%s", img, err, out)
 	}
-	if err := sudo(nil, "grep", "-qa", canary, img); err == nil {
+	switch out, err := sudo(nil, "grep", "-qa", canary, img); {
+	case err == nil:
 		t.Fatalf("plaintext canary found in %s", img)
+	case exitCode(err) == 1:
+		// canary absent, as expected.
+	default:
+		t.Fatalf("grep -qa %s %s: %v\n%s", canary, img, err, out)
 	}
 
 	// 2. Rotate: the next stage moves the slot from key1 to key2.
@@ -133,25 +138,36 @@ func imagePath(t *testing.T, handle string) string {
 	return filepath.Join(dir, handle+".img")
 }
 
-// sudo runs a command as root on the runner: .img files are 0600 root.
-func sudo(stdin []byte, name string, args ...string) error {
+// sudo runs a command as root on the runner: .img files are 0600 root. It
+// returns combined stdout+stderr so callers can fold it into failure
+// messages instead of guessing what went wrong from the exit code alone.
+func sudo(stdin []byte, name string, args ...string) ([]byte, error) {
 	cmd := exec.Command("sudo", append([]string{name}, args...)...)
 	if stdin != nil {
 		cmd.Stdin = strings.NewReader(string(stdin))
 	}
-	return cmd.Run()
+	return cmd.CombinedOutput()
+}
+
+// exitCode returns the process exit code for an error from sudo, or -1 if
+// err isn't an *exec.ExitError (e.g. sudo itself failed to start).
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 func opensWith(t *testing.T, img, key string) bool {
 	t.Helper()
-	err := sudo([]byte(key), "cryptsetup", "open", "--test-passphrase", "--key-file=-", img)
+	out, err := sudo([]byte(key), "cryptsetup", "open", "--test-passphrase", "--key-file=-", img)
 	if err == nil {
 		return true
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 2 {
+	if exitCode(err) == 2 {
 		return false
 	}
-	t.Fatalf("cryptsetup --test-passphrase %s: %v", img, err)
+	t.Fatalf("cryptsetup --test-passphrase %s: %v\n%s", img, err, out)
 	return false
 }
