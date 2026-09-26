@@ -10,7 +10,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X github.com/middlendian/f
         -o /out/fileblock-node ./cmd/node
 
 # Runtime image needs e2fsprogs (mkfs.ext4, e2fsck, resize2fs), util-linux
-# (losetup, mount, umount, findmnt), and nfs-common (mount.nfs).
+# (losetup, mount, umount, findmnt), nfs-common (mount.nfs), and
+# cryptsetup-bin (cryptsetup, for encrypted volumes).
 #
 # Pinned to debian:bookworm-slim (Debian 12) rather than trixie-slim
 # (Debian 13). Bookworm ships nfs-utils 2.6.2; trixie ships 2.8.3.
@@ -32,7 +33,7 @@ FROM debian:bookworm-slim
 # the same reason.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        e2fsprogs util-linux ca-certificates nfs-common netbase \
+        e2fsprogs util-linux ca-certificates nfs-common netbase cryptsetup-bin \
  && rm -rf /var/lib/apt/lists/*
 # Build-time assertion that netbase actually landed. /etc/protocols,
 # /etc/services, and /etc/rpc are required for NFSv3 mount(2)
@@ -42,6 +43,8 @@ RUN apt-get update \
 # unsuspecting NFS server.
 RUN test -s /etc/protocols && test -s /etc/services && test -s /etc/rpc \
  || (echo "ERROR: netbase files missing — install netbase" >&2 && exit 1)
+RUN command -v cryptsetup >/dev/null \
+ || (echo "ERROR: cryptsetup missing — install cryptsetup-bin" >&2 && exit 1)
 COPY --from=build /out/fileblock-controller /usr/local/bin/fileblock-controller
 COPY --from=build /out/fileblock-node /usr/local/bin/fileblock-node
 ENTRYPOINT ["/usr/local/bin/fileblock-node"]

@@ -8,7 +8,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"strconv"
+	"sync"
 	"time"
 )
 
@@ -32,10 +35,25 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
+// Cmd is a command with inputs Run cannot express.
+type Cmd struct {
+	Name string
+	Args []string
+	// Env is appended to the parent's environment.
+	Env []string
+	// Secrets[i] is readable by the child, to EOF, at SecretFD(i). They
+	// travel over pipes so they never touch argv or disk.
+	Secrets [][]byte
+}
+
+// SecretFD is the path at which the child reads Cmd.Secrets[i].
+func SecretFD(i int) string { return "/dev/fd/" + strconv.Itoa(3+i) }
+
 // Runner is the interface the rest of the driver depends on. Tests substitute
 // a fake.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
+	RunCmd(ctx context.Context, c Cmd) (string, error)
 }
 
 type osRunner struct{ timeout time.Duration }
@@ -50,21 +68,61 @@ func New(timeout time.Duration) Runner {
 }
 
 func (r *osRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	return r.RunCmd(ctx, Cmd{Name: name, Args: args})
+}
+
+func (r *osRunner) RunCmd(ctx context.Context, c Cmd) (string, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.timeout)
 		defer cancel()
 	}
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	err := cmd.Run()
+	if len(c.Env) > 0 {
+		cmd.Env = append(os.Environ(), c.Env...)
+	}
+	writers := make([]*os.File, 0, len(c.Secrets))
+	closeAll := func(fs []*os.File) {
+		for _, f := range fs {
+			_ = f.Close()
+		}
+	}
+	for range c.Secrets {
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			closeAll(cmd.ExtraFiles)
+			closeAll(writers)
+			return "", fmt.Errorf("pipe for %s: %w", c.Name, err)
+		}
+		cmd.ExtraFiles = append(cmd.ExtraFiles, pr)
+		writers = append(writers, pw)
+	}
+	startErr := cmd.Start()
+	// The child holds its own copies of the read ends.
+	closeAll(cmd.ExtraFiles)
+	if startErr != nil {
+		closeAll(writers)
+		return "", &Error{Cmd: c.Name, Args: c.Args, ExitCode: -1, Err: startErr}
+	}
+	var wg sync.WaitGroup
+	for i, w := range writers {
+		wg.Add(1)
+		go func(w *os.File, s []byte) {
+			defer wg.Done()
+			_, _ = w.Write(s)
+			_ = w.Close()
+		}(w, c.Secrets[i])
+	}
+	err := cmd.Wait()
+	wg.Wait()
 	out := buf.String()
 	if err != nil {
 		return out, &Error{
-			Cmd:      name,
-			Args:     args,
+			Cmd:      c.Name,
+			Args:     c.Args,
 			ExitCode: cmd.ProcessState.ExitCode(),
 			Output:   out,
 			Err:      err,

@@ -143,7 +143,7 @@ func TestSidecarTimeouts(t *testing.T) {
 // the backingStore.nfs.subDir feature: it is what makes external-
 // provisioner inject the csi.storage.k8s.io/pvc/namespace (and
 // pvc/name, pv/name) keys into CreateVolume's parameters, which is the
-// metadata the ${pvc.metadata.namespace} token is substituted from.
+// metadata the ${pvc.namespace} token is substituted from.
 // Without this flag every templated subDir fails CreateVolume with an
 // unresolved-token error. make e2e-nfs is the only other layer that
 // would catch its removal, and that workflow only runs on push to main

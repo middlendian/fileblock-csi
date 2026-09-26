@@ -28,6 +28,12 @@ NODE_SOCK="$WORK/node.sock"
 
 cleanup() {
   set +e
+  for m in /dev/mapper/fbcrypt-*; do
+    [[ -e "$m" ]] || continue
+    dev=$(cryptsetup status "$(basename "$m")" 2>/dev/null | awk '/device:/ {print $2}')
+    back=$(losetup --noheadings --output BACK-FILE "$dev" 2>/dev/null || true)
+    case "$back" in "$STORES"/*) DM_DISABLE_UDEV=1 cryptsetup close "$(basename "$m")" ;; esac
+  done
   losetup --json --list 2>/dev/null \
     | grep -oE '"/dev/loop[0-9]+"' \
     | tr -d '"' \
@@ -64,4 +70,25 @@ csi-sanity \
   --csi.controllerendpoint="unix://$CTL_SOCK" \
   --csi.endpoint="unix://$NODE_SOCK" \
   --csi.testvolumeparameters=<(printf "backingStore.type: local\nbackingStore.local.path: %s\n" "$BACKING") \
+  --csi.testvolumesize=$((128*1024*1024))
+
+echo "::: csi-sanity (encrypted)"
+# Real files, not process substitution: csi-sanity's Setup() re-reads both
+# --csi.testvolumeparameters and --csi.secrets on every Ginkgo It (via
+# sanity.TestContext.Setup), and a <(...) FIFO only yields data once. That
+# happens to be harmless for testvolumeparameters (loadFromFile unmarshals
+# into the persistent map in place, so a later empty re-read is a no-op that
+# keeps the first value), but loadSecrets allocates a fresh struct on every
+# call and reassigns sc.Secrets wholesale, so every It after the first would
+# silently run with no secrets at all and NodeStageVolume would reject the
+# encrypted volume for missing "key".
+ENC_PARAMS="$WORK/enc-testvolumeparameters.yaml"
+ENC_SECRETS="$WORK/enc-secrets.yaml"
+printf "backingStore.type: local\nbackingStore.local.path: %s\nencrypted: \"true\"\n" "$BACKING" >"$ENC_PARAMS"
+printf "NodeStageVolumeSecret:\n  key: %s\n" "$(openssl rand -hex 32)" >"$ENC_SECRETS"
+csi-sanity \
+  --csi.controllerendpoint="unix://$CTL_SOCK" \
+  --csi.endpoint="unix://$NODE_SOCK" \
+  --csi.testvolumeparameters="$ENC_PARAMS" \
+  --csi.secrets="$ENC_SECRETS" \
   --csi.testvolumesize=$((128*1024*1024))

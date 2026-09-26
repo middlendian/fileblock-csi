@@ -77,6 +77,32 @@ func TestPutGetDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStateCryptDevRoundTripAndOldFormat(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	// A v0.4.0 state file has no cryptDev key.
+	old := `{"v1":{"volumeId":"v1","loopDev":"/dev/loop0","imagePath":"/srv/v1.img","stagePath":"/s/v1"}}`
+	if err := os.WriteFile(p, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(p)
+	if err != nil {
+		t.Fatalf("LoadState old format: %v", err)
+	}
+	if m, _ := st.Get("v1"); m.CryptDev != "" || m.LoopDev != "/dev/loop0" {
+		t.Fatalf("old entry = %+v", m)
+	}
+	if err := st.Put(Mapping{VolumeID: "v2", LoopDev: "/dev/loop1", ImagePath: "/srv/v2.img", StagePath: "/s/v2", CryptDev: "/dev/mapper/fbcrypt-x"}); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := LoadState(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := st2.Get("v2"); m.CryptDev != "/dev/mapper/fbcrypt-x" {
+		t.Fatalf("CryptDev not persisted: %+v", m)
+	}
+}
+
 func TestAllReturnsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "loop-mappings.json")

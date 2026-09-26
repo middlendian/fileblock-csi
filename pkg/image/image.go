@@ -28,9 +28,16 @@ type Metadata struct {
 	CapacityBytes int64
 }
 
+// CreateOptions tunes Create.
+type CreateOptions struct {
+	// Unformatted leaves the sparse file without a filesystem. Encrypted
+	// volumes use it: the node formats inside the LUKS mapping.
+	Unformatted bool
+}
+
 // Manager is the image-file CRUD interface. Tests substitute a fake.
 type Manager interface {
-	Create(ctx context.Context, volumeID string, capacityBytes int64) (*Metadata, error)
+	Create(ctx context.Context, volumeID string, capacityBytes int64, opts CreateOptions) (*Metadata, error)
 	Delete(ctx context.Context, volumeID string) error
 	Get(ctx context.Context, volumeID string) (*Metadata, error)
 	List(ctx context.Context) ([]*Metadata, error)
@@ -64,7 +71,7 @@ func (m *fsManager) ImagePath(volumeID string) string {
 // capacity it is adopted as-is. Mismatched on-disk size is AlreadyExists
 // (the caller maps it). If the .img is corrupt or otherwise unusable the
 // problem surfaces at NodeStageVolume's fsck — that is the mount error.
-func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes int64) (*Metadata, error) {
+func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes int64, opts CreateOptions) (*Metadata, error) {
 	if err := validateVolumeID(volumeID); err != nil {
 		return nil, err
 	}
@@ -88,12 +95,12 @@ func (m *fsManager) Create(ctx context.Context, volumeID string, capacityBytes i
 	if err := truncateSparse(imgPath, capacityBytes); err != nil {
 		return nil, err
 	}
-	if _, err := m.exec.Run(ctx, "mkfs.ext4", "-q", "-F",
-		"-m", "0",
-		"-E", "lazy_itable_init=1,lazy_journal_init=1",
-		imgPath); err != nil {
+	if opts.Unformatted {
+		return &Metadata{VolumeID: volumeID, CapacityBytes: capacityBytes}, nil
+	}
+	if err := Mkfs(ctx, m.exec, imgPath); err != nil {
 		_ = os.Remove(imgPath)
-		return nil, fmt.Errorf("mkfs.ext4 %s: %w", imgPath, err)
+		return nil, err
 	}
 	return &Metadata{VolumeID: volumeID, CapacityBytes: capacityBytes}, nil
 }

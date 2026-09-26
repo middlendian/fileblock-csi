@@ -24,11 +24,12 @@ const (
 	paramPVCNamespace = "csi.storage.k8s.io/pvc/namespace"
 	paramPVName       = "csi.storage.k8s.io/pv/name"
 
-	// Spelled as csi-driver-nfs spells them, so a working subDir value
-	// moves across unchanged.
-	tmplPVCName      = "${pvc.metadata.name}"
-	tmplPVCNamespace = "${pvc.metadata.namespace}"
-	tmplPVName       = "${pv.metadata.name}"
+	// Spelled as external-provisioner spells its node-stage-secret
+	// templates, so every template in a fileblock StorageClass uses one
+	// vocabulary. Those templates are the provisioner's and cannot change.
+	tmplPVCName      = "${pvc.name}"
+	tmplPVCNamespace = "${pvc.namespace}"
+	tmplPVName       = "${pv.name}"
 )
 
 // ConfigFromParams parses SC.parameters into a Config. Missing or
@@ -83,7 +84,7 @@ func ConfigFromParams(params map[string]string) (Config, error) {
 // An unresolved token is fatal rather than a literal directory name.
 // csi-driver-nfs passes the literal through; we do not, because the
 // operator asked for per-namespace isolation and a directory called
-// "${pvc.metadata.namespace}" silently gives every namespace the same
+// "${pvc.namespace}" silently gives every namespace the same
 // one — invisible short of listing the export by hand.
 func resolveSubDir(raw string, params map[string]string) (string, error) {
 	if raw == "" {
@@ -105,9 +106,13 @@ func resolveSubDir(raw string, params map[string]string) (string, error) {
 		if j := strings.Index(tok, "}"); j >= 0 {
 			tok = tok[:j+1]
 		}
+		hint := ""
+		if strings.HasPrefix(tok, "${pvc.metadata.") || strings.HasPrefix(tok, "${pv.metadata.") {
+			hint = fmt.Sprintf(" (renamed to %s / %s / %s in v0.5.0)", tmplPVCNamespace, tmplPVCName, tmplPVName)
+		}
 		return "", fmt.Errorf("%s contains unresolved template %s: supported tokens are %s, %s and %s, "+
-			"and the csi-provisioner sidecar must run with --extra-create-metadata=true for them to resolve",
-			ParamNFSSubDir, tok, tmplPVCNamespace, tmplPVCName, tmplPVName)
+			"and the csi-provisioner sidecar must run with --extra-create-metadata=true for them to resolve%s",
+			ParamNFSSubDir, tok, tmplPVCNamespace, tmplPVCName, tmplPVName, hint)
 	}
 	if strings.ContainsRune(sub, 0) {
 		return "", fmt.Errorf("%s must not contain NUL bytes", ParamNFSSubDir)

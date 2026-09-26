@@ -10,7 +10,7 @@ import (
 )
 
 // TestNFSSubDirPerNamespace provisions a StorageClass whose subDir carries
-// the ${pvc.metadata.namespace} token and asserts the .img lands under the
+// the ${pvc.namespace} token and asserts the .img lands under the
 // namespace directory on the export rather than at its root.
 //
 // This is the only layer that exercises the real external-provisioner, so
@@ -69,7 +69,7 @@ func TestNFSSubDirPerNamespace(t *testing.T) {
 	// detector for a missing --extra-create-metadata=true is that
 	// waitPodReady timeout, not this assertion; this stays only in case
 	// the design ever changes to tolerate unresolved tokens.
-	if _, err := os.Stat(filepath.Join(export, "${pvc.metadata.namespace}")); err == nil {
+	if _, err := os.Stat(filepath.Join(export, "${pvc.namespace}")); err == nil {
 		t.Error("export has a directory named after the literal token; substitution did not happen")
 	}
 }
@@ -91,7 +91,7 @@ parameters:
   backingStore.nfs.server: %s
   backingStore.nfs.path: %s
   backingStore.nfs.mountOptions: "nfsvers=%s,hard,timeo=600,nolock"
-  backingStore.nfs.subDir: ${pvc.metadata.namespace}/fileblock
+  backingStore.nfs.subDir: ${pvc.namespace}/fileblock
 reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer

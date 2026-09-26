@@ -136,15 +136,15 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
    ### Per-namespace backing directories
 
    One export can hold a separate backing directory per namespace.
-   `backingStore.nfs.subDir` accepts the same pv/pvc metadata tokens
-   csi-driver-nfs uses:
+   `backingStore.nfs.subDir` accepts pv/pvc metadata tokens spelled as
+   external-provisioner spells them:
 
    ```yaml
    parameters:
      backingStore.type: nfs
      backingStore.nfs.server: nfs.example.internal
      backingStore.nfs.path: /exports/k8s_ns
-     backingStore.nfs.subDir: ${pvc.metadata.namespace}/fileblock
+     backingStore.nfs.subDir: ${pvc.namespace}/fileblock
    ```
 
    A PVC in namespace `team-a` then lands at
@@ -152,14 +152,16 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
    mounted exactly once per node — every `subDir` under one export shares a
    single mount.
 
-   Supported tokens are `${pvc.metadata.namespace}`, `${pvc.metadata.name}`
-   and `${pv.metadata.name}`. They are substituted by the driver from
+   Supported tokens are `${pvc.namespace}`, `${pvc.name}` and `${pv.name}`
+   — the same spelling external-provisioner uses for
+   `csi.storage.k8s.io/node-stage-secret-*`, so every template in a
+   StorageClass reads alike. They are substituted by the driver from
    metadata that external-provisioner injects only when it runs with
-   `--extra-create-metadata=true`; the shipped manifests set that flag. If a
-   token cannot be resolved, `CreateVolume` fails with `InvalidArgument`
+   `--extra-create-metadata=true`; the shipped manifests set that flag. If
+   a token cannot be resolved, `CreateVolume` fails with `InvalidArgument`
    rather than creating a directory named after the literal token — every
-   namespace would otherwise share it, and nothing would reveal that short
-   of listing the export by hand.
+   namespace would otherwise share it, and nothing would reveal that
+   short of listing the export by hand.
 
    `subDir` must be relative, must not contain `..`, must not contain NUL
    bytes, and must not clean to `.`. It is NFS-only;
@@ -202,8 +204,11 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
 | `backingStore.nfs.server`     | when type=nfs     | NFS server hostname or IP                                     |
 | `backingStore.nfs.path`       | when type=nfs     | Exported path on the server                                   |
 | `backingStore.nfs.mountOptions` | no (type=nfs)  | Mount options string, e.g. `"nfsvers=4.1,hard,timeo=600"`    |
-| `backingStore.nfs.subDir`     | no (type=nfs)     | Subdirectory of the export to hold this store's `.img` files; supports `${pvc.metadata.namespace}` |
+| `backingStore.nfs.subDir`     | no (type=nfs)     | Subdirectory of the export to hold this store's `.img` files; supports `${pvc.namespace}`, `${pvc.name}`, `${pv.name}` |
 | `backingStore.local.path`     | when type=local   | Absolute path on every node that can read & write the store   |
+| `encrypted`                   | no                | `"true"` enables LUKS2 encryption; see [Encryption](#encryption) |
+| `csi.storage.k8s.io/node-stage-secret-name` | when `encrypted=true` | Name of the Secret holding `key` (and optional `previousKey`) |
+| `csi.storage.k8s.io/node-stage-secret-namespace` | when `encrypted=true` | Namespace of that Secret |
 
 Multiple StorageClasses with distinct backing stores can coexist in a
 single driver install — no manifest forking is required.
@@ -218,6 +223,98 @@ Other knobs:
   `ControllerExpandVolume`. The consuming pod must be restarted for the
   resize to land (OFFLINE expansion contract).
 - `fsType` is pinned to `ext4`.
+
+## Encryption
+
+An opt-in, per-StorageClass `encrypted: "true"` parameter wraps a
+volume's `.img` in LUKS2: the node plugin layers dm-crypt between the
+loop device and ext4, so the file on the backing store is only ever
+ciphertext.
+
+**What it protects:** the `.img` at rest on the backing store, and any
+snapshot or backup taken of it. **What it doesn't protect:** data on
+the node while the volume is staged (it's plaintext in the page cache
+and via the mount), or anyone who can read the Secret holding the key.
+
+The key comes from a Kubernetes Secret named by the standard CSI
+node-stage-secret parameters, so the kubelet fetches it and hands it to
+`NodeStageVolume` — the node plugin needs no new RBAC to read it. See
+`examples/storageclass-encrypted.yaml` for a complete StorageClass +
+Secret pair:
+
+```yaml
+parameters:
+  encrypted: "true"
+  csi.storage.k8s.io/node-stage-secret-name: fileblock-encryption-key
+  csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
+```
+
+The node-stage secret parameters accept the same tokens as `subDir`,
+with one difference: `${pvc.name}` is refused in the *namespace*
+template (a PVC author must not be able to steer the node to another
+namespace's Secret), while `subDir` still allows it.
+
+| token | `subDir` | node-stage-secret-name | node-stage-secret-namespace |
+|---|---|---|---|
+| `${pvc.namespace}` | yes | yes | yes |
+| `${pvc.name}` | yes | yes | no |
+| `${pv.name}` | yes | yes | yes |
+
+**Key rules:** the Secret's `key` must be at least 32 bytes and is used
+byte-for-byte as the LUKS passphrase — no trimming, no base64 decoding.
+A trailing newline from `kubectl create secret --from-file` is part of
+the key.
+
+**Rotation:** set the Secret's `previousKey` to the current key and
+`key` to a new one. Each volume moves its LUKS key slot to the new key
+the next time it is staged (i.e. on the consuming pod's next restart or
+reschedule) — rotation does not reach an already-staged volume. Remove
+`previousKey` once every volume using that Secret has restaged.
+
+To tell when every volume has finished: the node plugin logs an Info
+line with the volumeID and outcome (`formatted`, `rotated`, or
+`finished-interrupted-rotation`) each time `NodeStageVolume` changes a
+volume's header, so a `rotated` (or `finished-interrupted-rotation`)
+line for every volume using the Secret means the rotation is done.
+Without log access, `cryptsetup open --test-passphrase` against each
+`.img` with the old key tells the same story: once it fails everywhere,
+`previousKey` can be removed.
+
+Removing `previousKey` before every volume has restaged, or rotating
+`key` a second time while a volume is still lagging, leaves that volume
+unable to open with either key in the current Secret —
+`NodeStageVolume` fails `PermissionDenied`. Recovery is putting the key
+that volume's header still has back into `previousKey` for one more
+restage.
+
+If a restage is interrupted between adding the new key slot and
+removing the old one, and `previousKey` is then removed from the
+Secret before the volume restages again, the old slot is left in the
+header (harmless, but not cleaned up). Restoring `previousKey` for one
+more restage removes it.
+
+Rotation changes the key slot, not the master key: snapshots or backups
+of the `.img` taken before rotation still open with the old key. After
+a real compromise, don't just rotate — copy the data into a fresh
+encrypted volume.
+
+**Key backup:** keep a copy of the key outside the cluster. A lost key
+is lost data.
+
+**Recovery**, given the `.img` file and the key:
+
+```sh
+kubectl -n <ns> get secret fileblock-encryption-key \
+    -o jsonpath='{.data.key}' | base64 -d \
+  | sudo cryptsetup open --key-file=- /path/to/fb-….img recovered
+sudo mount /dev/mapper/recovered /mnt
+```
+
+**Overhead:** the LUKS2 header takes 16 MiB inside the requested
+capacity, so encrypted volumes must be at least 32 MiB — `CreateVolume`
+rejects smaller requests with `OutOfRange`. Nodes need the `dm_crypt`
+kernel module loaded. Existing plaintext volumes are not converted;
+encryption applies only to volumes created with `encrypted: "true"`.
 
 ## Limitations
 
@@ -237,6 +334,8 @@ Other knobs:
   `privileged: true` with `SYS_ADMIN`, matching csi-driver-nfs. The
   privilege is required for `mount.nfs` (NFSv3 in particular needs a
   privileged source port for the lock manager) and for `losetup`.
+- **Encryption applies to new volumes only.** Key rotation lands on the
+  next stage, not live; master-key re-encryption is not supported.
 
 ## Troubleshooting
 
@@ -246,6 +345,9 @@ Other knobs:
 | Stale `.img` on backing store after PVC delete | Reclaim policy may be `Retain`, or the controller failed mid-delete; remove by hand |
 | Want to inspect state                          | Each node writes `/var/lib/kubelet/plugins/fileblock.csi/loop-mappings.json`        |
 | One node fails every new volume `Unavailable`, peers are fine | That node's backing-store mount went away; the plugin logs `backing store is no longer mounted` and remounts on the next stage. Persisting means the remount itself is failing — check the node's connectivity to the backing store |
+| `<volume> is already open on this node as /dev/mapper/fbcrypt-…` (`FailedPrecondition`) | A crashed plugin left the dm-crypt mapping open without detaching its loop device — the reconciler normally closes these on startup. Manual recovery: `umount` the stage path if still mounted, `cryptsetup close fbcrypt-<name>`, then restart the node plugin pod so the reconciler finishes cleanup |
+| `not a LUKS volume and not blank; refusing to format` (`FailedPrecondition`) | The `.img`'s first 16 MiB are neither a LUKS header nor all zero, so fileblock won't overwrite it. This means the volume was created (or corrupted) outside the LUKS format-on-first-stage flow; inspect the `.img` by hand before deciding whether to discard it |
+| `PermissionDenied` opening an encrypted volume | Neither `key` nor `previousKey` in the node-stage secret opens the volume's LUKS header. Check the Secret against the key this volume was last staged with; if `previousKey` was removed too early or `key` was rotated twice while this volume lagged, put its old key back in `previousKey` and restage |
 
 ## Local development without a cluster
 

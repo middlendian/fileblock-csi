@@ -7,12 +7,16 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 )
 
-// Call records one Run invocation.
+// Call records one Run or RunCmd invocation.
 type Call struct {
-	Name string
-	Args []string
+	Name    string
+	Args    []string
+	Env     []string
+	Secrets [][]byte
 }
 
 // Response pairs an output with an error returned for a matched call.
@@ -25,9 +29,12 @@ type Response struct {
 // first arg) via Set, or supply a custom Func that sees the full args for
 // richer matching. Calls are recorded in order.
 type FakeRunner struct {
-	mu      sync.Mutex
-	rules   map[string]Response
-	Func    func(ctx context.Context, name string, args ...string) (string, error)
+	mu    sync.Mutex
+	rules map[string]Response
+	Func  func(ctx context.Context, name string, args ...string) (string, error)
+	// CmdFunc, when set, handles RunCmd calls and sees Env and Secrets.
+	// RunCmd falls back to Func and the rules when it is nil.
+	CmdFunc func(ctx context.Context, c fbexec.Cmd) (string, error)
 	Calls   []Call
 	Default Response
 	HasDef  bool
@@ -56,16 +63,33 @@ func (f *FakeRunner) SetDefault(out string, err error) {
 
 // Run implements exec.Runner.
 func (f *FakeRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	return f.dispatch(ctx, fbexec.Cmd{Name: name, Args: args}, false)
+}
+
+// RunCmd implements exec.Runner.
+func (f *FakeRunner) RunCmd(ctx context.Context, c fbexec.Cmd) (string, error) {
+	return f.dispatch(ctx, c, true)
+}
+
+func (f *FakeRunner) dispatch(ctx context.Context, c fbexec.Cmd, viaCmd bool) (string, error) {
 	f.mu.Lock()
-	f.Calls = append(f.Calls, Call{Name: name, Args: append([]string(nil), args...)})
-	rule, ok := f.rules[name]
+	call := Call{Name: c.Name, Args: append([]string(nil), c.Args...), Env: append([]string(nil), c.Env...)}
+	for _, s := range c.Secrets {
+		call.Secrets = append(call.Secrets, append([]byte(nil), s...))
+	}
+	f.Calls = append(f.Calls, call)
+	rule, ok := f.rules[c.Name]
 	useDefault := f.HasDef
 	def := f.Default
 	fn := f.Func
+	cmdFn := f.CmdFunc
 	f.mu.Unlock()
 
+	if viaCmd && cmdFn != nil {
+		return cmdFn(ctx, c)
+	}
 	if fn != nil {
-		return fn(ctx, name, args...)
+		return fn(ctx, c.Name, c.Args...)
 	}
 	if ok {
 		return rule.Out, rule.Err
@@ -73,7 +97,7 @@ func (f *FakeRunner) Run(ctx context.Context, name string, args ...string) (stri
 	if useDefault {
 		return def.Out, def.Err
 	}
-	return "", fmt.Errorf("FakeRunner: unexpected call %s %v", name, args)
+	return "", fmt.Errorf("FakeRunner: unexpected call %s %v", c.Name, c.Args)
 }
 
 // Reset clears recorded calls. Rules and Func are preserved.

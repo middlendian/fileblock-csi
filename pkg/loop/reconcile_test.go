@@ -2,9 +2,12 @@ package loop
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 )
 
@@ -20,7 +23,7 @@ func TestReconcileDropsStaleEntries(t *testing.T) {
 
 	fake := exectest.New()
 	fake.Set("losetup", `{"loopdevices":[]}`, nil)
-	rec := NewReconciler(state, NewLosetup(fake), "/srv")
+	rec := NewReconciler(state, NewLosetup(fake), nil, "/srv")
 
 	if err := rec.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -39,7 +42,7 @@ func TestReconcileDropsMismatchedBackFile(t *testing.T) {
 
 	fake := exectest.New()
 	fake.Set("losetup", `{"loopdevices":[{"name":"/dev/loop0","back-file":"/srv/something-else.img"}]}`, nil)
-	rec := NewReconciler(state, NewLosetup(fake), "/srv")
+	rec := NewReconciler(state, NewLosetup(fake), nil, "/srv")
 	if err := rec.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -70,7 +73,7 @@ func TestReconcileDetachesOrphanLoop(t *testing.T) {
 		t.Errorf("unexpected call: %s %v", name, args)
 		return "", nil
 	}
-	rec := NewReconciler(state, NewLosetup(fake), "/srv")
+	rec := NewReconciler(state, NewLosetup(fake), nil, "/srv")
 	if err := rec.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestReconcileLeavesUnrelatedLoops(t *testing.T) {
 		t.Errorf("unexpected call: %s %v", name, args)
 		return "", nil
 	}
-	rec := NewReconciler(state, NewLosetup(fake), "/srv")
+	rec := NewReconciler(state, NewLosetup(fake), nil, "/srv")
 	if err := rec.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -108,11 +111,95 @@ func TestReconcileKeepsHealthyEntries(t *testing.T) {
 
 	fake := exectest.New()
 	fake.Set("losetup", `{"loopdevices":[{"name":"/dev/loop0","back-file":"/srv/v1.img"}]}`, nil)
-	rec := NewReconciler(state, NewLosetup(fake), "/srv")
+	rec := NewReconciler(state, NewLosetup(fake), nil, "/srv")
 	if err := rec.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if _, ok := state.Get("v1"); !ok {
 		t.Fatal("healthy entry was dropped")
+	}
+}
+
+type fakeCrypt struct {
+	mappings []crypt.Mapping
+	log      *[]string
+}
+
+func (f *fakeCrypt) List(context.Context) ([]crypt.Mapping, error) { return f.mappings, nil }
+func (f *fakeCrypt) Close(_ context.Context, name string) error {
+	*f.log = append(*f.log, "close "+name)
+	return nil
+}
+
+// losetupFake lists live loops and records detaches into log.
+func losetupFake(live string, log *[]string) *exectest.FakeRunner {
+	fake := exectest.New()
+	fake.Func = func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "losetup" && len(args) > 0 && args[0] == "--json" {
+			return live, nil
+		}
+		if name == "losetup" && len(args) > 1 && args[0] == "--detach" {
+			*log = append(*log, "detach "+args[1])
+			return "", nil
+		}
+		return "", fmt.Errorf("unexpected %s %v", name, args)
+	}
+	return fake
+}
+
+func TestReconcileDropsEntryWhoseCryptMappingVanished(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	_ = state.Put(Mapping{VolumeID: "v1", LoopDev: "/dev/loop0", ImagePath: "/srv/v1.img", StagePath: "/s/v1", CryptDev: "/dev/mapper/fbcrypt-a"})
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop0","back-file":"/srv/v1.img"}]}`, &log)
+	rec := NewReconciler(state, NewLosetup(fake), &fakeCrypt{log: &log}, "/srv")
+	if err := rec.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Get("v1"); ok {
+		t.Fatal("entry kept although its crypt mapping is gone")
+	}
+}
+
+func TestReconcileKeepsTrackedCryptEntry(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	_ = state.Put(Mapping{VolumeID: "v1", LoopDev: "/dev/loop0", ImagePath: "/srv/v1.img", StagePath: "/s/v1", CryptDev: "/dev/mapper/fbcrypt-a"})
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop0","back-file":"/srv/v1.img"}]}`, &log)
+	cm := &fakeCrypt{mappings: []crypt.Mapping{{Name: "fbcrypt-a", Backing: "/dev/loop0"}}, log: &log}
+	if err := NewReconciler(state, NewLosetup(fake), cm, "/srv").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Get("v1"); !ok || len(log) != 0 {
+		t.Fatalf("tracked volume disturbed: log=%v", log)
+	}
+}
+
+// Review Focus 5: a live mapping holds its loop open, so the orphan
+// mapping must be closed before the loop detach is attempted.
+func TestReconcileClosesOrphanCryptBeforeDetach(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop5","back-file":"/srv/v9.img"}]}`, &log)
+	cm := &fakeCrypt{mappings: []crypt.Mapping{{Name: "fbcrypt-z", Backing: "/dev/loop5"}}, log: &log}
+	if err := NewReconciler(state, NewLosetup(fake), cm, "/srv").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"close fbcrypt-z", "detach /dev/loop5"}
+	if !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}
+
+func TestReconcileLeavesCryptOverForeignLoop(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop6","back-file":"/elsewhere/x.img"}]}`, &log)
+	cm := &fakeCrypt{mappings: []crypt.Mapping{{Name: "fbcrypt-q", Backing: "/dev/loop6"}}, log: &log}
+	if err := NewReconciler(state, NewLosetup(fake), cm, "/srv").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 0 {
+		t.Fatalf("touched a foreign mapping/loop: %v", log)
 	}
 }

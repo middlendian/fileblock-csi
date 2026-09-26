@@ -62,7 +62,7 @@ spec:
             - --timeout=1200s
             # Injects csi.storage.k8s.io/pvc/{name,namespace} and
             # .../pv/name into CreateVolume parameters. Without it the
-            # ${pvc.metadata.namespace} token in backingStore.nfs.subDir
+            # ${pvc.namespace} token in backingStore.nfs.subDir
             # never resolves and CreateVolume fails by design.
             - --extra-create-metadata=true
           volumeMounts:

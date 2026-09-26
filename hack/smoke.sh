@@ -4,7 +4,8 @@
 # drives them with `csc` (the kubernetes-csi CSI client CLI).
 #
 # Prereqs (Linux): go, losetup, mkfs.ext4, e2fsck, resize2fs, mount, umount,
-# findmnt, and `csc` (https://github.com/rexray/gocsi/tree/master/csc).
+# findmnt, cryptsetup, openssl, and `csc`
+# (https://github.com/rexray/gocsi/tree/master/csc).
 # `mise install` from the repo root provides go and csc; the rest come from
 # the OS. Run as root (loop devices and mount(8) require it) — `make smoke`
 # forwards PATH through sudo so mise-provided tools stay reachable.
@@ -32,6 +33,12 @@ cleanup() {
       [[ -d "$d" ]] && umount "$d" 2>/dev/null
     done
   fi
+  for m in /dev/mapper/fbcrypt-*; do
+    [[ -e "$m" ]] || continue
+    dev=$(cryptsetup status "$(basename "$m")" 2>/dev/null | awk '/device:/ {print $2}')
+    back=$(losetup --noheadings --output BACK-FILE "$dev" 2>/dev/null || true)
+    case "$back" in "$STORES"/*) DM_DISABLE_UDEV=1 cryptsetup close "$(basename "$m")" ;; esac
+  done
   losetup --json --list 2>/dev/null \
     | grep -oE '"/dev/loop[0-9]+"' \
     | tr -d '"' \
@@ -204,6 +211,78 @@ grep -q '^node-a-was-here$' "$STAGE_B/who" || {
 
 CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE_B" "$VOL3"
 csc controller del "$VOL3"
+
+echo "::: encrypted volume: first-stage format, ciphertext at rest, rotation"
+restart_node() {
+  kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
+  "$BIN/fileblock-node" \
+    --endpoint="unix://$NODE_SOCK" \
+    --node-id=local \
+    --state-dir="$STATE" \
+    --stores-root="$STORES" \
+    --log-level=debug >>"$LOG/node.log" 2>&1 &
+  NODE_PID=$!
+  for _ in $(seq 1 20); do [[ -S "$NODE_SOCK" ]] && break; sleep 0.1; done
+}
+restart_node
+# Hex keys: csc parses X_CSI_SECRETS as k=v pairs and base64 padding is '='.
+KEY1=$(openssl rand -hex 32)
+KEY2=$(openssl rand -hex 32)
+CREATE_OUT=$(csc controller new \
+  --cap "SINGLE_NODE_WRITER,mount,ext4" \
+  --req-bytes $((128*1024*1024)) \
+  --params "backingStore.type=local" \
+  --params "backingStore.local.path=$BACKING" \
+  --params "encrypted=true" \
+  enc-vol)
+VOL4=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
+IMG4="$BACKING/$VOL4.img"
+STAGE4="$STATE/staging/$VOL4"
+mkdir -p "$STAGE4"
+stage_enc() {
+  X_CSI_SECRETS="$1" CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
+    --cap "SINGLE_NODE_WRITER,mount,ext4" \
+    --staging-target-path "$STAGE4" \
+    --vol-context "backingStore.type=local" \
+    --vol-context "backingStore.local.path=$BACKING" \
+    --vol-context "encrypted=true" \
+    "$VOL4"
+}
+unstage_enc() {
+  CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE4" "$VOL4"
+}
+cmp -s <(head -c 16777216 "$IMG4") <(head -c 16777216 /dev/zero) \
+  || { echo "controller wrote to an encrypted image"; exit 1; }
+stage_enc "key=$KEY1"
+cryptsetup isLuks "$IMG4" || { echo "image is not LUKS after first stage"; exit 1; }
+findmnt -no FSTYPE "$STAGE4" | grep -q '^ext4$' || { echo "encrypted fs not ext4"; exit 1; }
+CANARY="fileblock-smoke-canary-$(openssl rand -hex 8)"
+echo "$CANARY" >"$STAGE4/canary"
+unstage_enc
+grep -qa "$CANARY" "$IMG4" && { echo "plaintext canary found in the .img"; exit 1; }
+
+echo "::: rotation: key=KEY2, previousKey=KEY1"
+stage_enc "key=$KEY2,previousKey=$KEY1"
+grep -qx "$CANARY" "$STAGE4/canary" || { echo "data lost across rotation"; exit 1; }
+unstage_enc
+printf %s "$KEY1" | cryptsetup open --test-passphrase --key-file=- "$IMG4" \
+  && { echo "old key still opens after rotation"; exit 1; }
+printf %s "$KEY2" | cryptsetup open --test-passphrase --key-file=- "$IMG4" \
+  || { echo "new key does not open after rotation"; exit 1; }
+
+echo "::: wrong key is refused and leaves nothing attached"
+stage_enc "key=$(openssl rand -hex 32)" && { echo "stage with a wrong key succeeded"; exit 1; }
+losetup --noheadings --output BACK-FILE | grep -qF "$IMG4" \
+  && { echo "loop left attached after wrong-key stage"; exit 1; }
+
+echo "::: orphan crypt mapping is reclaimed on plugin restart"
+ORPHAN4=$(losetup --find --show "$IMG4")
+printf %s "$KEY2" | DM_DISABLE_UDEV=1 cryptsetup open --key-file=- "$ORPHAN4" fbcrypt-smokeorphan
+restart_node
+sleep 1
+[[ -e /dev/mapper/fbcrypt-smokeorphan ]] && { echo "orphan crypt mapping not closed"; exit 1; }
+losetup "$ORPHAN4" 2>/dev/null && { echo "orphan loop under crypt not detached"; exit 1; } || true
+csc controller del "$VOL4"
 
 echo
 echo "smoke OK"
