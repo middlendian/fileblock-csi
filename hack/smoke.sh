@@ -275,6 +275,37 @@ stage_enc "key=$(openssl rand -hex 32)" && { echo "stage with a wrong key succee
 losetup --noheadings --output BACK-FILE | grep -qF "$IMG4" \
   && { echo "loop left attached after wrong-key stage"; exit 1; }
 
+echo "::: configurable cipher is what luksFormat writes"
+# aes-cbc-essiv rather than Adiantum: every runner kernel has it.
+CREATE_OUT=$(csc controller new \
+  --cap "SINGLE_NODE_WRITER,mount,ext4" \
+  --req-bytes $((128*1024*1024)) \
+  --params "backingStore.type=local" \
+  --params "backingStore.local.path=$BACKING" \
+  --params "encrypted=true" \
+  --params "encryption.cipher=aes-cbc-essiv:sha256" \
+  --params "encryption.keySize=256" \
+  cipher-vol)
+printf '%s\n' "$CREATE_OUT" | grep -qF 'aes-cbc-essiv:sha256' \
+  || { echo "controller dropped the cipher from volume context: $CREATE_OUT"; exit 1; }
+VOL5=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
+STAGE5="$STATE/staging/$VOL5"
+mkdir -p "$STAGE5"
+X_CSI_SECRETS="key=$KEY2" CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
+  --cap "SINGLE_NODE_WRITER,mount,ext4" \
+  --staging-target-path "$STAGE5" \
+  --vol-context "backingStore.type=local" \
+  --vol-context "backingStore.local.path=$BACKING" \
+  --vol-context "encrypted=true" \
+  --vol-context "encryption.cipher=aes-cbc-essiv:sha256" \
+  --vol-context "encryption.keySize=256" \
+  "$VOL5"
+findmnt -no FSTYPE "$STAGE5" | grep -q '^ext4$' || { echo "cipher volume fs not ext4"; exit 1; }
+CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE5" "$VOL5"
+cryptsetup luksDump "$BACKING/$VOL5.img" | grep -Eq 'cipher:[[:space:]]+aes-cbc-essiv:sha256' \
+  || { echo "LUKS header does not record aes-cbc-essiv:sha256"; exit 1; }
+csc controller del "$VOL5"
+
 echo "::: orphan crypt mapping is reclaimed on plugin restart"
 ORPHAN4=$(losetup --find --show "$IMG4")
 printf %s "$KEY2" | DM_DISABLE_UDEV=1 cryptsetup open --key-file=- "$ORPHAN4" fbcrypt-smokeorphan

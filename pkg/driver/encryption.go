@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	osexec "os/exec"
+	"regexp"
+	"strconv"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,6 +30,56 @@ func encryptedFromParams(params map[string]string) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("%s=%q: must be \"true\" or \"false\"", ParamEncrypted, v)
+	}
+}
+
+// ParamCipher and ParamKeySize choose what luksFormat is given on first
+// stage; both are optional and copied into volume context only when set.
+const (
+	ParamCipher  = "encryption.cipher"
+	ParamKeySize = "encryption.keySize"
+)
+
+// cipherPattern admits every cryptsetup cipher spec, including kernel
+// crypto API ones like capi:xts(aes)-plain64, while keeping the value a
+// single argument that can't be mistaken for a flag.
+var cipherPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9:,()_-]*$`)
+
+// formatFromParams reads the cipher parameters from StorageClass
+// parameters or volume context. Absent parameters mean DefaultFormat; a
+// cipher without a key size leaves the key size to cryptsetup.
+func formatFromParams(params map[string]string, encrypted bool) (crypt.Format, error) {
+	cipher, keySize := params[ParamCipher], params[ParamKeySize]
+	if cipher == "" && keySize == "" {
+		return crypt.DefaultFormat, nil
+	}
+	if !encrypted {
+		return crypt.Format{}, fmt.Errorf("%s and %s need %s=\"true\"", ParamCipher, ParamKeySize, ParamEncrypted)
+	}
+	f := crypt.DefaultFormat
+	if cipher != "" {
+		if !cipherPattern.MatchString(cipher) {
+			return crypt.Format{}, fmt.Errorf("%s=%q is not a cryptsetup cipher spec", ParamCipher, cipher)
+		}
+		f = crypt.Format{Cipher: cipher}
+	}
+	if keySize != "" {
+		n, err := strconv.Atoi(keySize)
+		if err != nil || n <= 0 || n%8 != 0 {
+			return crypt.Format{}, fmt.Errorf("%s=%q: must be a positive number of bits divisible by 8", ParamKeySize, keySize)
+		}
+		f.KeySize = n
+	}
+	return f, nil
+}
+
+// formatToVolumeContext copies only the cipher parameters that are set, so
+// volumes on the default format carry nothing new.
+func formatToVolumeContext(vc, params map[string]string) {
+	for _, k := range []string{ParamCipher, ParamKeySize} {
+		if v := params[k]; v != "" {
+			vc[k] = v
+		}
 	}
 }
 

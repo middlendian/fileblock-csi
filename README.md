@@ -207,6 +207,8 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
 | `backingStore.nfs.subDir`     | no (type=nfs)     | Subdirectory of the export to hold this store's `.img` files; supports `${pvc.namespace}`, `${pvc.name}`, `${pv.name}` |
 | `backingStore.local.path`     | when type=local   | Absolute path on every node that can read & write the store   |
 | `encrypted`                   | no                | `"true"` enables LUKS2 encryption; see [Encryption](#encryption) |
+| `encryption.cipher`           | no (encrypted)    | cryptsetup `--cipher` spec; default `aes-xts-plain64`; see [Choosing a cipher](#choosing-a-cipher) |
+| `encryption.keySize`          | no (encrypted)    | Key size in bits (cryptsetup `--key-size`); default `512` with the default cipher |
 | `csi.storage.k8s.io/node-stage-secret-name` | when `encrypted=true` | Name of the Secret holding `key` (and optional `previousKey`) |
 | `csi.storage.k8s.io/node-stage-secret-namespace` | when `encrypted=true` | Namespace of that Secret |
 
@@ -315,6 +317,35 @@ capacity, so encrypted volumes must be at least 32 MiB — `CreateVolume`
 rejects smaller requests with `OutOfRange`. Nodes need the `dm_crypt`
 kernel module loaded. Existing plaintext volumes are not converted;
 encryption applies only to volumes created with `encrypted: "true"`.
+
+### Choosing a cipher
+
+The default, `aes-xts-plain64` with a 512-bit key (AES-256), is right
+wherever the CPU has AES instructions (x86 AES-NI, ARMv8 Crypto
+Extensions). On CPUs without them — many ARM SoCs, older Raspberry Pi
+models — AES is slow in software, and Adiantum is the kernel's answer:
+
+```yaml
+parameters:
+  encrypted: "true"
+  encryption.cipher: xchacha12,aes-adiantum-plain64
+```
+
+`encryption.cipher` takes any cipher spec `cryptsetup luksFormat
+--cipher` accepts (`serpent-xts-plain64`, `twofish-xts-plain64`,
+`aes-cbc-essiv:sha256`, `capi:…` kernel crypto API specs, …), and
+`encryption.keySize` sets `--key-size` in bits. Leave `keySize` unset
+and cryptsetup picks its default for the cipher — correct for Adiantum
+(256), but for any `*-xts` cipher it can mean half the key strength
+(XTS splits the key in two), so set `keySize: "512"` with XTS.
+
+`cryptsetup benchmark` on a node shows what its kernel supports and how
+fast each option is. The controller only checks the spec's syntax; a
+cipher the node's kernel lacks fails the first `NodeStageVolume` with
+`Internal` and cryptsetup's error, leaving the image blank — fix the
+StorageClass and recreate the PVC. The cipher is fixed when a volume is
+first formatted; it is recorded in the LUKS header, so changing the
+StorageClass later never affects existing volumes.
 
 ## Limitations
 

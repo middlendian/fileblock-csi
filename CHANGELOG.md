@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its key slot on its next stage. The runtime image now includes
   `cryptsetup-bin`; nodes need the `dm_crypt` kernel module. No RBAC
   change — the kubelet reads the Secret.
+- `encryption.cipher` and `encryption.keySize` StorageClass parameters
+  choose the LUKS2 cipher and key size for newly formatted encrypted
+  volumes, for nodes without AES instructions (e.g. Adiantum:
+  `xchacha12,aes-adiantum-plain64`) or other requirements. Any
+  `cryptsetup --cipher` spec is accepted. Unset, volumes keep the
+  `aes-xts-plain64` / 512-bit default; existing volumes are unaffected.
 
 ### Changed
 

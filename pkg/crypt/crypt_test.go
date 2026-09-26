@@ -149,7 +149,7 @@ func TestPrepareFormatsBlankDevice(t *testing.T) {
 	f := &fakeLUKS{}
 	c := newFake(t, f)
 	dev := blankDev(t)
-	path, outcome, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA})
+	path, outcome, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA}, DefaultFormat)
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestPrepareRefusesNonBlankNonLUKS(t *testing.T) {
 	fh, _ := os.OpenFile(dev, os.O_WRONLY, 0)
 	_, _ = fh.WriteAt([]byte{0x53}, 1080) // where an ext4 magic would sit
 	_ = fh.Close()
-	_, _, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA})
+	_, _, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA}, DefaultFormat)
 	if !errors.Is(err, ErrNotBlank) {
 		t.Fatalf("err = %v, want ErrNotBlank", err)
 	}
@@ -199,7 +199,7 @@ func TestPrepareUnformattedLabelRunsMkfs(t *testing.T) {
 	c := newFake(t, f)
 	// A crash-recovered mkfs finishes formatting but never ran luksFormat
 	// this stage, so it is not reported as OutcomeFormatted.
-	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}); err != nil {
+	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}, DefaultFormat); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	} else if outcome != OutcomeNone {
 		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNone)
@@ -212,7 +212,7 @@ func TestPrepareUnformattedLabelRunsMkfs(t *testing.T) {
 func TestPrepareFormattedSkipsMkfs(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA}}
 	c := newFake(t, f)
-	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}); err != nil {
+	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}, DefaultFormat); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	} else if outcome != OutcomeNone {
 		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNone)
@@ -225,7 +225,7 @@ func TestPrepareFormattedSkipsMkfs(t *testing.T) {
 func TestPrepareRotatesPreviousToCurrent(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA}}
 	c := newFake(t, f)
-	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA})
+	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA}, DefaultFormat)
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestPrepareRotatesPreviousToCurrent(t *testing.T) {
 func TestPrepareFinishesInterruptedRotation(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA, keyB}}
 	c := newFake(t, f)
-	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA})
+	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA}, DefaultFormat)
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestPrepareFinishesInterruptedRotation(t *testing.T) {
 func TestPrepareStalePreviousIsIgnored(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyB}}
 	c := newFake(t, f)
-	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA})
+	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA}, DefaultFormat)
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestPrepareWrongKey(t *testing.T) {
 	for _, k := range []Keys{{Current: keyB, Previous: keyA}, {Current: keyB}} {
 		f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyC}}
 		c := newFake(t, f)
-		_, _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", k)
+		_, _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", k, DefaultFormat)
 		if !errors.Is(err, ErrWrongKey) {
 			t.Fatalf("err = %v, want ErrWrongKey", err)
 		}
@@ -299,7 +299,7 @@ func TestPrepareWrongKey(t *testing.T) {
 func TestPreparePreviousEqualsCurrent(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA}}
 	c := newFake(t, f)
-	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA, Previous: keyA}); err != nil {
+	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA, Previous: keyA}, DefaultFormat); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	} else if outcome != OutcomeNone {
 		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNone)
@@ -331,7 +331,7 @@ func TestPrepareEnsureFilesystemFailureJoinsCloseError(t *testing.T) {
 		return r.CmdFunc(ctx, fbexec.Cmd{Name: name, Args: args})
 	}
 	c := NewAt(r, t.TempDir())
-	_, _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA})
+	_, _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}, DefaultFormat)
 	if !errors.Is(err, mkfsErr) || !errors.Is(err, closeErr) {
 		t.Fatalf("err = %v, want it to join both the mkfs and the close error", err)
 	}
@@ -356,5 +356,31 @@ func TestMapperName(t *testing.T) {
 	}
 	if MapperPath(a) != "/dev/mapper/"+a {
 		t.Fatalf("MapperPath = %q", MapperPath(a))
+	}
+}
+
+// The format only shapes luksFormat: the cipher goes through verbatim, and
+// --key-size is omitted when unset so cryptsetup picks its per-cipher
+// default (right for Adiantum).
+func TestPrepareFormatOptions(t *testing.T) {
+	for _, tc := range []struct {
+		f    Format
+		want []string
+	}{
+		{Format{Cipher: "xchacha12,aes-adiantum-plain64"}, []string{"--cipher", "xchacha12,aes-adiantum-plain64"}},
+		{Format{Cipher: "serpent-xts-plain64", KeySize: 256}, []string{"--cipher", "serpent-xts-plain64", "--key-size", "256"}},
+	} {
+		f := &fakeLUKS{}
+		c := newFake(t, f)
+		dev := blankDev(t)
+		if _, _, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA}, tc.f); err != nil {
+			t.Fatalf("%+v: Prepare: %v", tc.f, err)
+		}
+		want := append([]string{"luksFormat", "--batch-mode", "--type", "luks2"}, tc.want...)
+		want = append(want, "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+			"--label", "fileblock-unformatted", "--key-file", "/dev/fd/3", dev)
+		if got := f.argvFor("luksFormat"); !slices.Equal(got, want) {
+			t.Fatalf("%+v: luksFormat argv = %v, want %v", tc.f, got, want)
+		}
 	}
 }

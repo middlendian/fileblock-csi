@@ -740,3 +740,35 @@ func TestCreateVolumeEncryptedTooSmallIsOutOfRange(t *testing.T) {
 		t.Fatalf("got %v, want OutOfRange", err)
 	}
 }
+
+func TestCreateVolumeEncryptedCipherInVolumeContext(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamEncrypted] = "true"
+	params[ParamCipher] = "xchacha12,aes-adiantum-plain64"
+	params[ParamKeySize] = "256"
+	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "adiantum", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	vc := resp.Volume.VolumeContext
+	if vc[ParamCipher] != "xchacha12,aes-adiantum-plain64" || vc[ParamKeySize] != "256" {
+		t.Fatalf("volume context = %v", vc)
+	}
+}
+
+func TestCreateVolumeCipherWithoutEncryptedIsInvalid(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamCipher] = "aes-xts-plain64"
+	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "x", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+}

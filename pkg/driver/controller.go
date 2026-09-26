@@ -77,6 +77,9 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
+	if _, err := formatFromParams(req.GetParameters(), encrypted); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
 	mountedPath, err := c.registry.Get(ctx, cfg)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "mount backing store: %v", err)
@@ -117,6 +120,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	vc := cfg.ToVolumeContext()
 	if encrypted {
 		vc[ParamEncrypted] = "true"
+		formatToVolumeContext(vc, req.GetParameters())
 	}
 	vol := &csi.Volume{
 		VolumeId:      meta.VolumeID,

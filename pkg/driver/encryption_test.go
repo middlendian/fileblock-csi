@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 )
 
@@ -71,5 +72,64 @@ func TestCryptStatusOtherInternalIsNeutral(t *testing.T) {
 	}
 	if strings.Contains(got.Error(), "dm_crypt kernel module") {
 		t.Fatalf("expected a neutral message for a non-missing-binary failure, got: %v", got)
+	}
+}
+
+func TestFormatFromParams(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+		want   crypt.Format
+	}{
+		{"default", map[string]string{}, crypt.DefaultFormat},
+		{"cipher only", map[string]string{ParamCipher: "xchacha12,aes-adiantum-plain64"},
+			crypt.Format{Cipher: "xchacha12,aes-adiantum-plain64"}},
+		{"cipher and key size", map[string]string{ParamCipher: "serpent-xts-plain64", ParamKeySize: "512"},
+			crypt.Format{Cipher: "serpent-xts-plain64", KeySize: 512}},
+		{"key size only", map[string]string{ParamKeySize: "256"},
+			crypt.Format{Cipher: crypt.DefaultFormat.Cipher, KeySize: 256}},
+		{"kernel crypto API spec", map[string]string{ParamCipher: "capi:xts(aes)-plain64"},
+			crypt.Format{Cipher: "capi:xts(aes)-plain64"}},
+	} {
+		got, err := formatFromParams(tc.params, true)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %+v, %v; want %+v", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+func TestFormatFromParamsRejects(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		params    map[string]string
+		encrypted bool
+	}{
+		{"cipher without encrypted", map[string]string{ParamCipher: "aes-xts-plain64"}, false},
+		{"key size without encrypted", map[string]string{ParamKeySize: "512"}, false},
+		{"cipher with a space", map[string]string{ParamCipher: "aes-xts-plain64 --foo"}, true},
+		{"cipher starting with a dash", map[string]string{ParamCipher: "-aes"}, true},
+		{"uppercase cipher", map[string]string{ParamCipher: "AES-XTS-PLAIN64"}, true},
+		{"key size not a number", map[string]string{ParamKeySize: "big"}, true},
+		{"key size zero", map[string]string{ParamKeySize: "0"}, true},
+		{"key size negative", map[string]string{ParamKeySize: "-8"}, true},
+		{"key size not bytes", map[string]string{ParamKeySize: "12"}, true},
+	} {
+		if _, err := formatFromParams(tc.params, tc.encrypted); err == nil {
+			t.Errorf("%s: expected an error", tc.name)
+		}
+	}
+}
+
+// Volumes created before the parameters existed have neither key in their
+// volume context and must keep formatting exactly as before.
+func TestFormatToVolumeContextOmitsDefaults(t *testing.T) {
+	vc := map[string]string{}
+	formatToVolumeContext(vc, map[string]string{})
+	if len(vc) != 0 {
+		t.Fatalf("defaults leaked into volume context: %v", vc)
+	}
+	formatToVolumeContext(vc, map[string]string{ParamCipher: "serpent-xts-plain64", ParamKeySize: "512"})
+	if vc[ParamCipher] != "serpent-xts-plain64" || vc[ParamKeySize] != "512" {
+		t.Fatalf("volume context = %v", vc)
 	}
 }
