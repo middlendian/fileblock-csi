@@ -375,7 +375,7 @@ func TestDeleteVolume(t *testing.T) {
 func TestCreateDeleteVolumeSubDirRoundTrip(t *testing.T) {
 	c, _ := newTestServer(t)
 	params := nfsParams()
-	params[store.ParamNFSSubDir] = "${pvc.metadata.namespace}/fileblock"
+	params[store.ParamNFSSubDir] = "${pvc.namespace}/fileblock"
 	params["csi.storage.k8s.io/pvc/namespace"] = "team-a"
 
 	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{

@@ -156,7 +156,7 @@ func TestConfigFromParamsSubDirLiteral(t *testing.T) {
 
 func TestConfigFromParamsSubDirSubstitutesNamespace(t *testing.T) {
 	c, err := ConfigFromParams(nfsParams(map[string]string{
-		"backingStore.nfs.subDir":          "${pvc.metadata.namespace}/fileblock",
+		"backingStore.nfs.subDir":          "${pvc.namespace}/fileblock",
 		"csi.storage.k8s.io/pvc/namespace": "team-a",
 	}))
 	if err != nil {
@@ -169,7 +169,7 @@ func TestConfigFromParamsSubDirSubstitutesNamespace(t *testing.T) {
 
 func TestConfigFromParamsSubDirSubstitutesPVCAndPVName(t *testing.T) {
 	c, err := ConfigFromParams(nfsParams(map[string]string{
-		"backingStore.nfs.subDir":     "${pvc.metadata.name}/${pv.metadata.name}",
+		"backingStore.nfs.subDir":     "${pvc.name}/${pv.name}",
 		"csi.storage.k8s.io/pvc/name": "my-claim",
 		"csi.storage.k8s.io/pv/name":  "pv-123",
 	}))
@@ -187,14 +187,14 @@ func TestConfigFromParamsSubDirSubstitutesPVCAndPVName(t *testing.T) {
 // the parameter exists to prevent, so it is fatal.
 func TestConfigFromParamsSubDirUnresolvedTokenIsFatal(t *testing.T) {
 	_, err := ConfigFromParams(nfsParams(map[string]string{
-		"backingStore.nfs.subDir": "${pvc.metadata.namespace}/fileblock",
+		"backingStore.nfs.subDir": "${pvc.namespace}/fileblock",
 	}))
 	if err == nil {
 		t.Fatal("expected an error for an unresolved token")
 	}
 	for _, want := range []string{
 		"backingStore.nfs.subDir",
-		"${pvc.metadata.namespace}",
+		"${pvc.namespace}",
 		"--extra-create-metadata=true",
 	} {
 		if !strings.Contains(err.Error(), want) {
@@ -203,16 +203,25 @@ func TestConfigFromParamsSubDirUnresolvedTokenIsFatal(t *testing.T) {
 	}
 }
 
-func TestConfigFromParamsSubDirMistypedTokenIsFatal(t *testing.T) {
-	_, err := ConfigFromParams(nfsParams(map[string]string{
-		"backingStore.nfs.subDir":          "${pvc.namespace}/fileblock",
-		"csi.storage.k8s.io/pvc/namespace": "team-a",
-	}))
-	if err == nil {
-		t.Fatal("expected an error for the mistyped ${pvc.namespace} token")
-	}
-	if !strings.Contains(err.Error(), "${pvc.namespace}") {
-		t.Errorf("error %q should quote the unresolved token", err)
+// The v0.4.0 spelling is gone, not aliased. It must fail loudly and the
+// message must show the operator the spelling that replaced it.
+func TestConfigFromParamsSubDirOldSpellingIsFatal(t *testing.T) {
+	for _, old := range []string{"${pvc.metadata.namespace}", "${pvc.metadata.name}", "${pv.metadata.name}"} {
+		_, err := ConfigFromParams(nfsParams(map[string]string{
+			"backingStore.nfs.subDir":          old + "/fileblock",
+			"csi.storage.k8s.io/pvc/namespace": "team-a",
+			"csi.storage.k8s.io/pvc/name":      "my-claim",
+			"csi.storage.k8s.io/pv/name":       "pv-123",
+		}))
+		if err == nil {
+			t.Fatalf("%s: expected an error for the old spelling", old)
+		}
+		if !strings.Contains(err.Error(), old) {
+			t.Errorf("%s: error %q should quote the unresolved token", old, err)
+		}
+		if !strings.Contains(err.Error(), "${pvc.namespace}") {
+			t.Errorf("%s: error %q should list the supported tokens", old, err)
+		}
 	}
 }
 
