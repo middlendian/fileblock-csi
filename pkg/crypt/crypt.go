@@ -39,6 +39,18 @@ var (
 // Keys are the passphrases from a volume's node-stage secret.
 type Keys struct{ Current, Previous []byte }
 
+// Outcome reports what Prepare did to the header this call, so callers can
+// log rotation and format progress without Prepare taking a logger.
+// OutcomeNone means the header was already in its target state.
+type Outcome string
+
+const (
+	OutcomeNone                        Outcome = ""
+	OutcomeFormatted                   Outcome = "formatted"
+	OutcomeRotated                     Outcome = "rotated"
+	OutcomeFinishedInterruptedRotation Outcome = "finished-interrupted-rotation"
+)
+
 // Crypt runs cryptsetup and reads dm state from sysfs.
 type Crypt struct {
 	exec    fbexec.Runner
@@ -80,42 +92,50 @@ func exitCode(err error) int {
 
 // Prepare formats dev on first use, moves its key slot to k.Current, opens
 // it as name, and makes the filesystem if it has none yet. It returns the
-// mapper path. Every step converges if a previous attempt crashed midway.
-func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys) (string, error) {
+// mapper path and what it did to the header. Every step converges if a
+// previous attempt crashed midway.
+func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys) (string, Outcome, error) {
 	luks, err := c.isLuks(ctx, dev)
 	if err != nil {
-		return "", err
+		return "", OutcomeNone, err
 	}
+	outcome := OutcomeNone
 	if !luks {
 		// Only a freshly truncated image is formatted; a header we can't
 		// read is never overwritten.
 		blank, err := isBlank(dev)
 		if err != nil {
-			return "", err
+			return "", OutcomeNone, err
 		}
 		if !blank {
-			return "", fmt.Errorf("%s: %w", dev, ErrNotBlank)
+			return "", OutcomeNone, fmt.Errorf("%s: %w", dev, ErrNotBlank)
 		}
 		if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, "luksFormat", "--batch-mode",
 			"--type", "luks2", "--cipher", "aes-xts-plain64", "--key-size", "512",
 			"--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
 			"--label", labelUnformatted, "--key-file", fbexec.SecretFD(0), dev); err != nil {
-			return "", fmt.Errorf("luksFormat %s: %w", dev, err)
+			return "", OutcomeNone, fmt.Errorf("luksFormat %s: %w", dev, err)
 		}
+		outcome = OutcomeFormatted
 	}
-	if err := c.rotate(ctx, dev, k); err != nil {
-		return "", err
+	// rotate is a no-op right after a fresh format (the only slot is
+	// already k.Current), so a format outcome is never overwritten.
+	rotated, err := c.rotate(ctx, dev, k)
+	if err != nil {
+		return "", OutcomeNone, err
+	}
+	if outcome == OutcomeNone {
+		outcome = rotated
 	}
 	if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, "open", "--type", "luks2",
 		"--disable-keyring", "--key-file", fbexec.SecretFD(0), dev, name); err != nil {
-		return "", fmt.Errorf("open %s: %w", dev, err)
+		return "", OutcomeNone, fmt.Errorf("open %s: %w", dev, err)
 	}
 	path := MapperPath(name)
 	if err := c.ensureFilesystem(ctx, dev, path); err != nil {
-		_ = c.Close(ctx, name)
-		return "", err
+		return "", OutcomeNone, errors.Join(err, c.Close(ctx, name))
 	}
-	return path, nil
+	return path, outcome, nil
 }
 
 // The label, not blkid, says whether mkfs is still owed: a real ext4 with
@@ -149,39 +169,44 @@ func luksLabel(dump string) string {
 // rotate leaves exactly the slot k.Current opens. Add-then-remove, so a
 // crash between the two leaves both slots and the next call removes the
 // old one.
-func (c *Crypt) rotate(ctx context.Context, dev string, k Keys) error {
+func (c *Crypt) rotate(ctx context.Context, dev string, k Keys) (Outcome, error) {
 	cur, err := c.opens(ctx, dev, k.Current)
 	if err != nil {
-		return err
+		return OutcomeNone, err
 	}
 	if len(k.Previous) == 0 || bytes.Equal(k.Previous, k.Current) {
 		if !cur {
-			return fmt.Errorf("%s: %w", dev, ErrWrongKey)
+			return OutcomeNone, fmt.Errorf("%s: %w", dev, ErrWrongKey)
 		}
-		return nil
+		return OutcomeNone, nil
 	}
 	prev, err := c.opens(ctx, dev, k.Previous)
 	if err != nil {
-		return err
+		return OutcomeNone, err
 	}
 	if !cur && !prev {
-		return fmt.Errorf("%s: %w", dev, ErrWrongKey)
+		return OutcomeNone, fmt.Errorf("%s: %w", dev, ErrWrongKey)
 	}
 	if !prev {
-		return nil
+		return OutcomeNone, nil
 	}
 	if !cur {
 		if _, err := c.cryptsetup(ctx, [][]byte{k.Previous, k.Current}, "luksAddKey", "--batch-mode",
 			"--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
 			"--key-file", fbexec.SecretFD(0), dev, fbexec.SecretFD(1)); err != nil {
-			return fmt.Errorf("luksAddKey %s: %w", dev, err)
+			return OutcomeNone, fmt.Errorf("luksAddKey %s: %w", dev, err)
 		}
 	}
 	if _, err := c.cryptsetup(ctx, [][]byte{k.Previous}, "luksRemoveKey", "--batch-mode",
 		"--key-file", fbexec.SecretFD(0), dev); err != nil {
-		return fmt.Errorf("luksRemoveKey %s: %w", dev, err)
+		return OutcomeNone, fmt.Errorf("luksRemoveKey %s: %w", dev, err)
 	}
-	return nil
+	if cur {
+		// Both slots were already open: this call only finished a
+		// rotation that crashed between add and remove.
+		return OutcomeFinishedInterruptedRotation, nil
+	}
+	return OutcomeRotated, nil
 }
 
 // opens reports whether key unlocks a slot. cryptsetup exits 2 (EPERM)

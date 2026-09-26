@@ -557,6 +557,30 @@ func TestNodeStageEncryptedIdempotentRetrySucceedsWithMappingOpen(t *testing.T) 
 	}
 }
 
+// Review finding 3: rotation progress must be visible in the logs, not
+// just inferable from cryptsetup calls an operator can't see.
+func TestNodeStageEncryptedLogsRotationOutcome(t *testing.T) {
+	e := newEncStage(t, true, func(c fbexec.Cmd) (string, error) {
+		switch c.Args[0] {
+		case "luksDump":
+			return "Label:          fileblock\n", nil
+		case "open":
+			if slices.Contains(c.Args, "--test-passphrase") && bytes.Equal(c.Secrets[0], []byte(testKey)) {
+				return "", &fbexec.Error{Cmd: "cryptsetup", ExitCode: 2}
+			}
+			return "", nil
+		}
+		return "", nil
+	})
+	secrets := map[string]string{"key": testKey, "previousKey": "prev-" + testKey}
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(secrets)); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if !strings.Contains(e.log.String(), "outcome=rotated") {
+		t.Fatalf("expected the rotation outcome logged, got: %s", e.log.String())
+	}
+}
+
 func TestNodeStageEncryptedMissingKeyTouchesNothing(t *testing.T) {
 	e := newEncStage(t, true, nil)
 	_, err := e.n.NodeStageVolume(context.Background(), e.req(nil))

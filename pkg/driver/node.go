@@ -184,10 +184,14 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 			detachOnFail()
 			return nil, status.Errorf(codes.Internal, "set capacity: %v", err)
 		}
-		cryptDev, err = n.luks.Prepare(ctx, dev, mapper, keys)
+		var outcome crypt.Outcome
+		cryptDev, outcome, err = n.luks.Prepare(ctx, dev, mapper, keys)
 		if err != nil {
 			detachOnFail()
 			return nil, cryptStatus(err)
+		}
+		if outcome != crypt.OutcomeNone {
+			n.log.Info("luks", "volumeID", volumeID, "outcome", string(outcome))
 		}
 		target = cryptDev
 		detachOnFail = func() {

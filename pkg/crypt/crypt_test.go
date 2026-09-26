@@ -149,12 +149,15 @@ func TestPrepareFormatsBlankDevice(t *testing.T) {
 	f := &fakeLUKS{}
 	c := newFake(t, f)
 	dev := blankDev(t)
-	path, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA})
+	path, outcome, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
 	if path != "/dev/mapper/fbcrypt-x" {
 		t.Fatalf("path = %q", path)
+	}
+	if outcome != OutcomeFormatted {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeFormatted)
 	}
 	if !f.opened || f.label != "fileblock" || len(f.slots) != 1 || !f.has(keyA) {
 		t.Fatalf("state after first stage: %+v", f)
@@ -180,7 +183,7 @@ func TestPrepareRefusesNonBlankNonLUKS(t *testing.T) {
 	fh, _ := os.OpenFile(dev, os.O_WRONLY, 0)
 	_, _ = fh.WriteAt([]byte{0x53}, 1080) // where an ext4 magic would sit
 	_ = fh.Close()
-	_, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA})
+	_, _, err := c.Prepare(context.Background(), dev, "fbcrypt-x", Keys{Current: keyA})
 	if !errors.Is(err, ErrNotBlank) {
 		t.Fatalf("err = %v, want ErrNotBlank", err)
 	}
@@ -194,8 +197,12 @@ func TestPrepareRefusesNonBlankNonLUKS(t *testing.T) {
 func TestPrepareUnformattedLabelRunsMkfs(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock-unformatted", slots: [][]byte{keyA}}
 	c := newFake(t, f)
-	if _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}); err != nil {
+	// A crash-recovered mkfs finishes formatting but never ran luksFormat
+	// this stage, so it is not reported as OutcomeFormatted.
+	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}); err != nil {
 		t.Fatalf("Prepare: %v", err)
+	} else if outcome != OutcomeNone {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNone)
 	}
 	if !slices.Contains(f.subs, "mkfs") || f.label != "fileblock" {
 		t.Fatalf("subs=%v label=%q", f.subs, f.label)
@@ -205,8 +212,10 @@ func TestPrepareUnformattedLabelRunsMkfs(t *testing.T) {
 func TestPrepareFormattedSkipsMkfs(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA}}
 	c := newFake(t, f)
-	if _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}); err != nil {
+	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA}); err != nil {
 		t.Fatalf("Prepare: %v", err)
+	} else if outcome != OutcomeNone {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNone)
 	}
 	if slices.Contains(f.subs, "mkfs") || slices.Contains(f.subs, "luksFormat") {
 		t.Fatalf("subs = %v", f.subs)
@@ -216,8 +225,12 @@ func TestPrepareFormattedSkipsMkfs(t *testing.T) {
 func TestPrepareRotatesPreviousToCurrent(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA}}
 	c := newFake(t, f)
-	if _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA}); err != nil {
+	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA})
+	if err != nil {
 		t.Fatalf("Prepare: %v", err)
+	}
+	if outcome != OutcomeRotated {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeRotated)
 	}
 	if len(f.slots) != 1 || !f.has(keyB) {
 		t.Fatalf("slots after rotation: %q", f.slots)
@@ -238,8 +251,12 @@ func TestPrepareRotatesPreviousToCurrent(t *testing.T) {
 func TestPrepareFinishesInterruptedRotation(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA, keyB}}
 	c := newFake(t, f)
-	if _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA}); err != nil {
+	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA})
+	if err != nil {
 		t.Fatalf("Prepare: %v", err)
+	}
+	if outcome != OutcomeFinishedInterruptedRotation {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeFinishedInterruptedRotation)
 	}
 	if len(f.slots) != 1 || !f.has(keyB) || slices.Contains(f.subs, "luksAddKey") {
 		t.Fatalf("slots=%q subs=%v", f.slots, f.subs)
@@ -250,8 +267,12 @@ func TestPrepareFinishesInterruptedRotation(t *testing.T) {
 func TestPrepareStalePreviousIsIgnored(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyB}}
 	c := newFake(t, f)
-	if _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA}); err != nil {
+	_, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyB, Previous: keyA})
+	if err != nil {
 		t.Fatalf("Prepare: %v", err)
+	}
+	if outcome != OutcomeNone {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNone)
 	}
 	if len(f.slots) != 1 || !f.has(keyB) {
 		t.Fatalf("slots = %q", f.slots)
@@ -265,7 +286,7 @@ func TestPrepareWrongKey(t *testing.T) {
 	for _, k := range []Keys{{Current: keyB, Previous: keyA}, {Current: keyB}} {
 		f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyC}}
 		c := newFake(t, f)
-		_, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", k)
+		_, _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", k)
 		if !errors.Is(err, ErrWrongKey) {
 			t.Fatalf("err = %v, want ErrWrongKey", err)
 		}
@@ -278,11 +299,41 @@ func TestPrepareWrongKey(t *testing.T) {
 func TestPreparePreviousEqualsCurrent(t *testing.T) {
 	f := &fakeLUKS{luks: true, label: "fileblock", slots: [][]byte{keyA}}
 	c := newFake(t, f)
-	if _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA, Previous: keyA}); err != nil {
+	if _, outcome, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA, Previous: keyA}); err != nil {
 		t.Fatalf("Prepare: %v", err)
+	} else if outcome != OutcomeNone {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNone)
 	}
 	if len(f.slots) != 1 || slices.Contains(f.subs, "luksRemoveKey") {
 		t.Fatalf("slots=%q subs=%v", f.slots, f.subs)
+	}
+}
+
+// Review finding 5: a Close error after a failed mkfs must not be
+// discarded — the operator needs to know the mapping may still be open.
+func TestPrepareEnsureFilesystemFailureJoinsCloseError(t *testing.T) {
+	f := &fakeLUKS{luks: true, label: "fileblock-unformatted", slots: [][]byte{keyA}}
+	f.t = t
+	mkfsErr := errors.New("mkfs boom")
+	closeErr := errors.New("close boom")
+	r := exectest.New()
+	r.CmdFunc = func(ctx context.Context, c fbexec.Cmd) (string, error) {
+		switch {
+		case c.Name == "mkfs.ext4":
+			return "", mkfsErr
+		case c.Name == "cryptsetup" && c.Args[0] == "close":
+			return "", closeErr
+		default:
+			return f.run(ctx, c)
+		}
+	}
+	r.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		return r.CmdFunc(ctx, fbexec.Cmd{Name: name, Args: args})
+	}
+	c := NewAt(r, t.TempDir())
+	_, _, err := c.Prepare(context.Background(), "/dev/loop9", "fbcrypt-x", Keys{Current: keyA})
+	if !errors.Is(err, mkfsErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("err = %v, want it to join both the mkfs and the close error", err)
 	}
 }
 
