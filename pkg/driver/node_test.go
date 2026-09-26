@@ -592,6 +592,18 @@ func TestNodeStageEncryptedMissingKeyTouchesNothing(t *testing.T) {
 	}
 }
 
+func TestNodeStageEncryptedBadCipherTouchesNothing(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	e.vc[ParamCipher] = "aes xts"
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey}))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 {
+		t.Fatal("attached a loop for an unusable cipher")
+	}
+}
+
 func TestNodeStageEncryptedAlreadyOpenRefusedBeforeAttach(t *testing.T) {
 	e := newEncStage(t, true, nil)
 	d := filepath.Join(e.sysRoot, "block", "dm-0")

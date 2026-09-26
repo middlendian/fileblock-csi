@@ -106,9 +106,13 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 	encrypted := req.GetVolumeContext()[ParamEncrypted] == "true"
 	var keys crypt.Keys
+	var format crypt.Format
 	if encrypted {
 		if keys, err = keysFromSecrets(req.GetSecrets()); err != nil {
 			return nil, err
+		}
+		if format, err = formatFromParams(req.GetVolumeContext(), true); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 		}
 	} else if _, ok := req.GetSecrets()[secretKey]; ok {
 		// A key in the stage secret does nothing for a plaintext volume;
@@ -190,7 +194,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 			return nil, status.Errorf(codes.Internal, "set capacity: %v", err)
 		}
 		var outcome crypt.Outcome
-		cryptDev, outcome, err = n.luks.Prepare(ctx, dev, mapper, keys)
+		cryptDev, outcome, err = n.luks.Prepare(ctx, dev, mapper, keys, format)
 		if err != nil {
 			detachOnFail()
 			return nil, cryptStatus(err)

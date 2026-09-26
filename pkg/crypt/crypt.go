@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
@@ -27,6 +28,11 @@ const (
 	labelFormatted   = "fileblock"
 	blankCheckBytes  = 16 << 20 // the LUKS2 header area
 	pbkdfIterations  = "1000"
+	// 4 KiB sectors mean one cipher operation per ext4 block instead of
+	// eight. Pinned rather than left to cryptsetup, which picks it only
+	// when the device reports 4 KiB physical sectors; image sizes are
+	// rounded to match (image.SizeAlign).
+	sectorSize = "4096"
 )
 
 var (
@@ -35,6 +41,17 @@ var (
 	// ErrNotBlank means the device is neither LUKS nor a fresh image.
 	ErrNotBlank = errors.New("not a LUKS volume and not blank; refusing to format")
 )
+
+// Format is what luksFormat is told about the cipher. It only matters on
+// first stage: afterwards the LUKS header records it, and opening reads it
+// back from there.
+type Format struct {
+	Cipher  string
+	KeySize int // bits
+}
+
+// DefaultFormat is AES-XTS with a 512-bit key (AES-256).
+var DefaultFormat = Format{Cipher: "aes-xts-plain64", KeySize: 512}
 
 // Keys are the passphrases from a volume's node-stage secret.
 type Keys struct{ Current, Previous []byte }
@@ -94,7 +111,7 @@ func exitCode(err error) int {
 // it as name, and makes the filesystem if it has none yet. It returns the
 // mapper path and what it did to the header. Every step converges if a
 // previous attempt crashed midway.
-func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys) (string, Outcome, error) {
+func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys, f Format) (string, Outcome, error) {
 	luks, err := c.isLuks(ctx, dev)
 	if err != nil {
 		return "", OutcomeNone, err
@@ -111,8 +128,8 @@ func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys) (string, 
 			return "", OutcomeNone, fmt.Errorf("%s: %w", dev, ErrNotBlank)
 		}
 		if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, "luksFormat", "--batch-mode",
-			"--type", "luks2", "--cipher", "aes-xts-plain64", "--key-size", "512",
-			"--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
+			"--type", "luks2", "--cipher", f.Cipher, "--key-size", strconv.Itoa(f.KeySize),
+			"--sector-size", sectorSize, "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
 			"--label", labelUnformatted, "--key-file", fbexec.SecretFD(0), dev); err != nil {
 			return "", OutcomeNone, fmt.Errorf("luksFormat %s: %w", dev, err)
 		}

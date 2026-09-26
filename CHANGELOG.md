@@ -18,8 +18,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its key slot on its next stage. The runtime image now includes
   `cryptsetup-bin`; nodes need the `dm_crypt` kernel module. No RBAC
   change — the kubelet reads the Secret.
+- `encryption.cipher` and `encryption.keySize` StorageClass parameters
+  choose the LUKS2 cipher and key size for newly formatted encrypted
+  volumes, for nodes without AES instructions (e.g. Adiantum:
+  `xchacha12,aes-adiantum-plain64` with `keySize: "256"`) or other
+  requirements. Any `cryptsetup --cipher` spec is accepted;
+  `encryption.keySize` is required with it, so no cryptsetup default
+  decides a volume's format. Unset, volumes keep the `aes-xts-plain64`
+  / 512-bit default; existing volumes are unaffected. Every node that
+  may stage a volume needs kernel support for its cipher.
+- Encrypted volumes are formatted with 4096-byte LUKS2 sectors for every
+  cipher, rather than whatever cryptsetup would detect (512 on loop
+  devices). Volumes already formatted keep the sector size recorded in
+  their header.
+
 
 ### Changed
+
+- Image sizes round up to a multiple of 4 KiB on create and expand, so a
+  PVC requesting `1G` gets 1,000,001,536 bytes. Needed for 4096-byte
+  encryption sectors; harmless for plaintext volumes, whose ext4 uses
+  4 KiB blocks. Existing images keep their size until their next expand,
+  and a retried create or expand with the original request still matches.
 
 - **Breaking:** `backingStore.nfs.subDir` tokens are now spelled
   `${pvc.namespace}`, `${pvc.name}` and `${pv.name}` — the spelling

@@ -58,6 +58,7 @@ mkdir -p "$BACKING" "$STATE" "$BIN" "$LOG"
 echo "::: building binaries"
 ( cd "$ROOT" && go build -o "$BIN/fileblock-controller" ./cmd/controller )
 ( cd "$ROOT" && go build -o "$BIN/fileblock-node" ./cmd/node )
+( cd "$ROOT" && go build -o "$BIN/csi-call" ./hack/csi-call )
 
 echo "::: starting controller"
 "$BIN/fileblock-controller" \
@@ -255,6 +256,8 @@ cmp -s <(head -c 16777216 "$IMG4") <(head -c 16777216 /dev/zero) \
   || { echo "controller wrote to an encrypted image"; exit 1; }
 stage_enc "key=$KEY1"
 cryptsetup isLuks "$IMG4" || { echo "image is not LUKS after first stage"; exit 1; }
+cryptsetup luksDump "$IMG4" | grep -Eq 'sector:[[:space:]]+4096' \
+  || { echo "LUKS data segment does not use 4096-byte sectors"; exit 1; }
 findmnt -no FSTYPE "$STAGE4" | grep -q '^ext4$' || { echo "encrypted fs not ext4"; exit 1; }
 CANARY="fileblock-smoke-canary-$(openssl rand -hex 8)"
 echo "$CANARY" >"$STAGE4/canary"
@@ -274,6 +277,48 @@ echo "::: wrong key is refused and leaves nothing attached"
 stage_enc "key=$(openssl rand -hex 32)" && { echo "stage with a wrong key succeeded"; exit 1; }
 losetup --noheadings --output BACK-FILE | grep -qF "$IMG4" \
   && { echo "loop left attached after wrong-key stage"; exit 1; }
+
+# name cipher keySize requestBytes imageBytes. Adiantum is the reason the
+# parameter exists; AES-CBC is a second, structurally different spec and
+# also requests an unaligned size (like a "1G" PVC), which must round up
+# to whole 4 KiB LUKS2 sectors. Driven by hack/csi-call, not csc: csc
+# splits key=val lists on commas, and Adiantum's spec has one.
+for spec in "cbc aes-cbc-essiv:sha256 256 100000001 100003840" \
+            "adiantum xchacha12,aes-adiantum-plain64 256 134217728 134217728"; do
+  read -r CNAME CIPHER CKEYSIZE CREQ CIMG <<<"$spec"
+  echo "::: configurable cipher: $CIPHER ($CKEYSIZE-bit key, $CREQ bytes requested)"
+  CREATE_OUT=$("$BIN/csi-call" -endpoint "unix://$CTL_SOCK" create \
+    -name "cipher-$CNAME" \
+    -bytes "$CREQ" \
+    -p "backingStore.type=local" \
+    -p "backingStore.local.path=$BACKING" \
+    -p "encrypted=true" \
+    -p "encryption.cipher=$CIPHER" \
+    -p "encryption.keySize=$CKEYSIZE")
+  printf '%s\n' "$CREATE_OUT" | grep -qxF "encryption.cipher=$CIPHER" \
+    || { echo "controller did not carry the cipher into volume context: $CREATE_OUT"; exit 1; }
+  VOL5=$(printf '%s\n' "$CREATE_OUT" | head -n1)
+  STAGE5="$STATE/staging/$VOL5"
+  mkdir -p "$STAGE5"
+  # Stage with exactly the volume context the controller returned.
+  CTX_ARGS=()
+  while IFS= read -r line; do CTX_ARGS+=(-ctx "$line"); done < <(printf '%s\n' "$CREATE_OUT" | tail -n +2)
+  "$BIN/csi-call" -endpoint "unix://$NODE_SOCK" stage \
+    -volume "$VOL5" -staging "$STAGE5" "${CTX_ARGS[@]}" -secret "key=$KEY2"
+  findmnt -no FSTYPE "$STAGE5" | grep -q '^ext4$' || { echo "$CIPHER volume fs not ext4"; exit 1; }
+  CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE5" "$VOL5"
+  [[ $(stat -c %s "$BACKING/$VOL5.img") == "$CIMG" ]] \
+    || { echo "image is $(stat -c %s "$BACKING/$VOL5.img") bytes, want $CIMG"; exit 1; }
+  DUMP=$(cryptsetup luksDump "$BACKING/$VOL5.img")
+  grep -Eq 'sector:[[:space:]]+4096' <<<"$DUMP" \
+    || { echo "$CIPHER data segment does not use 4096-byte sectors"; exit 1; }
+  grep -Eq "cipher:[[:space:]]+$CIPHER\$" <<<"$DUMP" \
+    || { echo "LUKS header does not record $CIPHER"; exit 1; }
+  # A keyslot's "Key:" line is the volume key; "Cipher key:" is the slot's own.
+  grep -Eq "^[[:space:]]+Key:[[:space:]]+$CKEYSIZE bits" <<<"$DUMP" \
+    || { echo "LUKS header does not record a $CKEYSIZE-bit key"; exit 1; }
+  csc controller del "$VOL5"
+done
 
 echo "::: orphan crypt mapping is reclaimed on plugin restart"
 ORPHAN4=$(losetup --find --show "$IMG4")

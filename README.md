@@ -207,6 +207,8 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
 | `backingStore.nfs.subDir`     | no (type=nfs)     | Subdirectory of the export to hold this store's `.img` files; supports `${pvc.namespace}`, `${pvc.name}`, `${pv.name}` |
 | `backingStore.local.path`     | when type=local   | Absolute path on every node that can read & write the store   |
 | `encrypted`                   | no                | `"true"` enables LUKS2 encryption; see [Encryption](#encryption) |
+| `encryption.cipher`           | no (encrypted)    | cryptsetup `--cipher` spec; default `aes-xts-plain64`; see [Choosing a cipher](#choosing-a-cipher) |
+| `encryption.keySize`          | with `encryption.cipher` | Key size in bits (cryptsetup `--key-size`); default `512` with the default cipher |
 | `csi.storage.k8s.io/node-stage-secret-name` | when `encrypted=true` | Name of the Secret holding `key` (and optional `previousKey`) |
 | `csi.storage.k8s.io/node-stage-secret-namespace` | when `encrypted=true` | Namespace of that Secret |
 
@@ -312,9 +314,51 @@ sudo mount /dev/mapper/recovered /mnt
 
 **Overhead:** the LUKS2 header takes 16 MiB inside the requested
 capacity, so encrypted volumes must be at least 32 MiB — `CreateVolume`
-rejects smaller requests with `OutOfRange`. Nodes need the `dm_crypt`
+rejects smaller requests with `OutOfRange`. Encrypted volumes use
+4096-byte encryption sectors (one cipher operation per ext4 block rather
+than eight), whatever the cipher; like the cipher, the sector size is
+recorded in the LUKS header. Every volume's size is rounded up to a
+multiple of 4 KiB to fit, so a `1G` PVC gets 1,000,001,536 bytes. Nodes need the `dm_crypt`
 kernel module loaded. Existing plaintext volumes are not converted;
 encryption applies only to volumes created with `encrypted: "true"`.
+
+### Choosing a cipher
+
+The default, `aes-xts-plain64` with a 512-bit key (AES-256), is right
+wherever the CPU has AES instructions (x86 AES-NI, ARMv8 Crypto
+Extensions). On CPUs without them — many ARM SoCs, older Raspberry Pi
+models — AES is slow in software, and Adiantum is the kernel's answer:
+
+```yaml
+parameters:
+  encrypted: "true"
+  encryption.cipher: xchacha12,aes-adiantum-plain64
+  encryption.keySize: "256"
+```
+
+`encryption.cipher` takes any cipher spec `cryptsetup luksFormat
+--cipher` accepts (`serpent-xts-plain64`, `twofish-xts-plain64`,
+`aes-cbc-essiv:sha256`, `capi:…` kernel crypto API specs, …), and
+`encryption.keySize` — required whenever `encryption.cipher` is set —
+is `--key-size` in bits: `256` for Adiantum, `512` for any `*-xts`
+cipher (XTS splits the key in two, so 512 bits is AES-256). The key
+size is never left to cryptsetup's compiled-in default, which could
+change with a driver upgrade; the StorageClass alone determines how its
+volumes are formatted.
+
+**Portability.** The cipher and key size are recorded in each volume's
+LUKS header when it is first formatted, and every later open reads them
+from there — no node default is ever consulted, and changing the
+StorageClass never affects existing volumes. What a node does need is
+kernel support for the cipher: an Adiantum volume can only be staged on
+nodes whose kernel has the `adiantum`, `chacha` and `nhpoly1305`
+modules. Any node that may stage a volume must support its cipher, so
+in a mixed cluster pick a cipher every node has. `cryptsetup benchmark
+-c <cipher> -s <keySize>` on a node shows whether it is supported and
+how fast it is. The controller only checks the spec's syntax; a node
+without the cipher fails `NodeStageVolume` with `Internal` and
+cryptsetup's error — on first stage the image is left blank, so fix the
+StorageClass and recreate the PVC.
 
 ## Limitations
 

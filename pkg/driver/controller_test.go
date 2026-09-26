@@ -740,3 +740,108 @@ func TestCreateVolumeEncryptedTooSmallIsOutOfRange(t *testing.T) {
 		t.Fatalf("got %v, want OutOfRange", err)
 	}
 }
+
+func TestCreateVolumeEncryptedCipherInVolumeContext(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamEncrypted] = "true"
+	params[ParamCipher] = "xchacha12,aes-adiantum-plain64"
+	params[ParamKeySize] = "256"
+	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "adiantum", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	vc := resp.Volume.VolumeContext
+	if vc[ParamCipher] != "xchacha12,aes-adiantum-plain64" || vc[ParamKeySize] != "256" {
+		t.Fatalf("volume context = %v", vc)
+	}
+}
+
+func TestCreateVolumeCipherWithoutEncryptedIsInvalid(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamCipher] = "aes-xts-plain64"
+	params[ParamKeySize] = "512"
+	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "x", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+}
+
+func TestCreateVolumeCipherWithoutKeySizeIsInvalid(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamEncrypted] = "true"
+	params[ParamCipher] = "xchacha12,aes-adiantum-plain64"
+	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "x", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+	if !strings.Contains(err.Error(), ParamKeySize) {
+		t.Fatalf("error does not name %s: %v", ParamKeySize, err)
+	}
+}
+
+// Rounding to 4 KiB must never exceed a caller's limit_bytes: round down
+// under the limit when that still meets required_bytes, else OutOfRange.
+func TestCreateVolumeAlignmentRespectsLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		r        *csi.CapacityRange
+		want     int64
+		wantCode codes.Code
+	}{
+		{"required only rounds up", &csi.CapacityRange{RequiredBytes: 100_000_001}, 100_003_840, codes.OK},
+		{"limit only rounds down", &csi.CapacityRange{LimitBytes: 100_000_001}, 99_999_744, codes.OK},
+		{"room under the limit", &csi.CapacityRange{RequiredBytes: 100_000_001, LimitBytes: 100_010_000}, 100_003_840, codes.OK},
+		{"no aligned size fits", &csi.CapacityRange{RequiredBytes: 100_000_001, LimitBytes: 100_000_010}, 0, codes.OutOfRange},
+	} {
+		c, _ := newTestServer(t)
+		resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name: "v", Parameters: nfsParams(), CapacityRange: tc.r,
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+		})
+		if status.Code(err) != tc.wantCode {
+			t.Fatalf("%s: got %v, want %v", tc.name, err, tc.wantCode)
+		}
+		if err == nil && resp.Volume.CapacityBytes != tc.want {
+			t.Fatalf("%s: capacity %d, want %d", tc.name, resp.Volume.CapacityBytes, tc.want)
+		}
+	}
+}
+
+func TestControllerExpandVolumeAlignmentRespectsLimit(t *testing.T) {
+	c, imgs := newTestServer(t)
+	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "g", Parameters: nfsParams(), CapacityRange: &csi.CapacityRange{RequiredBytes: 64 << 20},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := resp.Volume.VolumeId
+	exp, err := c.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
+		VolumeId: id, CapacityRange: &csi.CapacityRange{RequiredBytes: 100_000_001},
+	})
+	if err != nil || exp.CapacityBytes != 100_003_840 {
+		t.Fatalf("expand: %+v, %v; want 100003840", exp, err)
+	}
+	if got, _ := imgs.Get(context.Background(), id); got.CapacityBytes != 100_003_840 {
+		t.Fatalf("image not resized to the aligned size: %+v", got)
+	}
+	_, err = c.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
+		VolumeId: id, CapacityRange: &csi.CapacityRange{RequiredBytes: 200_000_001, LimitBytes: 200_000_010},
+	})
+	if status.Code(err) != codes.OutOfRange {
+		t.Fatalf("got %v, want OutOfRange", err)
+	}
+}

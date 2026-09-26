@@ -77,6 +77,9 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
+	if _, err := formatFromParams(req.GetParameters(), encrypted); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
 	mountedPath, err := c.registry.Get(ctx, cfg)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "mount backing store: %v", err)
@@ -86,13 +89,9 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		return nil, status.Errorf(codes.Internal, "open backing store: %v", err)
 	}
 
-	capacity := defaultCapacityBytes
-	if r := req.GetCapacityRange(); r != nil {
-		if r.RequiredBytes > 0 {
-			capacity = int(r.RequiredBytes)
-		} else if r.LimitBytes > 0 {
-			capacity = int(r.LimitBytes)
-		}
+	capacity, err := alignedCapacity(req.GetCapacityRange())
+	if err != nil {
+		return nil, err
 	}
 
 	if encrypted && capacity < minEncryptedCapacity {
@@ -105,7 +104,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err != nil {
 		return nil, err
 	}
-	meta, err := images.Create(ctx, volumeID, int64(capacity), image.CreateOptions{Unformatted: encrypted})
+	meta, err := images.Create(ctx, volumeID, capacity, image.CreateOptions{Unformatted: encrypted})
 	if err != nil {
 		var mismatch *image.CapacityMismatchError
 		if errors.As(err, &mismatch) {
@@ -117,6 +116,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	vc := cfg.ToVolumeContext()
 	if encrypted {
 		vc[ParamEncrypted] = "true"
+		formatToVolumeContext(vc, req.GetParameters())
 	}
 	vol := &csi.Volume{
 		VolumeId:      meta.VolumeID,
@@ -125,6 +125,29 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	}
 	vol.AccessibleTopology = topologyForCfg(cfg, req.GetAccessibilityRequirements())
 	return &csi.CreateVolumeResponse{Volume: vol}, nil
+}
+
+// alignedCapacity picks the image size for a capacity range: required
+// bytes (else the limit, else the default) rounded up to image.SizeAlign,
+// or down when rounding up would pass limit_bytes. A range with no aligned
+// size in it is OutOfRange.
+func alignedCapacity(r *csi.CapacityRange) (int64, error) {
+	want := int64(defaultCapacityBytes)
+	if r.GetRequiredBytes() > 0 {
+		want = r.GetRequiredBytes()
+	} else if r.GetLimitBytes() > 0 {
+		want = r.GetLimitBytes()
+	}
+	size := image.AlignUp(want)
+	if limit := r.GetLimitBytes(); limit > 0 && size > limit {
+		size = limit / image.SizeAlign * image.SizeAlign
+		if size == 0 || size < r.GetRequiredBytes() {
+			return 0, status.Errorf(codes.OutOfRange,
+				"no multiple of %d bytes lies between required %d and limit %d",
+				image.SizeAlign, r.GetRequiredBytes(), limit)
+		}
+	}
+	return size, nil
 }
 
 // topologyForCfg returns AccessibleTopology that the external-provisioner
@@ -235,11 +258,15 @@ func (c *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	if r == nil || r.RequiredBytes <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "capacity_range.required_bytes is required")
 	}
+	size, err := alignedCapacity(r)
+	if err != nil {
+		return nil, err
+	}
 	m, err := c.imageManagerForVolumeID(ctx, req.GetVolumeId())
 	if err != nil {
 		return nil, err
 	}
-	meta, err := m.Resize(ctx, req.GetVolumeId(), r.RequiredBytes)
+	meta, err := m.Resize(ctx, req.GetVolumeId(), size)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resize: %v", err)
 	}
