@@ -38,10 +38,11 @@ var (
 )
 
 // Format is what luksFormat is told about the cipher. It only matters on
-// first stage: afterwards the LUKS header records it.
+// first stage: afterwards the LUKS header records it, and opening reads it
+// back from there.
 type Format struct {
 	Cipher  string
-	KeySize int // bits; 0 lets cryptsetup pick its default for Cipher
+	KeySize int // bits
 }
 
 // DefaultFormat is AES-XTS with a 512-bit key (AES-256).
@@ -121,13 +122,10 @@ func (c *Crypt) Prepare(ctx context.Context, dev, name string, k Keys, f Format)
 		if !blank {
 			return "", OutcomeNone, fmt.Errorf("%s: %w", dev, ErrNotBlank)
 		}
-		args := []string{"luksFormat", "--batch-mode", "--type", "luks2", "--cipher", f.Cipher}
-		if f.KeySize > 0 {
-			args = append(args, "--key-size", strconv.Itoa(f.KeySize))
-		}
-		args = append(args, "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
-			"--label", labelUnformatted, "--key-file", fbexec.SecretFD(0), dev)
-		if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, args...); err != nil {
+		if _, err := c.cryptsetup(ctx, [][]byte{k.Current}, "luksFormat", "--batch-mode",
+			"--type", "luks2", "--cipher", f.Cipher, "--key-size", strconv.Itoa(f.KeySize),
+			"--pbkdf", "pbkdf2", "--pbkdf-force-iterations", pbkdfIterations,
+			"--label", labelUnformatted, "--key-file", fbexec.SecretFD(0), dev); err != nil {
 			return "", OutcomeNone, fmt.Errorf("luksFormat %s: %w", dev, err)
 		}
 		outcome = OutcomeFormatted

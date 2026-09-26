@@ -21,9 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `encryption.cipher` and `encryption.keySize` StorageClass parameters
   choose the LUKS2 cipher and key size for newly formatted encrypted
   volumes, for nodes without AES instructions (e.g. Adiantum:
-  `xchacha12,aes-adiantum-plain64`) or other requirements. Any
-  `cryptsetup --cipher` spec is accepted. Unset, volumes keep the
-  `aes-xts-plain64` / 512-bit default; existing volumes are unaffected.
+  `xchacha12,aes-adiantum-plain64` with `keySize: "256"`) or other
+  requirements. Any `cryptsetup --cipher` spec is accepted;
+  `encryption.keySize` is required with it, so no cryptsetup default
+  decides a volume's format. Unset, volumes keep the `aes-xts-plain64`
+  / 512-bit default; existing volumes are unaffected. Every node that
+  may stage a volume needs kernel support for its cipher.
 
 ### Changed
 

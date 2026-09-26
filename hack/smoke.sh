@@ -276,15 +276,12 @@ stage_enc "key=$(openssl rand -hex 32)" && { echo "stage with a wrong key succee
 losetup --noheadings --output BACK-FILE | grep -qF "$IMG4" \
   && { echo "loop left attached after wrong-key stage"; exit 1; }
 
-# name cipher keySize ("" leaves --key-size to cryptsetup, as Adiantum
-# is meant to be used). Adiantum is the reason the parameter exists; the
-# AES-CBC case covers an explicit key size. Driven by hack/csi-call, not
+# name cipher keySize. Adiantum is the reason the parameter exists; AES-CBC
+# is a second, structurally different spec. Driven by hack/csi-call, not
 # csc: csc splits key=val lists on commas, and Adiantum's spec has one.
-for spec in "cbc aes-cbc-essiv:sha256 256" "adiantum xchacha12,aes-adiantum-plain64 "; do
+for spec in "cbc aes-cbc-essiv:sha256 256" "adiantum xchacha12,aes-adiantum-plain64 256"; do
   read -r CNAME CIPHER CKEYSIZE <<<"$spec"
-  echo "::: configurable cipher: $CIPHER is what luksFormat writes"
-  SIZE_ARG=()
-  [[ -n "${CKEYSIZE-}" ]] && SIZE_ARG=(-p "encryption.keySize=$CKEYSIZE")
+  echo "::: configurable cipher: $CIPHER ($CKEYSIZE-bit key) is what luksFormat writes"
   CREATE_OUT=$("$BIN/csi-call" -endpoint "unix://$CTL_SOCK" create \
     -name "cipher-$CNAME" \
     -bytes $((128*1024*1024)) \
@@ -292,7 +289,7 @@ for spec in "cbc aes-cbc-essiv:sha256 256" "adiantum xchacha12,aes-adiantum-plai
     -p "backingStore.local.path=$BACKING" \
     -p "encrypted=true" \
     -p "encryption.cipher=$CIPHER" \
-    "${SIZE_ARG[@]}")
+    -p "encryption.keySize=$CKEYSIZE")
   printf '%s\n' "$CREATE_OUT" | grep -qxF "encryption.cipher=$CIPHER" \
     || { echo "controller did not carry the cipher into volume context: $CREATE_OUT"; exit 1; }
   VOL5=$(printf '%s\n' "$CREATE_OUT" | head -n1)
@@ -305,8 +302,12 @@ for spec in "cbc aes-cbc-essiv:sha256 256" "adiantum xchacha12,aes-adiantum-plai
     -volume "$VOL5" -staging "$STAGE5" "${CTX_ARGS[@]}" -secret "key=$KEY2"
   findmnt -no FSTYPE "$STAGE5" | grep -q '^ext4$' || { echo "$CIPHER volume fs not ext4"; exit 1; }
   CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE5" "$VOL5"
-  cryptsetup luksDump "$BACKING/$VOL5.img" | grep -Eq "cipher:[[:space:]]+$CIPHER\$" \
+  DUMP=$(cryptsetup luksDump "$BACKING/$VOL5.img")
+  grep -Eq "cipher:[[:space:]]+$CIPHER\$" <<<"$DUMP" \
     || { echo "LUKS header does not record $CIPHER"; exit 1; }
+  # A keyslot's "Key:" line is the volume key; "Cipher key:" is the slot's own.
+  grep -Eq "^[[:space:]]+Key:[[:space:]]+$CKEYSIZE bits" <<<"$DUMP" \
+    || { echo "LUKS header does not record a $CKEYSIZE-bit key"; exit 1; }
   csc controller del "$VOL5"
 done
 

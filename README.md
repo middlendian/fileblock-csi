@@ -208,7 +208,7 @@ sidecar; capacity is read from the file's apparent size (`stat().Size()`).
 | `backingStore.local.path`     | when type=local   | Absolute path on every node that can read & write the store   |
 | `encrypted`                   | no                | `"true"` enables LUKS2 encryption; see [Encryption](#encryption) |
 | `encryption.cipher`           | no (encrypted)    | cryptsetup `--cipher` spec; default `aes-xts-plain64`; see [Choosing a cipher](#choosing-a-cipher) |
-| `encryption.keySize`          | no (encrypted)    | Key size in bits (cryptsetup `--key-size`); default `512` with the default cipher |
+| `encryption.keySize`          | with `encryption.cipher` | Key size in bits (cryptsetup `--key-size`); default `512` with the default cipher |
 | `csi.storage.k8s.io/node-stage-secret-name` | when `encrypted=true` | Name of the Secret holding `key` (and optional `previousKey`) |
 | `csi.storage.k8s.io/node-stage-secret-namespace` | when `encrypted=true` | Namespace of that Secret |
 
@@ -329,23 +329,32 @@ models — AES is slow in software, and Adiantum is the kernel's answer:
 parameters:
   encrypted: "true"
   encryption.cipher: xchacha12,aes-adiantum-plain64
+  encryption.keySize: "256"
 ```
 
 `encryption.cipher` takes any cipher spec `cryptsetup luksFormat
 --cipher` accepts (`serpent-xts-plain64`, `twofish-xts-plain64`,
 `aes-cbc-essiv:sha256`, `capi:…` kernel crypto API specs, …), and
-`encryption.keySize` sets `--key-size` in bits. Leave `keySize` unset
-and cryptsetup picks its default for the cipher — correct for Adiantum
-(256), but for any `*-xts` cipher it can mean half the key strength
-(XTS splits the key in two), so set `keySize: "512"` with XTS.
+`encryption.keySize` — required whenever `encryption.cipher` is set —
+is `--key-size` in bits: `256` for Adiantum, `512` for any `*-xts`
+cipher (XTS splits the key in two, so 512 bits is AES-256). The key
+size is never left to cryptsetup's compiled-in default, which could
+change with a driver upgrade; the StorageClass alone determines how its
+volumes are formatted.
 
-`cryptsetup benchmark` on a node shows what its kernel supports and how
-fast each option is. The controller only checks the spec's syntax; a
-cipher the node's kernel lacks fails the first `NodeStageVolume` with
-`Internal` and cryptsetup's error, leaving the image blank — fix the
-StorageClass and recreate the PVC. The cipher is fixed when a volume is
-first formatted; it is recorded in the LUKS header, so changing the
-StorageClass later never affects existing volumes.
+**Portability.** The cipher and key size are recorded in each volume's
+LUKS header when it is first formatted, and every later open reads them
+from there — no node default is ever consulted, and changing the
+StorageClass never affects existing volumes. What a node does need is
+kernel support for the cipher: an Adiantum volume can only be staged on
+nodes whose kernel has the `adiantum`, `chacha` and `nhpoly1305`
+modules. Any node that may stage a volume must support its cipher, so
+in a mixed cluster pick a cipher every node has. `cryptsetup benchmark
+-c <cipher> -s <keySize>` on a node shows whether it is supported and
+how fast it is. The controller only checks the spec's syntax; a node
+without the cipher fails `NodeStageVolume` with `Internal` and
+cryptsetup's error — on first stage the image is left blank, so fix the
+StorageClass and recreate the PVC.
 
 ## Limitations
 

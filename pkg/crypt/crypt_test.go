@@ -359,15 +359,15 @@ func TestMapperName(t *testing.T) {
 	}
 }
 
-// The format only shapes luksFormat: the cipher goes through verbatim, and
-// --key-size is omitted when unset so cryptsetup picks its per-cipher
-// default (right for Adiantum).
+// The format only shapes luksFormat: the cipher and key size go through
+// verbatim, and --key-size is always passed so no cryptsetup default
+// decides what a volume is.
 func TestPrepareFormatOptions(t *testing.T) {
 	for _, tc := range []struct {
 		f    Format
 		want []string
 	}{
-		{Format{Cipher: "xchacha12,aes-adiantum-plain64"}, []string{"--cipher", "xchacha12,aes-adiantum-plain64"}},
+		{Format{Cipher: "xchacha12,aes-adiantum-plain64", KeySize: 256}, []string{"--cipher", "xchacha12,aes-adiantum-plain64", "--key-size", "256"}},
 		{Format{Cipher: "serpent-xts-plain64", KeySize: 256}, []string{"--cipher", "serpent-xts-plain64", "--key-size", "256"}},
 	} {
 		f := &fakeLUKS{}

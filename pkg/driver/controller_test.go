@@ -764,11 +764,29 @@ func TestCreateVolumeCipherWithoutEncryptedIsInvalid(t *testing.T) {
 	c, _ := newTestServer(t)
 	params := nfsParams()
 	params[ParamCipher] = "aes-xts-plain64"
+	params[ParamKeySize] = "512"
 	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name: "x", Parameters: params,
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+}
+
+func TestCreateVolumeCipherWithoutKeySizeIsInvalid(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamEncrypted] = "true"
+	params[ParamCipher] = "xchacha12,aes-adiantum-plain64"
+	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "x", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+	if !strings.Contains(err.Error(), ParamKeySize) {
+		t.Fatalf("error does not name %s: %v", ParamKeySize, err)
 	}
 }

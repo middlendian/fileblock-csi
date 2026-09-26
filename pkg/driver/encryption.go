@@ -46,8 +46,10 @@ const (
 var cipherPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9:,()_-]*$`)
 
 // formatFromParams reads the cipher parameters from StorageClass
-// parameters or volume context. Absent parameters mean DefaultFormat; a
-// cipher without a key size leaves the key size to cryptsetup.
+// parameters or volume context. Absent parameters mean DefaultFormat. A
+// cipher needs an explicit key size: cryptsetup's per-cipher default is
+// compiled into the image and could change with it, and the StorageClass
+// must fully determine every volume it formats.
 func formatFromParams(params map[string]string, encrypted bool) (crypt.Format, error) {
 	cipher, keySize := params[ParamCipher], params[ParamKeySize]
 	if cipher == "" && keySize == "" {
@@ -61,7 +63,10 @@ func formatFromParams(params map[string]string, encrypted bool) (crypt.Format, e
 		if !cipherPattern.MatchString(cipher) {
 			return crypt.Format{}, fmt.Errorf("%s=%q is not a cryptsetup cipher spec", ParamCipher, cipher)
 		}
-		f = crypt.Format{Cipher: cipher}
+		if keySize == "" {
+			return crypt.Format{}, fmt.Errorf("%s is required with %s", ParamKeySize, ParamCipher)
+		}
+		f.Cipher = cipher
 	}
 	if keySize != "" {
 		n, err := strconv.Atoi(keySize)

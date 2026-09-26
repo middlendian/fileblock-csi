@@ -314,8 +314,9 @@ dm-crypt mapping, empty for a plaintext one. Invariants:
 - fsType: `ext4` only.
 - Encryption: opt-in via SC `encrypted: "true"` + node-stage secret
   (`key`, optional `previousKey`).
-  Optional `encryption.cipher` / `encryption.keySize` shape `luksFormat`
-  only (default `aes-xts-plain64`, 512 bits).
+  Optional `encryption.cipher` (requires `encryption.keySize`) shapes
+  `luksFormat` only (default `aes-xts-plain64`, 512 bits); `--key-size` is
+  always passed so no cryptsetup default decides a volume's format.
 
 If you add a capability, also update `controller.go::ControllerGetCapabilities`
 or `node.go::NodeGetCapabilities` AND the README's *Limitations* section.

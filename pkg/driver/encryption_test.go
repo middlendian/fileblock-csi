@@ -82,14 +82,14 @@ func TestFormatFromParams(t *testing.T) {
 		want   crypt.Format
 	}{
 		{"default", map[string]string{}, crypt.DefaultFormat},
-		{"cipher only", map[string]string{ParamCipher: "xchacha12,aes-adiantum-plain64"},
-			crypt.Format{Cipher: "xchacha12,aes-adiantum-plain64"}},
+		{"adiantum", map[string]string{ParamCipher: "xchacha12,aes-adiantum-plain64", ParamKeySize: "256"},
+			crypt.Format{Cipher: "xchacha12,aes-adiantum-plain64", KeySize: 256}},
 		{"cipher and key size", map[string]string{ParamCipher: "serpent-xts-plain64", ParamKeySize: "512"},
 			crypt.Format{Cipher: "serpent-xts-plain64", KeySize: 512}},
 		{"key size only", map[string]string{ParamKeySize: "256"},
 			crypt.Format{Cipher: crypt.DefaultFormat.Cipher, KeySize: 256}},
-		{"kernel crypto API spec", map[string]string{ParamCipher: "capi:xts(aes)-plain64"},
-			crypt.Format{Cipher: "capi:xts(aes)-plain64"}},
+		{"kernel crypto API spec", map[string]string{ParamCipher: "capi:xts(aes)-plain64", ParamKeySize: "512"},
+			crypt.Format{Cipher: "capi:xts(aes)-plain64", KeySize: 512}},
 	} {
 		got, err := formatFromParams(tc.params, true)
 		if err != nil || got != tc.want {
@@ -106,9 +106,13 @@ func TestFormatFromParamsRejects(t *testing.T) {
 	}{
 		{"cipher without encrypted", map[string]string{ParamCipher: "aes-xts-plain64"}, false},
 		{"key size without encrypted", map[string]string{ParamKeySize: "512"}, false},
-		{"cipher with a space", map[string]string{ParamCipher: "aes-xts-plain64 --foo"}, true},
-		{"cipher starting with a dash", map[string]string{ParamCipher: "-aes"}, true},
-		{"uppercase cipher", map[string]string{ParamCipher: "AES-XTS-PLAIN64"}, true},
+		// The key size is never left to cryptsetup's compiled-in default,
+		// which could change with the image and make a StorageClass
+		// describe different volumes over time.
+		{"cipher without key size", map[string]string{ParamCipher: "xchacha12,aes-adiantum-plain64"}, true},
+		{"cipher with a space", map[string]string{ParamCipher: "aes-xts-plain64 --foo", ParamKeySize: "512"}, true},
+		{"cipher starting with a dash", map[string]string{ParamCipher: "-aes", ParamKeySize: "512"}, true},
+		{"uppercase cipher", map[string]string{ParamCipher: "AES-XTS-PLAIN64", ParamKeySize: "512"}, true},
 		{"key size not a number", map[string]string{ParamKeySize: "big"}, true},
 		{"key size zero", map[string]string{ParamKeySize: "0"}, true},
 		{"key size negative", map[string]string{ParamKeySize: "-8"}, true},
