@@ -672,6 +672,47 @@ func TestNodeStagePlaintextSequenceUnchanged(t *testing.T) {
 	}
 }
 
+// Review finding 7: a StorageClass without encrypted:"true" whose Secret
+// still carries a key must not be silently ignored — that shape usually
+// means the operator forgot the parameter.
+func TestNodeStagePlaintextWithKeySecretWarns(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if !strings.Contains(e.log.String(), "check the StorageClass") {
+		t.Fatalf("expected a warning about the ignored key secret, got: %s", e.log.String())
+	}
+}
+
+// Review finding 4 (controller ruling): NodeUnstageVolume has no state
+// entry to tell it whether an encrypted mapping was ever opened, so it
+// makes a best-effort close by the deterministic mapper name. A mapping
+// still mounted elsewhere fails "busy" and is correctly left alone by
+// discarding the error.
+func TestNodeUnstageNoStateEntryBestEffortClosesMapping(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	if _, err := e.n.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{VolumeId: "vol-1", StagingTargetPath: e.stage}); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	mapper := crypt.MapperName("vol-1")
+	if callIndex(e.fake.Calls, "cryptsetup", "close", mapper) < 0 {
+		t.Fatalf("did not best-effort close %s with no state entry: %+v", mapper, e.fake.Calls)
+	}
+}
+
+func TestNodeUnstageNoStateEntryCloseErrorIsIgnored(t *testing.T) {
+	e := newEncStage(t, true, func(c fbexec.Cmd) (string, error) {
+		if c.Args[0] == "close" {
+			return "", &fbexec.Error{Cmd: "cryptsetup", ExitCode: 5}
+		}
+		return "", nil
+	})
+	if _, err := e.n.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{VolumeId: "vol-1", StagingTargetPath: e.stage}); err != nil {
+		t.Fatalf("NodeUnstageVolume must ignore a busy close: %v", err)
+	}
+}
+
 func TestNodeUnstageEncryptedOrder(t *testing.T) {
 	e := newEncStage(t, true, nil)
 	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))

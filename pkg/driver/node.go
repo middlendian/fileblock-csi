@@ -110,6 +110,11 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		if keys, err = keysFromSecrets(req.GetSecrets()); err != nil {
 			return nil, err
 		}
+	} else if _, ok := req.GetSecrets()[secretKey]; ok {
+		// A key in the stage secret does nothing for a plaintext volume;
+		// most likely the operator forgot encrypted: "true".
+		n.log.Warn("node-stage secret has a key but the volume is not encrypted; "+
+			"check the StorageClass `encrypted` parameter", "volumeID", volumeID)
 	}
 	backing, err := n.registry.Get(ctx, cfg)
 	if err != nil {
@@ -269,6 +274,12 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
 		}
 		_ = n.state.Delete(volumeID)
+	} else {
+		// No state entry to say whether this volume was ever opened
+		// encrypted; try the deterministic mapper name anyway. A mapping
+		// still mounted elsewhere fails "busy" and must be left alone, so
+		// the error is discarded rather than failing the unstage.
+		_ = n.luks.Close(ctx, crypt.MapperName(volumeID))
 	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }

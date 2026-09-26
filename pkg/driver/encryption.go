@@ -3,11 +3,13 @@ package driver
 import (
 	"errors"
 	"fmt"
+	osexec "os/exec"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/middlendian/fileblock-csi/pkg/crypt"
+	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 )
 
 // ParamEncrypted opts a StorageClass into LUKS2 encryption. The controller
@@ -57,7 +59,21 @@ func cryptStatus(err error) error {
 		return status.Errorf(codes.PermissionDenied, "%v", err)
 	case errors.Is(err, crypt.ErrNotBlank):
 		return status.Errorf(codes.FailedPrecondition, "%v", err)
-	default:
+	case missingCryptsetupBinary(err):
 		return status.Errorf(codes.Internal, "luks (needs cryptsetup and the dm_crypt kernel module): %v", err)
+	default:
+		return status.Errorf(codes.Internal, "luks: %v", err)
 	}
+}
+
+// missingCryptsetupBinary reports whether err is exec's own "no such
+// file" failure to start cryptsetup at all, as opposed to cryptsetup
+// running and failing. Only that case justifies naming the kernel
+// module; every other Internal failure gets a neutral message.
+func missingCryptsetupBinary(err error) bool {
+	var e *fbexec.Error
+	if !errors.As(err, &e) || e.ExitCode != -1 || e.Err == nil {
+		return false
+	}
+	return errors.Is(e.Err, osexec.ErrNotFound)
 }
