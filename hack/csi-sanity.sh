@@ -28,6 +28,12 @@ NODE_SOCK="$WORK/node.sock"
 
 cleanup() {
   set +e
+  for m in /dev/mapper/fbcrypt-*; do
+    [[ -e "$m" ]] || continue
+    dev=$(cryptsetup status "$(basename "$m")" 2>/dev/null | awk '/device:/ {print $2}')
+    back=$(losetup --noheadings --output BACK-FILE "$dev" 2>/dev/null || true)
+    case "$back" in "$STORES"/*) DM_DISABLE_UDEV=1 cryptsetup close "$(basename "$m")" ;; esac
+  done
   losetup --json --list 2>/dev/null \
     | grep -oE '"/dev/loop[0-9]+"' \
     | tr -d '"' \
@@ -64,4 +70,12 @@ csi-sanity \
   --csi.controllerendpoint="unix://$CTL_SOCK" \
   --csi.endpoint="unix://$NODE_SOCK" \
   --csi.testvolumeparameters=<(printf "backingStore.type: local\nbackingStore.local.path: %s\n" "$BACKING") \
+  --csi.testvolumesize=$((128*1024*1024))
+
+echo "::: csi-sanity (encrypted)"
+csi-sanity \
+  --csi.controllerendpoint="unix://$CTL_SOCK" \
+  --csi.endpoint="unix://$NODE_SOCK" \
+  --csi.testvolumeparameters=<(printf "backingStore.type: local\nbackingStore.local.path: %s\nencrypted: \"true\"\n" "$BACKING") \
+  --csi.secrets=<(printf "NodeStageVolumeSecret:\n  key: %s\n" "$(openssl rand -hex 32)") \
   --csi.testvolumesize=$((128*1024*1024))
