@@ -18,6 +18,9 @@ type Mapping struct {
 	LoopDev   string `json:"loopDev"`
 	ImagePath string `json:"imagePath"`
 	StagePath string `json:"stagePath"`
+	// CryptDev is the /dev/mapper path of an encrypted volume's dm-crypt
+	// mapping; empty for plaintext volumes.
+	CryptDev string `json:"cryptDev,omitempty"`
 }
 
 // State persists volumeID -> loop device + staging path. The on-disk file is

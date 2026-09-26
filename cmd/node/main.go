@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	"github.com/middlendian/fileblock-csi/pkg/driver"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
@@ -50,9 +51,15 @@ func main() {
 		os.Exit(2)
 	}
 
+	luks := crypt.New(exec)
+	// cryptsetup takes its LUKS2 locks here and only warns without it.
+	if err := os.MkdirAll("/run/cryptsetup", 0o700); err != nil {
+		log.Warn("create /run/cryptsetup", "err", err)
+	}
+
 	// Reconcile any orphan loop devices anywhere under storesRoot. The
 	// reconciler's prefix check handles all per-store subdirs uniformly.
-	rec := loop.NewReconciler(state, losetup, *storesRoot)
+	rec := loop.NewReconciler(state, losetup, luks, *storesRoot)
 	if err := rec.Reconcile(context.Background()); err != nil {
 		log.Warn("reconcile failed at startup", "err", err)
 	}
