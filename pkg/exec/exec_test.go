@@ -90,3 +90,50 @@ func TestNewZeroUsesDefault(t *testing.T) {
 		t.Fatalf("timeout=%v want %v", r.timeout, DefaultTimeout)
 	}
 }
+
+func TestRunCmdDeliversSecretsOnFDs(t *testing.T) {
+	r := New(0)
+	out, err := r.RunCmd(context.Background(), Cmd{
+		Name:    "sh",
+		Args:    []string{"-c", `cat "$0"; printf '|'; cat "$1"`, SecretFD(0), SecretFD(1)},
+		Secrets: [][]byte{[]byte("alpha\n"), []byte("beta")},
+	})
+	if err != nil {
+		t.Fatalf("RunCmd: %v", err)
+	}
+	if out != "alpha\n|beta" {
+		t.Fatalf("out = %q, want %q", out, "alpha\n|beta")
+	}
+}
+
+func TestRunCmdAppendsEnv(t *testing.T) {
+	out, err := New(0).RunCmd(context.Background(), Cmd{
+		Name: "sh",
+		Args: []string{"-c", `printf %s "$FB_TEST_ENV"`},
+		Env:  []string{"FB_TEST_ENV=set"},
+	})
+	if err != nil || out != "set" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
+func TestRunCmdErrorOmitsSecret(t *testing.T) {
+	_, err := New(0).RunCmd(context.Background(), Cmd{
+		Name:    "sh",
+		Args:    []string{"-c", `cat "$0" >/dev/null; exit 3`, SecretFD(0)},
+		Secrets: [][]byte{[]byte("s3cr3t-value")},
+	})
+	var e *Error
+	if !errors.As(err, &e) || e.ExitCode != 3 {
+		t.Fatalf("err = %v, want *Error exit 3", err)
+	}
+	if strings.Contains(err.Error(), "s3cr3t-value") {
+		t.Fatalf("error leaks the secret: %v", err)
+	}
+}
+
+func TestSecretFD(t *testing.T) {
+	if SecretFD(0) != "/dev/fd/3" || SecretFD(2) != "/dev/fd/5" {
+		t.Fatalf("SecretFD: %s %s", SecretFD(0), SecretFD(2))
+	}
+}
