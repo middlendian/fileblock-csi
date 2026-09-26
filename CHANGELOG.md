@@ -25,11 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `${pvc.namespace}`, `${pvc.name}` and `${pv.name}` — the spelling
   external-provisioner uses for the node-stage secret parameters, so a
   StorageClass uses one vocabulary throughout. The `${pvc.metadata.*}`
-  spelling is no longer accepted. Existing volumes are unaffected (subDir
-  is resolved once, at creation); a StorageClass still using the old
-  tokens fails new provisioning with `InvalidArgument`. StorageClass
-  parameters are immutable: delete and recreate the class under the same
-  name with the new tokens — bound PVCs are unaffected.
+  and `${pv.metadata.name}` spellings are no longer accepted. Existing
+  volumes are unaffected (subDir is resolved once, at creation); a
+  StorageClass still using the old tokens fails new provisioning with
+  `InvalidArgument`. StorageClass parameters are immutable: delete and
+  recreate the class under the same name with the new tokens — bound
+  PVCs are unaffected.
 
 ## [0.4.0] - 2026-09-22
 
