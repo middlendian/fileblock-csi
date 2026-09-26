@@ -106,9 +106,13 @@ func resolveSubDir(raw string, params map[string]string) (string, error) {
 		if j := strings.Index(tok, "}"); j >= 0 {
 			tok = tok[:j+1]
 		}
+		hint := ""
+		if strings.HasPrefix(tok, "${pvc.metadata.") || strings.HasPrefix(tok, "${pv.metadata.") {
+			hint = fmt.Sprintf(" (renamed to %s / %s / %s in v0.5.0)", tmplPVCNamespace, tmplPVCName, tmplPVName)
+		}
 		return "", fmt.Errorf("%s contains unresolved template %s: supported tokens are %s, %s and %s, "+
-			"and the csi-provisioner sidecar must run with --extra-create-metadata=true for them to resolve",
-			ParamNFSSubDir, tok, tmplPVCNamespace, tmplPVCName, tmplPVName)
+			"and the csi-provisioner sidecar must run with --extra-create-metadata=true for them to resolve%s",
+			ParamNFSSubDir, tok, tmplPVCNamespace, tmplPVCName, tmplPVName, hint)
 	}
 	if strings.ContainsRune(sub, 0) {
 		return "", fmt.Errorf("%s must not contain NUL bytes", ParamNFSSubDir)

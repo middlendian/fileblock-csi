@@ -222,6 +222,9 @@ func TestConfigFromParamsSubDirOldSpellingIsFatal(t *testing.T) {
 		if !strings.Contains(err.Error(), "${pvc.namespace}") {
 			t.Errorf("%s: error %q should list the supported tokens", old, err)
 		}
+		if !strings.Contains(err.Error(), "v0.5.0") {
+			t.Errorf("%s: error %q should hint at the v0.5.0 rename", old, err)
+		}
 	}
 }
 
