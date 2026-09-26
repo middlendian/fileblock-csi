@@ -64,33 +64,46 @@ itself (`getSecretReference` in csi-provisioner's
 `spec.csi.nodeStageSecretRef`, and strips the keys before `CreateVolume`.
 The driver never sees them.
 
-So the tokens are the provisioner's, not `subDir`'s. The semantics match
-— an unresolvable token is fatal, never a literal — but the spelling
-differs:
+The provisioner's token spelling is therefore fixed, and it differs
+from the one `backingStore.nfs.subDir` shipped with in v0.4.0
+(borrowed from csi-driver-nfs). Two spellings for the same three
+values in one StorageClass would be a trap, so **`subDir` moves to the
+provisioner's spelling** (design §7). After this change every template
+in a fileblock StorageClass uses one vocabulary:
 
-| `backingStore.nfs.subDir` | node-stage-secret-name | node-stage-secret-namespace |
-|---|---|---|
-| `${pvc.metadata.namespace}` | `${pvc.namespace}` | `${pvc.namespace}` |
-| `${pvc.metadata.name}` | `${pvc.name}` | not allowed |
-| `${pv.metadata.name}` | `${pv.name}` | `${pv.name}` |
-| unresolved → `CreateVolume` fails | unresolved → provisioning fails (`invalid tokens`) | same |
+| token | `subDir` | node-stage-secret-name | node-stage-secret-namespace |
+|---|---|---|---|
+| `${pvc.namespace}` | yes | yes | yes |
+| `${pvc.name}` | yes | yes | no |
+| `${pv.name}` | yes | yes | yes |
 
-`${pvc.name}` is refused in the namespace template deliberately: the PVC
-author picks the name, and must not be able to steer the node to another
-namespace's Secret. A per-namespace key therefore looks like:
+An unresolvable token is fatal everywhere — `CreateVolume` fails for
+`subDir`, provisioning fails (`invalid tokens`) for the secret
+parameters — never a literal directory or Secret name.
+
+`${pvc.name}` is refused in the namespace template by the provisioner,
+deliberately: the PVC author picks the name, and must not be able to
+steer the node to another namespace's Secret. `subDir` keeps allowing
+it — a directory name carries no such authority, and volumeIDs are
+unique per PV regardless. The provisioner's
+`${pvc.annotations['…']}` token for secret names is not added to
+`subDir`; nothing needs it.
+
+A per-namespace key and a per-namespace directory now read the same:
 
 ```yaml
+  backingStore.nfs.subDir: ${pvc.namespace}/fileblock
   csi.storage.k8s.io/node-stage-secret-name: fileblock-luks
   csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
 ```
 
-Using `subDir`'s spelling here was considered and rejected. It would
-need our own parameters, resolved by our controller, with the node
-plugin fetching the Secret from the API itself — because the kubelet
-only passes Secrets referenced from the PV. With a templated namespace
-that is a ClusterRole granting `get secrets` cluster-wide to a
-DaemonSet on every node, trading the kubelet's node authorizer for a
-much wider grant.
+Keeping `subDir`'s spelling and adding our own secret parameters was
+considered and rejected. They would be resolved by our controller, and
+the node plugin would have to fetch the Secret from the API itself —
+the kubelet only passes Secrets referenced from the PV. With a
+templated namespace that is a ClusterRole granting `get secrets`
+cluster-wide to a DaemonSet on every node, trading the kubelet's node
+authorizer for a much wider grant.
 
 ## Secret contract
 
@@ -283,6 +296,31 @@ Mappings not named `fbcrypt-*` are never touched.
 - Nodes need the `dm_crypt` module (loaded on demand by the kernel on
   every mainstream distro, including kind's host on GitHub runners).
 
+### 7. `pkg/store` — `subDir` token spelling
+
+`tmplPVCNamespace`, `tmplPVCName` and `tmplPVName` in
+`pkg/store/parse.go` become `${pvc.namespace}`, `${pvc.name}` and
+`${pv.name}`. Substitution, validation, and the fatal unresolved-token
+check are unchanged; the error text already lists the supported tokens,
+so an old-spelling StorageClass fails with the new spelling in the
+message. The comment crediting csi-driver-nfs's spelling is replaced
+with one pointing at the provisioner's.
+
+No backward compatibility: the old spelling is not accepted as an
+alias. Impact is limited to *new* provisioning — `subDir` is resolved
+once in `CreateVolume` and baked into the volumeID's storeID and the
+volume context, so volumes created under v0.4.0 keep working
+unchanged. A StorageClass still using `${pvc.metadata.namespace}` gets
+`InvalidArgument` on its next `CreateVolume` until it is edited
+(StorageClass parameters are immutable, so: delete and recreate it
+with the same name; bound PVs are unaffected).
+
+Updated with it: `parse_test.go`, `controller_test.go`,
+`test/e2e/subdir_test.go` (including its "no literal-token directory"
+assertion), `deploy/manifests_test.go` and the controller Deployment
+comment, README usage and parameter table. Historical specs, plans and
+the released v0.4.0 CHANGELOG entry are left as written.
+
 ## Security properties and limits
 
 - **Protects:** the `.img` at rest on the backing store, its snapshots,
@@ -315,6 +353,8 @@ Mappings not named `fbcrypt-*` are never touched.
   controller skips mkfs; existing mapping refused before attach; node stage ordering (set-capacity before
   open), missing/short key codes, unstage order, cleanup on failure;
   unencrypted path byte-for-byte unchanged.
+- `pkg/store`: new spellings substitute; each old spelling fails as an
+  unresolved token.
 - `pkg/loop`: `CryptDev` round trip; old state file loads; reconciler
   closes orphan mappings before detaching loops, leaves foreign dm
   names alone.
@@ -343,9 +383,12 @@ longer opens the header.
 
 README: an *Encryption* section (StorageClass + Secret example, the
 token table above, rotation procedure, recovery recipe, key backup,
-the snapshot caveat, the 16 MiB header overhead). CLAUDE.md: CSI
-surface, on-disk contract amendment, state-file `CryptDev`. CHANGELOG
-`[Unreleased]` entry.
+the snapshot caveat, the 16 MiB header overhead). README's `subDir`
+section moves to the new spelling. CLAUDE.md: CSI surface, on-disk
+contract amendment, state-file `CryptDev`. CHANGELOG `[Unreleased]`:
+the encryption feature under *Added*, and the `subDir` spelling change
+under *Changed*, marked **breaking**, with the delete-and-recreate
+StorageClass instruction.
 
 ## Out of scope
 
@@ -362,5 +405,8 @@ surface, on-disk contract amendment, state-file `CryptDev`. CHANGELOG
 
 ## Release
 
-Minor bump (v0.5.0): new optional StorageClass parameter and a new
-runtime dependency (`cryptsetup-bin`), no change for existing volumes.
+Minor bump (v0.5.0), which under 0.x semver carries the breaking
+`subDir` spelling change. Adds a new optional StorageClass parameter
+and a runtime dependency (`cryptsetup-bin`). No existing volume changes
+behavior; only StorageClasses using the old `subDir` tokens need
+editing.
