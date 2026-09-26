@@ -2,8 +2,11 @@ package image
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -251,7 +254,7 @@ func TestMkfsArgs(t *testing.T) {
 	if err := Mkfs(context.Background(), fake, "/dev/mapper/fbcrypt-x"); err != nil {
 		t.Fatalf("Mkfs: %v", err)
 	}
-	want := []string{"-q", "-F", "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1", "/dev/mapper/fbcrypt-x"}
+	want := []string{"-q", "-F", "-b", "4096", "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1", "/dev/mapper/fbcrypt-x"}
 	if len(fake.Calls) != 1 || fake.Calls[0].Name != "mkfs.ext4" || !slices.Equal(fake.Calls[0].Args, want) {
 		t.Fatalf("calls = %+v", fake.Calls)
 	}
@@ -374,5 +377,75 @@ func TestResizeRoundsUpAndRetryIsNoop(t *testing.T) {
 	}
 	if _, err := mgr.Resize(ctx, "fb-grow", 32<<20); err == nil {
 		t.Fatal("expected a real shrink to be refused")
+	}
+}
+
+// writeSuperblock writes just enough of an ext4 superblock for
+// FSBlockSize: the magic and s_log_block_size.
+func writeSuperblock(t *testing.T, path string, size int64, logBlockSize uint32) {
+	t.Helper()
+	if err := truncateSparse(path, size); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sb := make([]byte, 1024)
+	binary.LittleEndian.PutUint32(sb[24:], logBlockSize)
+	binary.LittleEndian.PutUint16(sb[56:], 0xEF53)
+	if _, err := f.WriteAt(sb, 1024); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFSBlockSize(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		log  uint32
+		want int
+	}{{"4k", 2, 4096}, {"1k", 0, 1024}, {"2k", 1, 2048}} {
+		p := filepath.Join(dir, tc.name+".img")
+		writeSuperblock(t, p, 1<<20, tc.log)
+		if got, err := FSBlockSize(p); err != nil || got != tc.want {
+			t.Errorf("%s: got %d, %v; want %d", tc.name, got, err, tc.want)
+		}
+	}
+	blank := filepath.Join(dir, "blank.img")
+	if err := truncateSparse(blank, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FSBlockSize(blank); err != nil || got != 0 {
+		t.Errorf("blank image: got %d, %v; want 0 (no ext4 magic)", got, err)
+	}
+	short := filepath.Join(dir, "short.img")
+	if err := truncateSparse(short, 512); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FSBlockSize(short); err != nil || got != 0 {
+		t.Errorf("short image: got %d, %v; want 0", got, err)
+	}
+	if _, err := FSBlockSize(filepath.Join(dir, "missing.img")); err == nil {
+		t.Error("missing image: expected an error")
+	}
+}
+
+// A real mkfs.ext4 through Mkfs yields 4 KiB blocks even for a small
+// filesystem, where some mke2fs configs would pick 1 KiB.
+func TestMkfsPinsBlockSize(t *testing.T) {
+	if _, err := osexec.LookPath("mkfs.ext4"); err != nil {
+		t.Skip("mkfs.ext4 not installed")
+	}
+	p := filepath.Join(t.TempDir(), "small.img")
+	if err := truncateSparse(p, 8<<20); err != nil {
+		t.Fatal(err)
+	}
+	if err := Mkfs(context.Background(), fbexec.New(0), p); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FSBlockSize(p); err != nil || got != 4096 {
+		t.Fatalf("got %d, %v; want 4096", got, err)
 	}
 }

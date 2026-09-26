@@ -35,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every volume now uses 4 KiB throughout: `mkfs.ext4 -b 4096` is pinned
+  rather than left to mke2fs.conf, and loop devices attach with an
+  explicit sector size instead of losetup's 512-byte default. For an
+  existing volume that size is read from the image at every stage — its
+  ext4 block size, or its LUKS2 sector size — so existing volumes move to
+  4 KiB loop sectors when their filesystem allows it (all volumes made by
+  recent images) and keep mounting as they were made otherwise (e.g. 1 KiB
+  ext4 blocks, or sizes that aren't a multiple of 4 KiB).
+
 - Image sizes round up to a multiple of 4 KiB on create and expand, so a
   PVC requesting `1G` gets 1,000,001,536 bytes. Needed for 4096-byte
   encryption sectors; harmless for plaintext volumes, whose ext4 uses

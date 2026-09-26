@@ -144,7 +144,8 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, status.Errorf(codes.Internal, "open backing store: %v", err)
 	}
 	imgPath := images.ImagePath(volumeID)
-	if _, err := os.Stat(imgPath); err != nil {
+	imgInfo, err := os.Stat(imgPath)
+	if err != nil {
 		// A backing store whose mount has gone away is an empty readable
 		// directory, so every image under it stats as absent. Reporting
 		// NotFound there points the operator at the controller and the
@@ -176,8 +177,16 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		}
 	}
 
-	// 1. Attach a loop device.
-	dev, err := n.losetup.Attach(ctx, imgPath)
+	// 1. Attach a loop device, sized to what the image already records.
+	sector, err := n.loopSectorSize(ctx, imgPath, imgInfo.Size(), encrypted)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read sector size of %s: %v", imgPath, err)
+	}
+	if sector != image.SizeAlign {
+		n.log.Info("loop sector size follows the image's on-disk format",
+			"volumeID", volumeID, "sectorSize", sector)
+	}
+	dev, err := n.losetup.Attach(ctx, imgPath, sector)
 	if err != nil {
 		if errors.Is(err, loop.ErrPoolExhausted) {
 			return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
@@ -383,6 +392,25 @@ func (n *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVo
 	return &csi.NodeExpandVolumeResponse{
 		CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
 	}, nil
+}
+
+// loopSectorSize reads the block size an image's on-disk format already
+// commits it to — the LUKS2 sector size for an encrypted image, the ext4
+// block size otherwise — and turns it into a loop sector size. Nothing is
+// assumed for existing volumes; only an image with nothing recorded yet
+// gets the default.
+func (n *NodeServer) loopSectorSize(ctx context.Context, imgPath string, size int64, encrypted bool) (int, error) {
+	var recorded int
+	var err error
+	if encrypted {
+		recorded, err = n.luks.SectorSize(ctx, imgPath)
+	} else {
+		recorded, err = image.FSBlockSize(imgPath)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return loop.SectorSizeFor(recorded, size), nil
 }
 
 func (n *NodeServer) lockVolume(volumeID string) func() {

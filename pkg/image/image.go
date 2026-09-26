@@ -20,9 +20,10 @@ const (
 	ImageExt  = ".img"
 	DefaultFs = "ext4"
 
-	// SizeAlign is what image sizes round up to: an encrypted volume's
-	// 4096-byte LUKS2 sectors need a whole number of them, and ext4 uses
-	// 4 KiB blocks anyway.
+	// SizeAlign is the one block size every new volume uses: image sizes
+	// round up to it, ext4 is made with it, encrypted volumes use it as
+	// their LUKS2 sector size, and loop devices attach with it unless the
+	// image on disk records something else.
 	SizeAlign = 4096
 )
 
