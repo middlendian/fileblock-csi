@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/image"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
@@ -39,6 +41,7 @@ type NodeServer struct {
 	state    *loop.State
 	log      *slog.Logger
 	registry *store.Registry
+	luks     *crypt.Crypt
 
 	// One mutex per volumeID protects Stage/Unstage from racing each other
 	// inside this process.
@@ -57,6 +60,7 @@ func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *lo
 		state:    st,
 		log:      log,
 		registry: reg,
+		luks:     crypt.New(exec),
 		volMutex: map[string]*sync.Mutex{},
 	}
 }
@@ -100,6 +104,13 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
+	encrypted := req.GetVolumeContext()[ParamEncrypted] == "true"
+	var keys crypt.Keys
+	if encrypted {
+		if keys, err = keysFromSecrets(req.GetSecrets()); err != nil {
+			return nil, err
+		}
+	}
 	backing, err := n.registry.Get(ctx, cfg)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "mount backing store: %v", err)
@@ -140,6 +151,22 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, status.Errorf(codes.NotFound, "image %s: %v", imgPath, err)
 	}
 
+	mapper := crypt.MapperName(volumeID)
+	if encrypted {
+		// Attach always takes a fresh loop, so an open mapping belongs to
+		// another attachment of this .img: a second one would be two ext4
+		// instances over one file (#42).
+		open, err := n.luks.IsOpen(ctx, mapper)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "list dm-crypt mappings: %v", err)
+		}
+		if open {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"volume %s is already open on this node as %s; refusing a second mapping of one image",
+				volumeID, crypt.MapperPath(mapper))
+		}
+	}
+
 	// 1. Attach a loop device.
 	dev, err := n.losetup.Attach(ctx, imgPath)
 	if err != nil {
@@ -150,19 +177,40 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 	detachOnFail := func() { _ = n.losetup.Detach(ctx, dev) }
 
+	target, cryptDev := dev, ""
+	if encrypted {
+		// Grow the loop first so the mapping opens at the expanded size.
+		if err := n.losetup.SetCapacity(ctx, dev); err != nil {
+			detachOnFail()
+			return nil, status.Errorf(codes.Internal, "set capacity: %v", err)
+		}
+		cryptDev, err = n.luks.Prepare(ctx, dev, mapper, keys)
+		if err != nil {
+			detachOnFail()
+			return nil, cryptStatus(err)
+		}
+		target = cryptDev
+		detachOnFail = func() {
+			_ = n.luks.Close(ctx, mapper)
+			_ = n.losetup.Detach(ctx, dev)
+		}
+	}
+
 	// 2. e2fsck always (-p is a no-op on clean fs).
-	if err := image.Fsck(ctx, n.exec, dev); err != nil {
+	if err := image.Fsck(ctx, n.exec, target); err != nil {
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "fsck: %v", err)
 	}
 
 	// 3. If the image was expanded since the last stage, grow the fs now.
 	//    resize2fs is a no-op when the fs already fills the device.
-	if err := n.losetup.SetCapacity(ctx, dev); err != nil {
-		detachOnFail()
-		return nil, status.Errorf(codes.Internal, "set capacity: %v", err)
+	if !encrypted {
+		if err := n.losetup.SetCapacity(ctx, dev); err != nil {
+			detachOnFail()
+			return nil, status.Errorf(codes.Internal, "set capacity: %v", err)
+		}
 	}
-	if err := image.Resize2fs(ctx, n.exec, dev); err != nil {
+	if err := image.Resize2fs(ctx, n.exec, target); err != nil {
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "resize2fs: %v", err)
 	}
@@ -173,7 +221,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, status.Errorf(codes.Internal, "mkdir stage: %v", err)
 	}
 	mountOpts := mountOptionsFromCap(req.GetVolumeCapability())
-	if err := n.mnt.Mount(ctx, dev, stagePath, image.DefaultFs, mountOpts); err != nil {
+	if err := n.mnt.Mount(ctx, target, stagePath, image.DefaultFs, mountOpts); err != nil {
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "mount: %v", err)
 	}
@@ -184,6 +232,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		LoopDev:   dev,
 		ImagePath: imgPath,
 		StagePath: stagePath,
+		CryptDev:  cryptDev,
 	}); err != nil {
 		_ = n.mnt.Unmount(ctx, stagePath)
 		detachOnFail()
@@ -207,6 +256,11 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 	_ = os.Remove(stagePath)
 
 	if m, ok := n.state.Get(volumeID); ok {
+		if m.CryptDev != "" {
+			if err := n.luks.Close(ctx, filepath.Base(m.CryptDev)); err != nil {
+				return nil, status.Errorf(codes.Internal, "cryptsetup close: %v", err)
+			}
+		}
 		if err := n.losetup.Detach(ctx, m.LoopDev); err != nil {
 			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
 		}
@@ -297,7 +351,14 @@ func (n *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVo
 	if err := n.losetup.SetCapacity(ctx, m.LoopDev); err != nil {
 		return nil, status.Errorf(codes.Internal, "set capacity: %v", err)
 	}
-	if err := image.Resize2fs(ctx, n.exec, m.LoopDev); err != nil {
+	target := m.LoopDev
+	if m.CryptDev != "" {
+		if err := n.luks.Resize(ctx, filepath.Base(m.CryptDev)); err != nil {
+			return nil, status.Errorf(codes.Internal, "cryptsetup resize: %v", err)
+		}
+		target = m.CryptDev
+	}
+	if err := image.Resize2fs(ctx, n.exec, target); err != nil {
 		return nil, status.Errorf(codes.Internal, "resize2fs: %v", err)
 	}
 	return &csi.NodeExpandVolumeResponse{

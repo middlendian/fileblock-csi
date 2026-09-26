@@ -1,10 +1,13 @@
 package driver
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/exec/exectest"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
@@ -400,5 +404,231 @@ func TestNodeStageMissingImageOnMountedStoreIsNotFound(t *testing.T) {
 	_, err := n.NodeStageVolume(context.Background(), stageReq("vol-1", vc))
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("got %v, want NotFound", err)
+	}
+}
+
+// encStage wires a NodeServer that reaches a full stage: a real .img in
+// the registry's backing path, a fake runner that answers losetup,
+// e2fsck, resize2fs, mount, findmnt and cryptsetup, and an empty fake
+// sysfs. cryptFn overrides cryptsetup behavior; nil means "everything
+// succeeds, header already formatted".
+type encStage struct {
+	n       *NodeServer
+	fake    *exectest.FakeRunner
+	vc      map[string]string
+	sysRoot string
+	stage   string
+}
+
+func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string, error)) *encStage {
+	t.Helper()
+	fake := exectest.New()
+	fake.Func = func(_ context.Context, name string, args ...string) (string, error) {
+		switch name {
+		case "findmnt":
+			return args[len(args)-1], nil
+		case "losetup":
+			if len(args) > 0 && args[0] == "--find" {
+				return "/dev/loop7\n", nil
+			}
+		}
+		return "", nil
+	}
+	fake.CmdFunc = func(_ context.Context, c fbexec.Cmd) (string, error) {
+		if cryptFn != nil {
+			return cryptFn(c)
+		}
+		if c.Args[0] == "luksDump" {
+			return "Label:          fileblock\n", nil
+		}
+		return "", nil
+	}
+	mnt := mount.New(fake)
+	reg := store.NewRegistry(t.TempDir(), nil, store.NewLocalMounter(mnt), mnt, discardLog())
+	state, err := loop.LoadState(filepath.Join(t.TempDir(), "loop-mappings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := NewNodeServer("n", fake, mnt, loop.NewLosetup(fake), state, discardLog(), reg)
+	sysRoot := t.TempDir()
+	n.luks = crypt.NewAt(fake, sysRoot)
+	cfg := store.Config{Type: store.TypeLocal, LocalPath: t.TempDir()}
+	backing, err := reg.Get(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backing, "vol-1.img"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vc := cfg.ToVolumeContext()
+	if encrypted {
+		vc[ParamEncrypted] = "true"
+	}
+	// Drop setup's bind mount so tests see only the stage's own calls.
+	fake.Reset()
+	return &encStage{n: n, fake: fake, vc: vc, sysRoot: sysRoot, stage: filepath.Join(t.TempDir(), "stage")}
+}
+
+func (e *encStage) req(secrets map[string]string) *csi.NodeStageVolumeRequest {
+	r := stageReq("vol-1", e.vc)
+	r.StagingTargetPath = e.stage
+	r.Secrets = secrets
+	return r
+}
+
+// callIndex returns the index of the first call whose name and leading
+// args match, or -1.
+func callIndex(calls []exectest.Call, name string, args ...string) int {
+	for i, c := range calls {
+		if c.Name == name && len(c.Args) >= len(args) && slices.Equal(c.Args[:len(args)], args) {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestNodeStageEncryptedHappyPath(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))
+	calls := e.fake.Calls
+	setCap := callIndex(calls, "losetup", "--set-capacity")
+	open := callIndex(calls, "cryptsetup", "open", "--type")
+	if setCap < 0 || open < 0 || setCap > open {
+		t.Fatalf("set-capacity must precede open: %+v", calls)
+	}
+	if i := callIndex(calls, "e2fsck"); i < 0 || !slices.Contains(calls[i].Args, mapper) {
+		t.Fatalf("e2fsck not run on %s", mapper)
+	}
+	if i := callIndex(calls, "resize2fs"); i < 0 || calls[i].Args[0] != mapper {
+		t.Fatalf("resize2fs not run on %s", mapper)
+	}
+	if i := callIndex(calls, "mount"); i < 0 || !slices.Contains(calls[i].Args, mapper) {
+		t.Fatalf("mount source is not %s", mapper)
+	}
+	if !bytes.Equal(calls[open].Secrets[0], []byte(testKey)) {
+		t.Fatal("open did not receive the key over a secret fd")
+	}
+	m, ok := e.n.state.Get("vol-1")
+	if !ok || m.CryptDev != mapper || m.LoopDev != "/dev/loop7" {
+		t.Fatalf("state = %+v", m)
+	}
+}
+
+func TestNodeStageEncryptedMissingKeyTouchesNothing(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(nil))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FailedPrecondition", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 {
+		t.Fatal("attached a loop without a key")
+	}
+}
+
+func TestNodeStageEncryptedAlreadyOpenRefusedBeforeAttach(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	d := filepath.Join(e.sysRoot, "block", "dm-0")
+	_ = os.MkdirAll(filepath.Join(d, "dm"), 0o755)
+	_ = os.WriteFile(filepath.Join(d, "dm", "name"), []byte(crypt.MapperName("vol-1")+"\n"), 0o644)
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey}))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FailedPrecondition", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 {
+		t.Fatal("attached a second loop for an already-open volume")
+	}
+}
+
+func TestNodeStageEncryptedWrongKeyDetaches(t *testing.T) {
+	e := newEncStage(t, true, func(c fbexec.Cmd) (string, error) {
+		if c.Args[0] == "open" {
+			return "", &fbexec.Error{Cmd: "cryptsetup", ExitCode: 2}
+		}
+		return "", nil
+	})
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey}))
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("got %v, want PermissionDenied", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--detach", "/dev/loop7") < 0 {
+		t.Fatal("loop not detached after wrong key")
+	}
+}
+
+// Review Focus 4.
+func TestNodeStageEncryptedFailureClosesMapping(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "e2fsck" {
+			return "", &fbexec.Error{Cmd: "e2fsck", ExitCode: 8}
+		}
+		return inner(ctx, name, args...)
+	}
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey}))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want Internal", err)
+	}
+	closeIdx := callIndex(e.fake.Calls, "cryptsetup", "close", crypt.MapperName("vol-1"))
+	detachIdx := callIndex(e.fake.Calls, "losetup", "--detach", "/dev/loop7")
+	if closeIdx < 0 || detachIdx < 0 || closeIdx > detachIdx {
+		t.Fatalf("want close then detach: %+v", e.fake.Calls)
+	}
+}
+
+// The plaintext path must be byte-for-byte what it was before encryption.
+func TestNodeStagePlaintextSequenceUnchanged(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(nil)); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	var seq []string
+	for _, c := range e.fake.Calls {
+		if c.Name == "findmnt" {
+			continue
+		}
+		seq = append(seq, c.Name+" "+c.Args[0])
+	}
+	want := []string{"losetup --find", "e2fsck -p", "losetup --set-capacity", "resize2fs /dev/loop7", "mount -t"}
+	if !slices.Equal(seq, want) {
+		t.Fatalf("sequence = %v, want %v", seq, want)
+	}
+}
+
+func TestNodeUnstageEncryptedOrder(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: "/x.img", StagePath: e.stage, CryptDev: mapper})
+	// Unmount only runs umount(8) against a path that exists and resolves
+	// as a mountpoint; NodeStageVolume normally creates it, but this test
+	// exercises unstage in isolation.
+	if err := os.MkdirAll(e.stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.n.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{VolumeId: "vol-1", StagingTargetPath: e.stage}); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	u := callIndex(e.fake.Calls, "umount")
+	c := callIndex(e.fake.Calls, "cryptsetup", "close", crypt.MapperName("vol-1"))
+	d := callIndex(e.fake.Calls, "losetup", "--detach", "/dev/loop7")
+	if u < 0 || c < 0 || d < 0 || u >= c || c >= d {
+		t.Fatalf("want umount < close < detach, got %d %d %d", u, c, d)
+	}
+}
+
+func TestNodeExpandEncryptedResizesMapper(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: "/x.img", StagePath: e.stage, CryptDev: mapper})
+	if _, err := e.n.NodeExpandVolume(context.Background(), &csi.NodeExpandVolumeRequest{VolumeId: "vol-1", VolumePath: "/p"}); err != nil {
+		t.Fatalf("NodeExpandVolume: %v", err)
+	}
+	r := callIndex(e.fake.Calls, "cryptsetup", "resize", crypt.MapperName("vol-1"))
+	f := callIndex(e.fake.Calls, "resize2fs", mapper)
+	if r < 0 || f < 0 || r > f {
+		t.Fatalf("want cryptsetup resize then resize2fs %s: %+v", mapper, e.fake.Calls)
 	}
 }
