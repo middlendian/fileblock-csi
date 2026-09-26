@@ -58,6 +58,7 @@ mkdir -p "$BACKING" "$STATE" "$BIN" "$LOG"
 echo "::: building binaries"
 ( cd "$ROOT" && go build -o "$BIN/fileblock-controller" ./cmd/controller )
 ( cd "$ROOT" && go build -o "$BIN/fileblock-node" ./cmd/node )
+( cd "$ROOT" && go build -o "$BIN/csi-call" ./hack/csi-call )
 
 echo "::: starting controller"
 "$BIN/fileblock-controller" \
@@ -277,39 +278,31 @@ losetup --noheadings --output BACK-FILE | grep -qF "$IMG4" \
 
 # name cipher keySize ("" leaves --key-size to cryptsetup, as Adiantum
 # is meant to be used). Adiantum is the reason the parameter exists; the
-# AES-CBC case covers an explicit key size.
+# AES-CBC case covers an explicit key size. Driven by hack/csi-call, not
+# csc: csc splits key=val lists on commas, and Adiantum's spec has one.
 for spec in "cbc aes-cbc-essiv:sha256 256" "adiantum xchacha12,aes-adiantum-plain64 "; do
   read -r CNAME CIPHER CKEYSIZE <<<"$spec"
   echo "::: configurable cipher: $CIPHER is what luksFormat writes"
-  SIZE_PARAM=()
-  SIZE_CTX=()
-  if [[ -n "${CKEYSIZE-}" ]]; then
-    SIZE_PARAM=(--params "encryption.keySize=$CKEYSIZE")
-    SIZE_CTX=(--vol-context "encryption.keySize=$CKEYSIZE")
-  fi
-  CREATE_OUT=$(csc controller new \
-    --cap "SINGLE_NODE_WRITER,mount,ext4" \
-    --req-bytes $((128*1024*1024)) \
-    --params "backingStore.type=local" \
-    --params "backingStore.local.path=$BACKING" \
-    --params "encrypted=true" \
-    --params "encryption.cipher=$CIPHER" \
-    "${SIZE_PARAM[@]}" \
-    "cipher-$CNAME")
-  printf '%s\n' "$CREATE_OUT" | grep -qF "$CIPHER" \
-    || { echo "controller dropped the cipher from volume context: $CREATE_OUT"; exit 1; }
-  VOL5=$(printf '%s\n' "$CREATE_OUT" | head -n1 | awk '{print $1}' | tr -d '"')
+  SIZE_ARG=()
+  [[ -n "${CKEYSIZE-}" ]] && SIZE_ARG=(-p "encryption.keySize=$CKEYSIZE")
+  CREATE_OUT=$("$BIN/csi-call" -endpoint "unix://$CTL_SOCK" create \
+    -name "cipher-$CNAME" \
+    -bytes $((128*1024*1024)) \
+    -p "backingStore.type=local" \
+    -p "backingStore.local.path=$BACKING" \
+    -p "encrypted=true" \
+    -p "encryption.cipher=$CIPHER" \
+    "${SIZE_ARG[@]}")
+  printf '%s\n' "$CREATE_OUT" | grep -qxF "encryption.cipher=$CIPHER" \
+    || { echo "controller did not carry the cipher into volume context: $CREATE_OUT"; exit 1; }
+  VOL5=$(printf '%s\n' "$CREATE_OUT" | head -n1)
   STAGE5="$STATE/staging/$VOL5"
   mkdir -p "$STAGE5"
-  X_CSI_SECRETS="key=$KEY2" CSI_ENDPOINT="unix://$NODE_SOCK" csc node stage \
-    --cap "SINGLE_NODE_WRITER,mount,ext4" \
-    --staging-target-path "$STAGE5" \
-    --vol-context "backingStore.type=local" \
-    --vol-context "backingStore.local.path=$BACKING" \
-    --vol-context "encrypted=true" \
-    --vol-context "encryption.cipher=$CIPHER" \
-    "${SIZE_CTX[@]}" \
-    "$VOL5"
+  # Stage with exactly the volume context the controller returned.
+  CTX_ARGS=()
+  while IFS= read -r line; do CTX_ARGS+=(-ctx "$line"); done < <(printf '%s\n' "$CREATE_OUT" | tail -n +2)
+  "$BIN/csi-call" -endpoint "unix://$NODE_SOCK" stage \
+    -volume "$VOL5" -staging "$STAGE5" "${CTX_ARGS[@]}" -secret "key=$KEY2"
   findmnt -no FSTYPE "$STAGE5" | grep -q '^ext4$' || { echo "$CIPHER volume fs not ext4"; exit 1; }
   CSI_ENDPOINT="unix://$NODE_SOCK" csc node unstage --staging-target-path "$STAGE5" "$VOL5"
   cryptsetup luksDump "$BACKING/$VOL5.img" | grep -Eq "cipher:[[:space:]]+$CIPHER\$" \
