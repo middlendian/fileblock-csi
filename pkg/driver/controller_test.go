@@ -666,3 +666,77 @@ func TestCreateVolumeMissingTypeIsInvalidArgument(t *testing.T) {
 		t.Errorf("code = %v, want InvalidArgument", st.Code())
 	}
 }
+
+func TestCreateVolumeEncrypted(t *testing.T) {
+	c, imgs := newTestServer(t)
+	params := nfsParams()
+	params[ParamEncrypted] = "true"
+	resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "enc",
+		Parameters:         params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if resp.Volume.VolumeContext[ParamEncrypted] != "true" {
+		t.Fatalf("volume context = %v", resp.Volume.VolumeContext)
+	}
+	if !imgs.lastCreateOpts.Unformatted {
+		t.Fatal("encrypted image was formatted by the controller")
+	}
+	// Encryption is a volume property, not a store one: the storeID in the
+	// volumeID must match the plaintext config's.
+	plain, _ := store.ConfigFromParams(nfsParams())
+	if !strings.HasPrefix(resp.Volume.VolumeId, "fb-"+plain.StoreID()+"-") {
+		t.Fatalf("volumeID %q changed store identity", resp.Volume.VolumeId)
+	}
+}
+
+func TestCreateVolumePlaintextUnchanged(t *testing.T) {
+	for _, v := range []string{"", "false"} {
+		c, imgs := newTestServer(t)
+		params := nfsParams()
+		if v != "" {
+			params[ParamEncrypted] = v
+		}
+		resp, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name: "p", Parameters: params,
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+		})
+		if err != nil {
+			t.Fatalf("%q: %v", v, err)
+		}
+		if _, ok := resp.Volume.VolumeContext[ParamEncrypted]; ok || imgs.lastCreateOpts.Unformatted {
+			t.Fatalf("%q: ctx=%v opts=%+v", v, resp.Volume.VolumeContext, imgs.lastCreateOpts)
+		}
+	}
+}
+
+func TestCreateVolumeEncryptedBadValue(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamEncrypted] = "yes"
+	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "x", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want InvalidArgument", err)
+	}
+}
+
+// Review Focus 3: the LUKS2 header alone is 16 MiB.
+func TestCreateVolumeEncryptedTooSmallIsOutOfRange(t *testing.T) {
+	c, _ := newTestServer(t)
+	params := nfsParams()
+	params[ParamEncrypted] = "true"
+	_, err := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "tiny", Parameters: params,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeWriterMount()},
+		CapacityRange:      &csi.CapacityRange{RequiredBytes: 10 << 20},
+	})
+	if status.Code(err) != codes.OutOfRange {
+		t.Fatalf("got %v, want OutOfRange", err)
+	}
+}

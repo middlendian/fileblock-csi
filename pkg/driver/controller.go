@@ -73,6 +73,10 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
+	encrypted, err := encryptedFromParams(req.GetParameters())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
 	mountedPath, err := c.registry.Get(ctx, cfg)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "mount backing store: %v", err)
@@ -91,11 +95,17 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 	}
 
+	if encrypted && capacity < minEncryptedCapacity {
+		return nil, status.Errorf(codes.OutOfRange,
+			"encrypted volumes need at least %d bytes (LUKS2 header is 16 MiB), requested %d",
+			minEncryptedCapacity, capacity)
+	}
+
 	volumeID, err := volumeIDFromName(cfg, req.GetName())
 	if err != nil {
 		return nil, err
 	}
-	meta, err := images.Create(ctx, volumeID, int64(capacity), image.CreateOptions{})
+	meta, err := images.Create(ctx, volumeID, int64(capacity), image.CreateOptions{Unformatted: encrypted})
 	if err != nil {
 		var mismatch *image.CapacityMismatchError
 		if errors.As(err, &mismatch) {
@@ -104,10 +114,14 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		return nil, status.Errorf(codes.Internal, "create volume: %v", err)
 	}
 
+	vc := cfg.ToVolumeContext()
+	if encrypted {
+		vc[ParamEncrypted] = "true"
+	}
 	vol := &csi.Volume{
 		VolumeId:      meta.VolumeID,
 		CapacityBytes: meta.CapacityBytes,
-		VolumeContext: cfg.ToVolumeContext(),
+		VolumeContext: vc,
 	}
 	vol.AccessibleTopology = topologyForCfg(cfg, req.GetAccessibilityRequirements())
 	return &csi.CreateVolumeResponse{Volume: vol}, nil
