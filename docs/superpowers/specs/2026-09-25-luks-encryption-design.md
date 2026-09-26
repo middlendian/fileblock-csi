@@ -33,13 +33,13 @@ parameters:
   backingStore.nfs.server: nfs.example.internal
   backingStore.nfs.path: /exports/fileblock
   encrypted: "true"
-  csi.storage.k8s.io/node-stage-secret-name: fileblock-luks
+  csi.storage.k8s.io/node-stage-secret-name: fileblock-encryption-key
   csi.storage.k8s.io/node-stage-secret-namespace: fileblock-system
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: fileblock-luks
+  name: fileblock-encryption-key
   namespace: fileblock-system
 stringData:
   key: "<openssl rand -base64 32>"
@@ -93,7 +93,7 @@ A per-namespace key and a per-namespace directory now read the same:
 
 ```yaml
   backingStore.nfs.subDir: ${pvc.namespace}/fileblock
-  csi.storage.k8s.io/node-stage-secret-name: fileblock-luks
+  csi.storage.k8s.io/node-stage-secret-name: fileblock-encryption-key
   csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
 ```
 

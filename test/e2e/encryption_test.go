@@ -84,7 +84,7 @@ func luksSecretYAML(ns, key, previous string) string {
 	return fmt.Sprintf(`apiVersion: v1
 kind: Secret
 metadata:
-  name: fileblock-luks
+  name: fileblock-encryption-key
   namespace: %s
 stringData:
   key: %q
@@ -101,7 +101,7 @@ func encryptedSCYAML(t *testing.T, name string) string {
 		t.Fatalf("parse fileblock SC parameters %q: %v", raw, err)
 	}
 	params["encrypted"] = "true"
-	params["csi.storage.k8s.io/node-stage-secret-name"] = "fileblock-luks"
+	params["csi.storage.k8s.io/node-stage-secret-name"] = "fileblock-encryption-key"
 	params["csi.storage.k8s.io/node-stage-secret-namespace"] = "${pvc.namespace}"
 	keys := make([]string, 0, len(params))
 	for k := range params {

@@ -245,7 +245,7 @@ Secret pair:
 ```yaml
 parameters:
   encrypted: "true"
-  csi.storage.k8s.io/node-stage-secret-name: fileblock-luks
+  csi.storage.k8s.io/node-stage-secret-name: fileblock-encryption-key
   csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
 ```
 
@@ -304,7 +304,8 @@ is lost data.
 **Recovery**, given the `.img` file and the key:
 
 ```sh
-kubectl -n <ns> get secret fileblock-luks -o jsonpath='{.data.key}' | base64 -d \
+kubectl -n <ns> get secret fileblock-encryption-key \
+    -o jsonpath='{.data.key}' | base64 -d \
   | sudo cryptsetup open --key-file=- /path/to/fb-….img recovered
 sudo mount /dev/mapper/recovered /mnt
 ```
