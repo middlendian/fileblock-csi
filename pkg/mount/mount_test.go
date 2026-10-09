@@ -184,3 +184,24 @@ func TestSourceError(t *testing.T) {
 		t.Fatal("want an error for a target that is not mounted")
 	}
 }
+
+func TestIsSourceMounted(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "/stage\n", nil)
+	got, err := New(fake).IsSourceMounted(context.Background(), "/dev/loop3")
+	if err != nil || !got {
+		t.Fatalf("IsSourceMounted = %v, %v; want true", got, err)
+	}
+	if want := []string{"-n", "-o", "TARGET", "-S", "/dev/loop3"}; !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("argv = %v, want %v", fake.Calls[0].Args, want)
+	}
+}
+
+func TestIsSourceMountedNotMounted(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1, Err: errors.New("exit status 1")})
+	got, err := New(fake).IsSourceMounted(context.Background(), "/dev/loop3")
+	if err != nil || got {
+		t.Fatalf("IsSourceMounted = %v, %v; want false", got, err)
+	}
+}

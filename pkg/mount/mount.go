@@ -64,6 +64,20 @@ func (m *Mounter) Source(ctx context.Context, target string) (string, error) {
 	return rows[len(rows)-1], nil
 }
 
+// IsSourceMounted reports whether source (a device) is mounted anywhere
+// visible to this process.
+func (m *Mounter) IsSourceMounted(ctx context.Context, source string) (bool, error) {
+	out, err := m.exec.Run(ctx, "findmnt", "-n", "-o", "TARGET", "-S", source)
+	if err != nil {
+		var e *fbexec.Error
+		if errors.As(err, &e) && e.ExitCode == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("findmnt -S %s: %w", source, err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // Mount runs mount(8) with the given source, target, fstype, and options.
 // Caller is responsible for ensuring target exists.
 func (m *Mounter) Mount(ctx context.Context, source, target, fstype string, opts []string) error {
