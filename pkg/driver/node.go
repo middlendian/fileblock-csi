@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -132,11 +133,10 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	defer unlock()
 
 	// Idempotency: if we already staged this volume to this path, return ok.
-	if existing, ok := n.state.Get(volumeID); ok && existing.StagePath == stagePath {
-		mounted, err := n.mnt.IsMountPoint(ctx, stagePath)
-		if err == nil && mounted {
-			return &csi.NodeStageVolumeResponse{}, nil
-		}
+	stageMounted, err := n.mnt.IsMountPoint(ctx, stagePath)
+	stageMounted = err == nil && stageMounted
+	if existing, ok := n.state.Get(volumeID); ok && existing.StagePath == stagePath && stageMounted {
+		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
 	images, err := image.New(backing, n.exec)
@@ -162,10 +162,17 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 
 	mapper := crypt.MapperName(volumeID)
+	loops, err := n.losetup.FindImage(ctx, filepath.Base(imgPath))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "find loop devices: %v", err)
+	}
+	if stageMounted {
+		return n.adoptStage(ctx, volumeID, imgPath, stagePath, loops, encrypted)
+	}
 	if encrypted {
-		// Attach always takes a fresh loop, so an open mapping belongs to
-		// another attachment of this .img: a second one would be two ext4
-		// instances over one file (#42).
+		// The staging path is not mounted, so an open mapping is held by
+		// something else: a second one would be two ext4 instances over
+		// one file (#42).
 		open, err := n.luks.IsOpen(ctx, mapper)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "list dm-crypt mappings: %v", err)
@@ -177,21 +184,30 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		}
 	}
 
-	// 1. Attach a loop device, sized to what the image already records.
-	sector, err := n.loopSectorSize(ctx, imgPath, imgInfo.Size(), encrypted)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "read sector size of %s: %v", imgPath, err)
-	}
-	if sector != image.DefaultBlockSize {
-		n.log.Info("loop sector size follows the image's on-disk format",
-			"volumeID", volumeID, "sectorSize", sector)
-	}
-	dev, err := n.losetup.Attach(ctx, imgPath, sector)
-	if err != nil {
-		if errors.Is(err, loop.ErrPoolExhausted) {
-			return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
+	// 1. Attach a loop device, sized to what the image already records —
+	//    or reuse one a stage that lost its state entry left attached:
+	//    two loops on one image are two block devices, and two ext4
+	//    instances if both are ever mounted.
+	var dev string
+	if len(loops) > 0 {
+		dev = loops[0]
+		n.log.Info("reusing loop device already attached to image",
+			"volumeID", volumeID, "loopDev", dev)
+	} else {
+		sector, err := n.loopSectorSize(ctx, imgPath, imgInfo.Size(), encrypted)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "read sector size of %s: %v", imgPath, err)
 		}
-		return nil, status.Errorf(codes.Internal, "losetup: %v", err)
+		if sector != image.DefaultBlockSize {
+			n.log.Info("loop sector size follows the image's on-disk format",
+				"volumeID", volumeID, "sectorSize", sector)
+		}
+		if dev, err = n.losetup.Attach(ctx, imgPath, sector); err != nil {
+			if errors.Is(err, loop.ErrPoolExhausted) {
+				return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
+			}
+			return nil, status.Errorf(codes.Internal, "losetup: %v", err)
+		}
 	}
 	detachOnFail := func() { _ = n.losetup.Detach(ctx, dev) }
 
@@ -258,6 +274,40 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}); err != nil {
 		_ = n.mnt.Unmount(ctx, stagePath)
 		detachOnFail()
+		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
+	}
+	return &csi.NodeStageVolumeResponse{}, nil
+}
+
+// adoptStage handles a stage request for a path that is already mounted
+// but that the state file does not record — the kubelet re-staging after
+// the plugin lost its state. If the mount is this volume's, record it and
+// succeed; never stack a second loop and mount over it.
+func (n *NodeServer) adoptStage(ctx context.Context, volumeID, imgPath, stagePath string, loops []string, encrypted bool) (*csi.NodeStageVolumeResponse, error) {
+	src, err := n.mnt.Source(ctx, stagePath)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read stage mount: %v", err)
+	}
+	m := loop.Mapping{VolumeID: volumeID, ImagePath: imgPath, StagePath: stagePath}
+	if encrypted && src == crypt.MapperPath(crypt.MapperName(volumeID)) {
+		ms, err := n.luks.List(ctx)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "list dm-crypt mappings: %v", err)
+		}
+		for _, cm := range ms {
+			if cm.Name == crypt.MapperName(volumeID) && slices.Contains(loops, cm.Backing) {
+				m.LoopDev, m.CryptDev = cm.Backing, src
+			}
+		}
+	} else if !encrypted && slices.Contains(loops, src) {
+		m.LoopDev = src
+	}
+	if m.LoopDev == "" {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"staging path %s is already mounted from %s, which is not volume %s", stagePath, src, volumeID)
+	}
+	n.log.Info("adopting existing stage mount", "volumeID", volumeID, "loopDev", m.LoopDev)
+	if err := n.state.Put(m); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
 	}
 	return &csi.NodeStageVolumeResponse{}, nil
