@@ -18,9 +18,15 @@ type CryptMappings interface {
 
 // disconnectedImage matches the back-file of a volume image ("fb-<storeID>-
 // <name>.img") attached through a store mount that is no longer reachable:
-// at the mount root, or one subDir level down. Deeper subDirs are not
-// matched, so their orphans are left for unstage to detach.
-var disconnectedImage = regexp.MustCompile(`^/([^/]+/)?fb-[0-9a-f]{12}-[^/]+\.img$`)
+// at the mount root, or under a subDir of any depth.
+var disconnectedImage = regexp.MustCompile(`^/([^/]+/)*fb-[0-9a-f]{12}-[^/]+\.img$`)
+
+// sillyRenamed matches the name NFS gives a file unlinked while open.
+var sillyRenamed = regexp.MustCompile(`^\.nfs[0-9a-f]+$`)
+
+// SillyRenamed reports whether back is an NFS silly-rename (".nfsXXXX"):
+// an image deleted while attached, whose own name is gone.
+func SillyRenamed(back string) bool { return sillyRenamed.MatchString(filepath.Base(back)) }
 
 // Backs reports whether back, a loop's backing file as losetup reports it,
 // is the image at imagePath. The node plugin's backing-store mounts exist

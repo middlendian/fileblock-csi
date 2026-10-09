@@ -67,7 +67,17 @@ func (m *Mounter) Source(ctx context.Context, target string) (string, error) {
 // IsSourceMounted reports whether source (a device) is mounted anywhere
 // visible to this process.
 func (m *Mounter) IsSourceMounted(ctx context.Context, source string) (bool, error) {
-	out, err := m.exec.Run(ctx, "findmnt", "-n", "-o", "TARGET", "-S", source)
+	return m.sourceMounted(ctx, source)
+}
+
+// IsSourceMountedInHost is IsSourceMounted against pid 1's mount namespace:
+// the host's, when the caller shares the host PID namespace.
+func (m *Mounter) IsSourceMountedInHost(ctx context.Context, source string) (bool, error) {
+	return m.sourceMounted(ctx, source, "--task", "1")
+}
+
+func (m *Mounter) sourceMounted(ctx context.Context, source string, pre ...string) (bool, error) {
+	out, err := m.exec.Run(ctx, "findmnt", append(pre, "-n", "-o", "TARGET", "-S", source)...)
 	if err != nil {
 		var e *fbexec.Error
 		if errors.As(err, &e) && e.ExitCode == 1 {

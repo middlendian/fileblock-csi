@@ -382,8 +382,13 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 	// loop: the entry can be missing, or name one of several, after a
 	// plugin restart, and its loop number may since have been reused by
 	// another volume. A loop still held open elsewhere is only marked
-	// autoclear.
-	loops, err := n.losetup.FindImage(ctx, volumeID+image.ImageExt)
+	// autoclear. An image deleted while staged on NFS is silly-renamed to
+	// .nfsXXXX, so then only the state entry still names its loop.
+	name := volumeID + image.ImageExt
+	loops, err := n.losetup.Find(ctx, func(a loop.Attachment) bool {
+		return filepath.Base(a.BackFile) == name ||
+			ok && a.Device == m.LoopDev && loop.SillyRenamed(a.BackFile)
+	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "find loop devices: %v", err)
 	}
@@ -522,6 +527,13 @@ const maxStageUnmounts = 8
 func (n *NodeServer) loopBusy(ctx context.Context, dev string) (bool, error) {
 	if mounted, err := n.mnt.IsSourceMounted(ctx, dev); err != nil || mounted {
 		return mounted, err
+	}
+	// The pod shares the host PID namespace, so pid 1's mounts are the
+	// host's; a check that cannot read them falls through to the others.
+	if mounted, err := n.mnt.IsSourceMountedInHost(ctx, dev); err != nil {
+		n.log.Warn("cannot check the host mount namespace for a loop device", "loopDev", dev, "err", err)
+	} else if mounted {
+		return true, nil
 	}
 	holders, err := os.ReadDir(filepath.Join(n.sysRoot, "block", filepath.Base(dev), "holders"))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {

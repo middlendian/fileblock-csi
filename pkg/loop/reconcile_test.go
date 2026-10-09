@@ -278,14 +278,14 @@ func TestReconcileDetachesDuplicateLoop(t *testing.T) {
 	}
 }
 
-// Only the shapes a disconnected store mount produces count as ours: the
-// image at the mount root or one directory down. A volume-named file
-// deeper in some other tree is not this plugin's.
-func TestReconcileLeavesDeepForeignImageNames(t *testing.T) {
+// Outside the stores root only a volume-image name counts as ours, at any
+// depth (a subDir can be several levels deep). Other names are left alone
+// however they are nested.
+func TestReconcileLeavesForeignNames(t *testing.T) {
 	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
 	var log []string
 	fake := losetupFake(`{"loopdevices":[
-		{"name":"/dev/loop1","back-file":"/mnt/nas/fb-0123456789ab-pvc-2.img"},
+		{"name":"/dev/loop1","back-file":"/mnt/nas/fb-pvc-2.img"},
 		{"name":"/dev/loop2","back-file":"/fb-0123456789ab-pvc-3.img (deleted)"}]}`, &log)
 	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
@@ -306,6 +306,20 @@ func TestReconcileClosesOrphanCryptOverDisconnectedLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := []string{"close fbcrypt-z", "detach /dev/loop5"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}
+
+// The README's own subDir example, ${pvc.namespace}/fileblock, puts images
+// two levels below the export root.
+func TestReconcileDetachesNestedSubDirOrphan(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop1","back-file":"/team-a/fileblock/fb-0123456789ab-pvc-2.img"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"detach /dev/loop1"}; !slices.Equal(log, want) {
 		t.Fatalf("log = %v, want %v", log, want)
 	}
 }

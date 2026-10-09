@@ -118,23 +118,24 @@ func (l *Losetup) List(ctx context.Context) ([]Attachment, error) {
 // node-plugin process reports its file relative to that process's
 // backing-store mount (see Backs), and volume IDs already carry their store.
 func (l *Losetup) FindImage(ctx context.Context, name string) ([]string, error) {
-	return l.find(ctx, func(back string) bool { return filepath.Base(back) == name })
+	return l.Find(ctx, func(a Attachment) bool { return filepath.Base(a.BackFile) == name })
 }
 
 // FindBacking returns every loop device attached to the image at imagePath
 // (see Backs).
 func (l *Losetup) FindBacking(ctx context.Context, imagePath string) ([]string, error) {
-	return l.find(ctx, func(back string) bool { return Backs(back, imagePath) })
+	return l.Find(ctx, func(a Attachment) bool { return Backs(a.BackFile, imagePath) })
 }
 
-func (l *Losetup) find(ctx context.Context, match func(string) bool) ([]string, error) {
+// Find returns every attached loop device for which match is true.
+func (l *Losetup) Find(ctx context.Context, match func(Attachment) bool) ([]string, error) {
 	live, err := l.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var devs []string
 	for _, a := range live {
-		if match(a.BackFile) {
+		if match(a) {
 			devs = append(devs, a.Device)
 		}
 	}

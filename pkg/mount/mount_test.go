@@ -205,3 +205,15 @@ func TestIsSourceMountedNotMounted(t *testing.T) {
 		t.Fatalf("IsSourceMounted = %v, %v; want false", got, err)
 	}
 }
+
+func TestIsSourceMountedInHost(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "/var/lib/kubelet/x\n", nil)
+	got, err := New(fake).IsSourceMountedInHost(context.Background(), "/dev/loop3")
+	if err != nil || !got {
+		t.Fatalf("IsSourceMountedInHost = %v, %v; want true", got, err)
+	}
+	if want := []string{"--task", "1", "-n", "-o", "TARGET", "-S", "/dev/loop3"}; !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("argv = %v, want %v", fake.Calls[0].Args, want)
+	}
+}
