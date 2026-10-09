@@ -425,15 +425,51 @@ type encStage struct {
 	stage   string
 	backing string
 	log     *bytes.Buffer
+	// depth is how many mounts are stacked on a path; a path not in it
+	// counts as mounted once if it exists. umount pops one.
+	depth map[string]int
+	// busy lists loop devices findmnt -S reports as mounted somewhere;
+	// hostBusy the same for the host's mount namespace (findmnt --task 1).
+	busy, hostBusy map[string]bool
+	// hostErr, when set, fails every findmnt --task 1.
+	hostErr *error
 }
 
 func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string, error)) *encStage {
 	t.Helper()
 	fake := exectest.New()
+	depth, busy, hostBusy := map[string]int{}, map[string]bool{}, map[string]bool{}
+	var hostErr error
 	fake.Func = func(_ context.Context, name string, args ...string) (string, error) {
 		switch name {
 		case "findmnt":
-			return args[len(args)-1], nil
+			last := args[len(args)-1]
+			if slices.Contains(args, "--task") {
+				if hostErr != nil {
+					return "", hostErr
+				}
+				if hostBusy[last] {
+					return "/var/lib/kubelet/elsewhere\n", nil
+				}
+				return "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1}
+			}
+			if slices.Contains(args, "-S") {
+				if busy[last] {
+					return "/elsewhere\n", nil
+				}
+				return "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1}
+			}
+			if d, ok := depth[last]; ok && d <= 0 {
+				return "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1}
+			}
+			return last, nil
+		case "umount":
+			last := args[len(args)-1]
+			d, ok := depth[last]
+			if !ok {
+				d = 1
+			}
+			depth[last] = d - 1
 		case "losetup":
 			if len(args) > 0 && args[0] == "--find" {
 				return "/dev/loop7\n", nil
@@ -464,6 +500,7 @@ func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string,
 	n := NewNodeServer("n", fake, mnt, loop.NewLosetup(fake), state, lg, reg)
 	sysRoot := t.TempDir()
 	n.luks = crypt.NewAt(fake, sysRoot)
+	n.sysRoot = sysRoot
 	cfg := store.Config{Type: store.TypeLocal, LocalPath: t.TempDir()}
 	backing, err := reg.Get(context.Background(), cfg)
 	if err != nil {
@@ -478,7 +515,7 @@ func newEncStage(t *testing.T, encrypted bool, cryptFn func(fbexec.Cmd) (string,
 	}
 	// Drop setup's bind mount so tests see only the stage's own calls.
 	fake.Reset()
-	return &encStage{n: n, fake: fake, vc: vc, sysRoot: sysRoot, stage: filepath.Join(t.TempDir(), "stage"), backing: backing, log: &logBuf}
+	return &encStage{n: n, fake: fake, vc: vc, sysRoot: sysRoot, stage: filepath.Join(t.TempDir(), "stage"), backing: backing, log: &logBuf, depth: depth, busy: busy, hostBusy: hostBusy, hostErr: &hostErr}
 }
 
 func (e *encStage) req(secrets map[string]string) *csi.NodeStageVolumeRequest {
@@ -665,9 +702,10 @@ func TestNodeStageEncryptedFailureClosesMapping(t *testing.T) {
 	}
 }
 
-// The plaintext path must be byte-for-byte what it was before encryption:
-// every call's full argv, not just its name and first flag, in order and
-// excluding findmnt (IsMountPoint probing is unrelated to the stage
+// The plaintext path must be byte-for-byte what it was before encryption,
+// plus the lookup for a loop already attached to the image: every call's
+// full argv, not just its name and first flag, in order and excluding
+// findmnt (IsMountPoint probing is unrelated to the stage
 // sequence and its call count is incidental).
 func TestNodeStagePlaintextSequenceUnchanged(t *testing.T) {
 	e := newEncStage(t, false, nil)
@@ -683,6 +721,7 @@ func TestNodeStagePlaintextSequenceUnchanged(t *testing.T) {
 		seq = append(seq, strings.TrimSpace(c.Name+" "+strings.Join(c.Args, " ")))
 	}
 	want := []string{
+		"losetup --json --list",
 		"losetup --find --show --sector-size " + strconv.Itoa(image.DefaultBlockSize) + " " + imgPath,
 		"e2fsck -p -f /dev/loop7",
 		"losetup --set-capacity /dev/loop7",
@@ -738,6 +777,7 @@ func TestNodeUnstageNoStateEntryCloseErrorIsIgnored(t *testing.T) {
 func TestNodeUnstageEncryptedOrder(t *testing.T) {
 	e := newEncStage(t, true, nil)
 	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop7","back-file":"/vol-1.img"}]}`)
 	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: "/x.img", StagePath: e.stage, CryptDev: mapper})
 	// Unmount only runs umount(8) against a path that exists and resolves
 	// as a mountpoint; NodeStageVolume normally creates it, but this test
@@ -759,6 +799,7 @@ func TestNodeUnstageEncryptedOrder(t *testing.T) {
 func TestNodeExpandEncryptedResizesMapper(t *testing.T) {
 	e := newEncStage(t, true, nil)
 	mapper := crypt.MapperPath(crypt.MapperName("vol-1"))
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop7","back-file":"/vol-1.img"}]}`)
 	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: "/x.img", StagePath: e.stage, CryptDev: mapper})
 	if _, err := e.n.NodeExpandVolume(context.Background(), &csi.NodeExpandVolumeRequest{VolumeId: "vol-1", VolumePath: "/p"}); err != nil {
 		t.Fatalf("NodeExpandVolume: %v", err)
@@ -824,5 +865,436 @@ func TestNodeStageEncryptedUsesHeaderSectorSize(t *testing.T) {
 	}
 	if callIndex(e.fake.Calls, "losetup", "--find", "--show", "--sector-size", "512") < 0 {
 		t.Fatalf("want the header's 512-byte sectors: %+v", e.fake.Calls)
+	}
+}
+
+// withLoops makes the stage fake's `losetup --json --list` report live.
+func (e *encStage) withLoops(live string) {
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "losetup" && len(args) > 0 && args[0] == "--json" {
+			return live, nil
+		}
+		return inner(ctx, name, args...)
+	}
+}
+
+func detached(calls []exectest.Call) []string {
+	var out []string
+	for _, c := range calls {
+		if c.Name == "losetup" && len(c.Args) == 2 && c.Args[0] == "--detach" {
+			out = append(out, c.Args[1])
+		}
+	}
+	return out
+}
+
+func unstageReq(e *encStage) *csi.NodeUnstageVolumeRequest {
+	return &csi.NodeUnstageVolumeRequest{VolumeId: "vol-1", StagingTargetPath: e.stage}
+}
+
+func TestNodeUnstagePlaintextDetaches(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	img := filepath.Join(e.backing, "vol-1.img")
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop7","back-file":"` + img + `"}]}`)
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: img, StagePath: e.stage})
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop7"}) {
+		t.Fatalf("detached %v, want [/dev/loop7]", got)
+	}
+	if _, ok := e.n.state.Get("vol-1"); ok {
+		t.Fatal("state entry kept after unstage")
+	}
+}
+
+// After a node-plugin restart the state entry can be gone (the reconciler
+// in v0.5.0 dropped it) while the loop is still attached, reporting its
+// back-file relative to a backing-store mount from a namespace that no
+// longer exists. Unstage must still find and detach it, and only it.
+func TestNodeUnstageNoStateEntryDetachesImageLoops(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[
+		{"name":"/dev/loop1","back-file":"/vol-1.img"},
+		{"name":"/dev/loop2","back-file":"/vol-10.img"},
+		{"name":"/dev/loop3","back-file":"/var/lib/snapd/snaps/core.snap"}]}`)
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop1"}) {
+		t.Fatalf("detached %v, want [/dev/loop1]", got)
+	}
+}
+
+// A second loop on the same image (from a stage that could not see the
+// first) is detached along with the one the state file records.
+func TestNodeUnstageDetachesDuplicateLoops(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	img := filepath.Join(e.backing, "vol-1.img")
+	e.withLoops(`{"loopdevices":[
+		{"name":"/dev/loop0","back-file":"/vol-1.img"},
+		{"name":"/dev/loop7","back-file":"` + img + `"}]}`)
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: img, StagePath: e.stage})
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	got := detached(e.fake.Calls)
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"/dev/loop0", "/dev/loop7"}) {
+		t.Fatalf("detached %v, want [/dev/loop0 /dev/loop7]", got)
+	}
+}
+
+// A failed lookup must fail the unstage so the kubelet retries, rather
+// than report success and leak the loop.
+func TestNodeUnstageListErrorFails(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "losetup" && len(args) > 0 && args[0] == "--json" {
+			return "", &fbexec.Error{Cmd: "losetup", ExitCode: 1}
+		}
+		return inner(ctx, name, args...)
+	}
+	_, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want Internal", err)
+	}
+}
+
+// withStageMounted makes stagePath a mountpoint whose source is src.
+func (e *encStage) withStageMounted(t *testing.T, src string) {
+	t.Helper()
+	if err := os.MkdirAll(e.stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "findmnt" && slices.Contains(args, "SOURCE") {
+			return src + "\n", nil
+		}
+		return inner(ctx, name, args...)
+	}
+}
+
+// Idle loops left on the image (by a stage whose state entry was lost)
+// are detached and the stage starts from a fresh attach, exactly like a
+// first stage: no second loop, no reuse of an old file handle.
+func TestNodeStageDetachesIdleLoopsAndAttachesFresh(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	img := filepath.Join(e.backing, "vol-1.img")
+	e.withLoops(`{"loopdevices":[
+		{"name":"/dev/loop3","back-file":"/vol-1.img"},
+		{"name":"/dev/loop4","back-file":"` + img + `"},
+		{"name":"/dev/loop5","back-file":"/elsewhere/vol-1.img"}]}`)
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(nil)); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop3", "/dev/loop4"}) {
+		t.Fatalf("detached %v, want [/dev/loop3 /dev/loop4]", got)
+	}
+	attach := callIndex(e.fake.Calls, "losetup", "--find")
+	if attach < 0 || attach < callIndex(e.fake.Calls, "losetup", "--detach", "/dev/loop4") {
+		t.Fatalf("want detach then a fresh attach: %+v", e.fake.Calls)
+	}
+	if m, _ := e.n.state.Get("vol-1"); m.LoopDev != "/dev/loop7" {
+		t.Fatalf("state = %+v", m)
+	}
+}
+
+// A loop on the image that is mounted somewhere other than the staging
+// path is a live filesystem: never fsck it, mount it again, or attach a
+// second loop beside it.
+func TestNodeStageRefusesLoopMountedElsewhere(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	e.busy["/dev/loop3"] = true
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(nil))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FailedPrecondition", err)
+	}
+	for _, c := range []string{"e2fsck", "mount", "resize2fs"} {
+		if callIndex(e.fake.Calls, c) >= 0 {
+			t.Fatalf("ran %s against an image in use: %+v", c, e.fake.Calls)
+		}
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 || len(detached(e.fake.Calls)) != 0 {
+		t.Fatalf("touched loops of an image in use: %+v", e.fake.Calls)
+	}
+}
+
+// A loop held by another block device (a dm-crypt mapping) is in use.
+func TestNodeStageEncryptedRefusesLoopWithHolder(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	if err := os.MkdirAll(filepath.Join(e.sysRoot, "block", "loop3", "holders", "dm-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey}))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FailedPrecondition", err)
+	}
+	if callIndex(e.fake.Calls, "cryptsetup") >= 0 || callIndex(e.fake.Calls, "losetup", "--find") >= 0 || len(detached(e.fake.Calls)) != 0 {
+		t.Fatalf("touched the device stack of an image in use: %+v", e.fake.Calls)
+	}
+}
+
+func TestNodeStageEncryptedRefreshesIdleLoop(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	d := callIndex(e.fake.Calls, "losetup", "--detach", "/dev/loop3")
+	a := callIndex(e.fake.Calls, "losetup", "--find")
+	o := callIndex(e.fake.Calls, "cryptsetup", "open", "--type")
+	if d < 0 || a < 0 || o < 0 || d > a || a > o || !slices.Contains(e.fake.Calls[o].Args, "/dev/loop7") {
+		t.Fatalf("want detach < attach < open on the fresh loop: %+v", e.fake.Calls)
+	}
+}
+
+// An error checking the staging path is not "unmounted": guessing wrong
+// would stack a second mount over a live one.
+func TestNodeStageMountCheckErrorIsInternal(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	if err := os.MkdirAll(e.stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "findmnt" && args[len(args)-1] == e.stage {
+			return "", &fbexec.Error{Cmd: "findmnt", ExitCode: 2}
+		}
+		return inner(ctx, name, args...)
+	}
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(nil))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want Internal", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 || callIndex(e.fake.Calls, "mount") >= 0 {
+		t.Fatalf("staged despite an unknown mount state: %+v", e.fake.Calls)
+	}
+}
+
+// A re-stage of a volume that is still mounted at the staging path, after
+// the plugin lost its state entry, must adopt that mount — not attach a
+// second loop and stack a second ext4 instance of the same image over it.
+func TestNodeStageAdoptsMountedStageWithoutState(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	e.withStageMounted(t, "/dev/loop3")
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(nil)); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	for _, c := range []string{"mount", "e2fsck", "resize2fs"} {
+		if callIndex(e.fake.Calls, c) >= 0 {
+			t.Fatalf("adopting a mounted stage ran %s: %+v", c, e.fake.Calls)
+		}
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 {
+		t.Fatalf("attached a second loop: %+v", e.fake.Calls)
+	}
+	m, ok := e.n.state.Get("vol-1")
+	if !ok || m.LoopDev != "/dev/loop3" || m.StagePath != e.stage || m.ImagePath != filepath.Join(e.backing, "vol-1.img") {
+		t.Fatalf("state = %+v", m)
+	}
+}
+
+func TestNodeStageEncryptedAdoptsMountedStageWithoutState(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	mapper := crypt.MapperName("vol-1")
+	d := filepath.Join(e.sysRoot, "block", "dm-0")
+	for _, p := range []string{filepath.Join(d, "dm"), filepath.Join(d, "slaves", "loop3")} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(d, "dm", "name"), []byte(mapper+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	e.withStageMounted(t, crypt.MapperPath(mapper))
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 || callIndex(e.fake.Calls, "cryptsetup") >= 0 || callIndex(e.fake.Calls, "mount") >= 0 {
+		t.Fatalf("adopting a mounted stage touched the device stack: %+v", e.fake.Calls)
+	}
+	m, ok := e.n.state.Get("vol-1")
+	if !ok || m.LoopDev != "/dev/loop3" || m.CryptDev != crypt.MapperPath(mapper) {
+		t.Fatalf("state = %+v", m)
+	}
+}
+
+// Something other than this volume mounted at the staging path is never
+// mounted over.
+func TestNodeStageRefusesForeignMountAtStagePath(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withStageMounted(t, "/dev/sdb1")
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(nil))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FailedPrecondition", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 || callIndex(e.fake.Calls, "mount") >= 0 {
+		t.Fatalf("stacked a mount over a foreign one: %+v", e.fake.Calls)
+	}
+}
+
+// The mapping mounted at the staging path must sit on one of this image's
+// loops; one over some other loop is not adopted.
+func TestNodeStageEncryptedAdoptRefusesMappingOverForeignLoop(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	mapper := crypt.MapperName("vol-1")
+	d := filepath.Join(e.sysRoot, "block", "dm-0")
+	for _, p := range []string{filepath.Join(d, "dm"), filepath.Join(d, "slaves", "loop9")} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(d, "dm", "name"), []byte(mapper+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	e.withStageMounted(t, crypt.MapperPath(mapper))
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey}))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FailedPrecondition", err)
+	}
+	if _, ok := e.n.state.Get("vol-1"); ok {
+		t.Fatal("recorded a mapping over a foreign loop")
+	}
+}
+
+// Older versions could stack a second mount on the staging path; unstage
+// pops every one before it reports success.
+func TestNodeUnstageUnmountsStackedMounts(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	if err := os.MkdirAll(e.stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.depth[e.stage] = 3
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	n := 0
+	for _, c := range e.fake.Calls {
+		if c.Name == "umount" {
+			n++
+		}
+	}
+	if n != 3 {
+		t.Fatalf("umount ran %d times, want 3", n)
+	}
+}
+
+func TestNodeUnstageGivesUpOnEndlessMountStack(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	if err := os.MkdirAll(e.stage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.depth[e.stage] = 100
+	_, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want Internal", err)
+	}
+}
+
+func TestNodeUnstageEncryptedNoStateClosesBeforeDetach(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop1","back-file":"/vol-1.img"}]}`)
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	c := callIndex(e.fake.Calls, "cryptsetup", "close", crypt.MapperName("vol-1"))
+	d := callIndex(e.fake.Calls, "losetup", "--detach", "/dev/loop1")
+	if c < 0 || d < 0 || c > d {
+		t.Fatalf("want close then detach: %+v", e.fake.Calls)
+	}
+}
+
+// A detach that fails part-way keeps the state entry, so the kubelet's
+// retry still knows the volume.
+func TestNodeUnstageDetachFailureKeepsState(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	img := filepath.Join(e.backing, "vol-1.img")
+	e.withLoops(`{"loopdevices":[
+		{"name":"/dev/loop7","back-file":"` + img + `"},
+		{"name":"/dev/loop0","back-file":"/vol-1.img"}]}`)
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "losetup" && len(args) == 2 && args[0] == "--detach" && args[1] == "/dev/loop0" {
+			return "", &fbexec.Error{Cmd: "losetup", ExitCode: 1, Output: "permission denied"}
+		}
+		return inner(ctx, name, args...)
+	}
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: img, StagePath: e.stage})
+	_, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want Internal", err)
+	}
+	if _, ok := e.n.state.Get("vol-1"); !ok {
+		t.Fatal("state entry dropped although a loop is still attached")
+	}
+}
+
+// The state entry's loop number is detached only while it still backs this
+// volume's image: a freed number may now belong to another volume.
+func TestNodeUnstageSkipsReusedStateLoop(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop7","back-file":"/vol-2.img"}]}`)
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: filepath.Join(e.backing, "vol-1.img"), StagePath: e.stage})
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); len(got) != 0 {
+		t.Fatalf("detached %v, which belongs to another volume", got)
+	}
+}
+
+// The pod runs with hostPID, so a loop mounted only in the host's mount
+// namespace (outside the kubelet dir) is visible through pid 1.
+func TestNodeStageRefusesLoopMountedInHostNamespace(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	e.hostBusy["/dev/loop3"] = true
+	_, err := e.n.NodeStageVolume(context.Background(), e.req(nil))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("got %v, want FailedPrecondition", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 || len(detached(e.fake.Calls)) != 0 {
+		t.Fatalf("touched loops of an image in use: %+v", e.fake.Calls)
+	}
+}
+
+// Without access to pid 1's mounts the host check is skipped, not fatal.
+func TestNodeStageHostNamespaceCheckErrorFallsThrough(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	*e.hostErr = &fbexec.Error{Cmd: "findmnt", ExitCode: 2}
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(nil)); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop3"}) {
+		t.Fatalf("detached %v, want [/dev/loop3]", got)
+	}
+	if !strings.Contains(e.log.String(), "host mount namespace") {
+		t.Fatalf("expected a warning about the skipped host check, got: %s", e.log.String())
+	}
+}
+
+// An image deleted while staged on NFS is silly-renamed to .nfsXXXX; only
+// the state entry still names its loop, and unstage must detach it.
+func TestNodeUnstageDetachesSillyRenamedStateLoop(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[
+		{"name":"/dev/loop7","back-file":"/.nfs000000000012abcd00000001"},
+		{"name":"/dev/loop8","back-file":"/.nfs000000000034abcd00000002"}]}`)
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: filepath.Join(e.backing, "vol-1.img"), StagePath: e.stage})
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop7"}) {
+		t.Fatalf("detached %v, want [/dev/loop7]", got)
 	}
 }

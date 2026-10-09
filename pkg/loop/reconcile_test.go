@@ -203,3 +203,123 @@ func TestReconcileLeavesCryptOverForeignLoop(t *testing.T) {
 		t.Fatalf("touched a foreign mapping/loop: %v", log)
 	}
 }
+
+// After a node-plugin restart the backing-store mount the loops were
+// attached through lives in a mount namespace that no longer exists, and
+// the kernel reports each back-file relative to that mount. A staged
+// volume's entry must survive that.
+func TestReconcileKeepsEntryAttachedFromPreviousNamespace(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	img := "/stores/abc/fb-0123456789ab-pvc-1.img"
+	_ = state.Put(Mapping{VolumeID: "fb-0123456789ab-pvc-1", LoopDev: "/dev/loop0", ImagePath: img, StagePath: "/s/v1"})
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop0","back-file":"/fb-0123456789ab-pvc-1.img"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Get("fb-0123456789ab-pvc-1"); !ok || len(log) != 0 {
+		t.Fatalf("staged volume disturbed: kept=%v log=%v", ok, log)
+	}
+}
+
+// The same holds with a subDir: the reported path is relative to the
+// export, so it keeps the subDir component.
+func TestReconcileKeepsSubDirEntryAttachedFromPreviousNamespace(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	img := "/stores/abc/ns/fb-0123456789ab-pvc-1.img"
+	_ = state.Put(Mapping{VolumeID: "fb-0123456789ab-pvc-1", LoopDev: "/dev/loop0", ImagePath: img, StagePath: "/s/v1"})
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop0","back-file":"/ns/fb-0123456789ab-pvc-1.img"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Get("fb-0123456789ab-pvc-1"); !ok || len(log) != 0 {
+		t.Fatalf("staged volume disturbed: kept=%v log=%v", ok, log)
+	}
+}
+
+// A loop left behind by an earlier plugin process is detached even though
+// its back-file is no longer under the stores root; loops that are not
+// fileblock images are left alone.
+func TestReconcileDetachesOrphanFromPreviousNamespace(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[
+		{"name":"/dev/loop1","back-file":"/fb-0123456789ab-pvc-2.img"},
+		{"name":"/dev/loop2","back-file":"/ns/fb-0123456789ab-pvc-3.img"},
+		{"name":"/dev/loop3","back-file":"/var/lib/snapd/snaps/core.snap"},
+		{"name":"/dev/loop4","back-file":"/other/foo.img"},
+		{"name":"/dev/loop5","back-file":"/other/fb-pvc-4.img"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(log)
+	if want := []string{"detach /dev/loop1", "detach /dev/loop2"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}
+
+// A second loop attached to a tracked volume's image is an orphan.
+func TestReconcileDetachesDuplicateLoop(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	_ = state.Put(Mapping{VolumeID: "fb-0123456789ab-pvc-1", LoopDev: "/dev/loop3", ImagePath: "/stores/abc/fb-0123456789ab-pvc-1.img", StagePath: "/s/v1"})
+	var log []string
+	fake := losetupFake(`{"loopdevices":[
+		{"name":"/dev/loop0","back-file":"/fb-0123456789ab-pvc-1.img"},
+		{"name":"/dev/loop3","back-file":"/stores/abc/fb-0123456789ab-pvc-1.img"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"detach /dev/loop0"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+	if _, ok := state.Get("fb-0123456789ab-pvc-1"); !ok {
+		t.Fatal("tracked entry dropped")
+	}
+}
+
+// Outside the stores root only a volume-image name counts as ours, at any
+// depth (a subDir can be several levels deep). Other names are left alone
+// however they are nested.
+func TestReconcileLeavesForeignNames(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[
+		{"name":"/dev/loop1","back-file":"/mnt/nas/fb-pvc-2.img"},
+		{"name":"/dev/loop2","back-file":"/fb-0123456789ab-pvc-3.img (deleted)"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"detach /dev/loop2"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}
+
+// An orphan fbcrypt mapping over a loop left by an earlier plugin process
+// is closed before that loop is detached.
+func TestReconcileClosesOrphanCryptOverDisconnectedLoop(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop5","back-file":"/fb-0123456789ab-pvc-9.img"}]}`, &log)
+	cm := &fakeCrypt{mappings: []crypt.Mapping{{Name: "fbcrypt-z", Backing: "/dev/loop5"}}, log: &log}
+	if err := NewReconciler(state, NewLosetup(fake), cm, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"close fbcrypt-z", "detach /dev/loop5"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}
+
+// The README's own subDir example, ${pvc.namespace}/fileblock, puts images
+// two levels below the export root.
+func TestReconcileDetachesNestedSubDirOrphan(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop1","back-file":"/team-a/fileblock/fb-0123456789ab-pvc-2.img"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"detach /dev/loop1"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}

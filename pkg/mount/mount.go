@@ -50,6 +50,44 @@ func (m *Mounter) IsMountPoint(ctx context.Context, target string) (bool, error)
 	return false, err
 }
 
+// Source returns the device mounted at target. A target mounted over more
+// than once has one row per mount; the last is the one visible there.
+func (m *Mounter) Source(ctx context.Context, target string) (string, error) {
+	out, err := m.exec.Run(ctx, "findmnt", "-n", "-o", "SOURCE", target)
+	if err != nil {
+		return "", fmt.Errorf("findmnt %s: %w", target, err)
+	}
+	rows := strings.Fields(out)
+	if len(rows) == 0 {
+		return "", fmt.Errorf("findmnt %s: no source", target)
+	}
+	return rows[len(rows)-1], nil
+}
+
+// IsSourceMounted reports whether source (a device) is mounted anywhere
+// visible to this process.
+func (m *Mounter) IsSourceMounted(ctx context.Context, source string) (bool, error) {
+	return m.sourceMounted(ctx, source)
+}
+
+// IsSourceMountedInHost is IsSourceMounted against pid 1's mount namespace:
+// the host's, when the caller shares the host PID namespace.
+func (m *Mounter) IsSourceMountedInHost(ctx context.Context, source string) (bool, error) {
+	return m.sourceMounted(ctx, source, "--task", "1")
+}
+
+func (m *Mounter) sourceMounted(ctx context.Context, source string, pre ...string) (bool, error) {
+	out, err := m.exec.Run(ctx, "findmnt", append(pre, "-n", "-o", "TARGET", "-S", source)...)
+	if err != nil {
+		var e *fbexec.Error
+		if errors.As(err, &e) && e.ExitCode == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("findmnt -S %s: %w", source, err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // Mount runs mount(8) with the given source, target, fstype, and options.
 // Caller is responsible for ensuring target exists.
 func (m *Mounter) Mount(ctx context.Context, source, target, fstype string, opts []string) error {

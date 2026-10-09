@@ -11,6 +11,7 @@ on:
       - "Makefile"
       - ".golangci.yml"
       - "hack/smoke.sh"
+      - "hack/smoke-restart.sh"
       - "hack/csi-sanity.sh"
       - ".github/workflows/ci.yml"
   pull_request:
@@ -23,6 +24,7 @@ on:
       - "Makefile"
       - ".golangci.yml"
       - "hack/smoke.sh"
+      - "hack/smoke-restart.sh"
       - "hack/csi-sanity.sh"
       - ".github/workflows/ci.yml"
 
@@ -71,6 +73,10 @@ jobs:
           sudo install -m 0755 "$(go env GOPATH)/bin/csi-sanity" /usr/local/bin/csi-sanity
 
       - run: make check
+
+      # Not part of `make check`: replaces the node plugin mid-lifecycle under
+      # `unshare --mount` and asserts no loop device leaks (root, loop devices).
+      - run: make smoke-restart
 
       - uses: actions/upload-artifact@v7
         if: always()

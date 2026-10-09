@@ -137,3 +137,64 @@ func TestSectorSizeFor(t *testing.T) {
 		}
 	}
 }
+
+// A loop attached by an earlier node-plugin process reports its file
+// relative to that process's backing-store mount once the process's mount
+// namespace is gone, so FindImage matches on the file name.
+func TestFindImageMatchesByName(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("losetup", `{"loopdevices":[
+		{"name":"/dev/loop0","back-file":"/var/lib/fileblock/stores/abc/fb-0123456789ab-pvc-1.img"},
+		{"name":"/dev/loop1","back-file":"/fb-0123456789ab-pvc-1.img"},
+		{"name":"/dev/loop2","back-file":"/fb-0123456789ab-pvc-10.img"},
+		{"name":"/dev/loop3","back-file":"/var/lib/snapd/snaps/core.snap"}]}`, nil)
+	got, err := NewLosetup(fake).FindImage(context.Background(), "fb-0123456789ab-pvc-1.img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/dev/loop0", "/dev/loop1"}; !slices.Equal(got, want) {
+		t.Fatalf("FindImage = %v, want %v", got, want)
+	}
+	if want := []string{"--json", "--list"}; !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("argv = %v, want %v", fake.Calls[0].Args, want)
+	}
+}
+
+func TestFindImageNoLoops(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("losetup", "", nil)
+	got, err := NewLosetup(fake).FindImage(context.Background(), "fb-0123456789ab-pvc-1.img")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("FindImage = %v, %v; want none", got, err)
+	}
+}
+
+// The kernel appends " (deleted)" to the back-file of a loop whose image
+// was unlinked while attached; matching must see through it.
+func TestListStripsDeletedSuffix(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("losetup", `{"loopdevices":[{"name":"/dev/loop2","back-file":"/fb-0123456789ab-pvc-1.img (deleted)"}]}`, nil)
+	got, err := NewLosetup(fake).FindImage(context.Background(), "fb-0123456789ab-pvc-1.img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"/dev/loop2"}) {
+		t.Fatalf("FindImage = %v, want [/dev/loop2]", got)
+	}
+}
+
+// FindBacking is the strict form for callers that know the image path.
+func TestFindBackingMatchesPathOrDisconnectedTail(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("losetup", `{"loopdevices":[
+		{"name":"/dev/loop0","back-file":"/stores/abc/fb-0123456789ab-pvc-1.img"},
+		{"name":"/dev/loop1","back-file":"/fb-0123456789ab-pvc-1.img"},
+		{"name":"/dev/loop2","back-file":"/elsewhere/fb-0123456789ab-pvc-1.img"}]}`, nil)
+	got, err := NewLosetup(fake).FindBacking(context.Background(), "/stores/abc/fb-0123456789ab-pvc-1.img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/dev/loop0", "/dev/loop1"}; !slices.Equal(got, want) {
+		t.Fatalf("FindBacking = %v, want %v", got, want)
+	}
+}

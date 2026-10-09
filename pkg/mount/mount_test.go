@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
@@ -158,5 +159,61 @@ func TestIsMountPointAncestorOnly(t *testing.T) {
 	}
 	if got {
 		t.Fatal("expected false for a directory under a mounted ancestor")
+	}
+}
+
+func TestSourceReturnsTopmostMount(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "/dev/loop0\n/dev/loop3\n", nil)
+	got, err := New(fake).Source(context.Background(), "/stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/dev/loop3" {
+		t.Fatalf("Source = %q, want /dev/loop3", got)
+	}
+	if want := []string{"-n", "-o", "SOURCE", "/stage"}; !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("argv = %v, want %v", fake.Calls[0].Args, want)
+	}
+}
+
+func TestSourceError(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1, Err: errors.New("exit status 1")})
+	if _, err := New(fake).Source(context.Background(), "/stage"); err == nil {
+		t.Fatal("want an error for a target that is not mounted")
+	}
+}
+
+func TestIsSourceMounted(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "/stage\n", nil)
+	got, err := New(fake).IsSourceMounted(context.Background(), "/dev/loop3")
+	if err != nil || !got {
+		t.Fatalf("IsSourceMounted = %v, %v; want true", got, err)
+	}
+	if want := []string{"-n", "-o", "TARGET", "-S", "/dev/loop3"}; !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("argv = %v, want %v", fake.Calls[0].Args, want)
+	}
+}
+
+func TestIsSourceMountedNotMounted(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1, Err: errors.New("exit status 1")})
+	got, err := New(fake).IsSourceMounted(context.Background(), "/dev/loop3")
+	if err != nil || got {
+		t.Fatalf("IsSourceMounted = %v, %v; want false", got, err)
+	}
+}
+
+func TestIsSourceMountedInHost(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "/var/lib/kubelet/x\n", nil)
+	got, err := New(fake).IsSourceMountedInHost(context.Background(), "/dev/loop3")
+	if err != nil || !got {
+		t.Fatalf("IsSourceMountedInHost = %v, %v; want true", got, err)
+	}
+	if want := []string{"--task", "1", "-n", "-o", "TARGET", "-S", "/dev/loop3"}; !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("argv = %v, want %v", fake.Calls[0].Args, want)
 	}
 }

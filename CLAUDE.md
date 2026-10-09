@@ -43,6 +43,7 @@ make tidy           # go mod tidy
 make tidy-check     # fail if go.mod/go.sum need tidying (CI gate)
 make check          # full CI gate (fmt+vet+lint+tidy+cover+build+smoke+sanity)
 make smoke          # sudo hack/smoke.sh
+make smoke-restart  # sudo hack/smoke-restart.sh: no loop leak across a plugin replacement
 make sanity         # sudo hack/csi-sanity.sh
 make e2e            # kind + go test ./test/e2e (local backing store)
 make e2e-nfs        # kind + go test ./test/e2e (NFSv3 backing store)
@@ -67,6 +68,11 @@ an image that ships only Go.
 
 The smoke and sanity scripts must run as root (loop devices and mount(8)).
 They use plain temp directories — no kind, no kubelet.
+`hack/smoke-restart.sh` additionally runs the node plugin under
+`unshare --mount` with a private stores root and a shared staging area,
+the DaemonSet's layout, and kills it between stage and unstage the way a
+pod replacement does. It is not part of `make check`; `ci.yml` runs it
+as a separate step after `make check`.
 
 The e2e suite is the only layer that drives kubelet directly. It boots a
 two-node kind cluster with a shared backing store, applies the `e2e` overlay,
@@ -82,7 +88,8 @@ GitHub Actions workflows live in `.github/workflows/`:
 
 - `ci.yml` runs on every push and PR: fmt-check, vet, golangci-lint
   (config in `.golangci.yml`), race-enabled `go test ./...` with
-  coverage, `go mod tidy` verification, and a container build.
+  coverage, `go mod tidy` verification, and a container build, then
+  `make smoke-restart`.
 - `integration.yml` runs `hack/smoke.sh` and `hack/csi-sanity.sh` on
   push to `main` and via workflow_dispatch.
 - `e2e.yml` runs `hack/e2e.sh` in a `local` and an `nfs` matrix variant on
@@ -286,12 +293,32 @@ optional: the `/dev/mapper/fbcrypt-…` path for an encrypted volume's
 dm-crypt mapping, empty for a plaintext one. Invariants:
 
 1. Every entry must correspond to a `losetup --json --list` row whose
-   `back-file` matches `ImagePath`. Otherwise the reconciler drops it.
-2. Every loop device backed by a `.img` under our `backingStorePath` and
-   *not* present in the state file gets detached on plugin start.
-3. Concurrent in-process Stage/Unstage on the same volume is serialized by
+   `back-file` matches `ImagePath` (`loop.Backs`). Otherwise the
+   reconciler drops it. Backing stores are mounted in the node plugin's
+   own mount namespace, so a loop attached by an earlier plugin process
+   reports its file relative to the store mount (`/fb-….img`, or
+   `/<subDir>/fb-….img`); that trailing match counts.
+2. Every loop device backed by a `.img` under our `backingStorePath`, or
+   by a volume image in the disconnected form above (`/fb-<storeID>-….img`
+   or `/<subDir…>/fb-….img`, any depth), and *not* present in the state
+   file gets detached on plugin start. A mounted loop is only marked
+   autoclear by the kernel. `losetup` back-files lose the kernel's
+   ` (deleted)` suffix in `Losetup.List`. NFS silly-renamed `.nfsXXXX`
+   back-files are not matched.
+3. The state file is a cache, not the only record. Unstage pops stacked
+   mounts at the staging path (up to 8), then detaches every loop whose
+   back-file is named `<volumeID>.img` — the state entry's `LoopDev` only
+   if it is among them, or if its back-file is a `.nfsXXXX` silly-rename
+   (`loop.SillyRenamed`). Stage finds the image's
+   loops with `Losetup.FindBacking`: with the staging path mounted it
+   adopts the mount if its source is one of them (or this volume's
+   dm-crypt mapping over one), else `FailedPrecondition`; unmounted, any
+   busy loop (mounted in the plugin's or pid 1's mount namespace, or with
+   sysfs holders) is `FailedPrecondition` and
+   idle ones are detached before a fresh attach.
+4. Concurrent in-process Stage/Unstage on the same volume is serialized by
    `NodeServer.lockVolume`.
-4. Every `fbcrypt-*` mapping over a loop backed by our store and absent
+5. Every `fbcrypt-*` mapping over a loop backed by our store and absent
    from the state file is closed on plugin start, before orphan loops
    are detached.
 
