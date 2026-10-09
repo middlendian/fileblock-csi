@@ -277,7 +277,8 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 	}
 	_ = os.Remove(stagePath)
 
-	if m, ok := n.state.Get(volumeID); ok {
+	m, ok := n.state.Get(volumeID)
+	if ok {
 		if m.CryptDev != "" {
 			if err := n.luks.Close(ctx, filepath.Base(m.CryptDev)); err != nil {
 				return nil, status.Errorf(codes.Internal, "cryptsetup close: %v", err)
@@ -286,13 +287,30 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 		if err := n.losetup.Detach(ctx, m.LoopDev); err != nil {
 			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
 		}
-		_ = n.state.Delete(volumeID)
 	} else {
 		// No state entry to say whether this volume was ever opened
 		// encrypted; try the deterministic mapper name anyway. A mapping
 		// still mounted elsewhere fails "busy" and must be left alone, so
 		// the error is discarded rather than failing the unstage.
 		_ = n.luks.Close(ctx, crypt.MapperName(volumeID))
+	}
+	// The state entry can be missing, or name only one of several loops on
+	// this image, after a plugin restart: detach whatever is attached to it.
+	// A loop still held open elsewhere is only marked autoclear.
+	loops, err := n.losetup.FindImage(ctx, volumeID+image.ImageExt)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "find loop devices: %v", err)
+	}
+	for _, dev := range loops {
+		if ok && dev == m.LoopDev {
+			continue
+		}
+		if err := n.losetup.Detach(ctx, dev); err != nil {
+			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
+		}
+	}
+	if ok {
+		_ = n.state.Delete(volumeID)
 	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }

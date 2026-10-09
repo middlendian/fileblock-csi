@@ -826,3 +826,96 @@ func TestNodeStageEncryptedUsesHeaderSectorSize(t *testing.T) {
 		t.Fatalf("want the header's 512-byte sectors: %+v", e.fake.Calls)
 	}
 }
+
+// withLoops makes the stage fake's `losetup --json --list` report live.
+func (e *encStage) withLoops(live string) {
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "losetup" && len(args) > 0 && args[0] == "--json" {
+			return live, nil
+		}
+		return inner(ctx, name, args...)
+	}
+}
+
+func detached(calls []exectest.Call) []string {
+	var out []string
+	for _, c := range calls {
+		if c.Name == "losetup" && len(c.Args) == 2 && c.Args[0] == "--detach" {
+			out = append(out, c.Args[1])
+		}
+	}
+	return out
+}
+
+func unstageReq(e *encStage) *csi.NodeUnstageVolumeRequest {
+	return &csi.NodeUnstageVolumeRequest{VolumeId: "vol-1", StagingTargetPath: e.stage}
+}
+
+func TestNodeUnstagePlaintextDetaches(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	img := filepath.Join(e.backing, "vol-1.img")
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop7","back-file":"` + img + `"}]}`)
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: img, StagePath: e.stage})
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop7"}) {
+		t.Fatalf("detached %v, want [/dev/loop7]", got)
+	}
+	if _, ok := e.n.state.Get("vol-1"); ok {
+		t.Fatal("state entry kept after unstage")
+	}
+}
+
+// After a node-plugin restart the state entry can be gone (the reconciler
+// in v0.5.0 dropped it) while the loop is still attached, reporting its
+// back-file relative to a backing-store mount from a namespace that no
+// longer exists. Unstage must still find and detach it, and only it.
+func TestNodeUnstageNoStateEntryDetachesImageLoops(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[
+		{"name":"/dev/loop1","back-file":"/vol-1.img"},
+		{"name":"/dev/loop2","back-file":"/vol-10.img"},
+		{"name":"/dev/loop3","back-file":"/var/lib/snapd/snaps/core.snap"}]}`)
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop1"}) {
+		t.Fatalf("detached %v, want [/dev/loop1]", got)
+	}
+}
+
+// A second loop on the same image (from a stage that could not see the
+// first) is detached along with the one the state file records.
+func TestNodeUnstageDetachesDuplicateLoops(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	img := filepath.Join(e.backing, "vol-1.img")
+	e.withLoops(`{"loopdevices":[
+		{"name":"/dev/loop0","back-file":"/vol-1.img"},
+		{"name":"/dev/loop7","back-file":"` + img + `"}]}`)
+	_ = e.n.state.Put(loop.Mapping{VolumeID: "vol-1", LoopDev: "/dev/loop7", ImagePath: img, StagePath: e.stage})
+	if _, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e)); err != nil {
+		t.Fatalf("NodeUnstageVolume: %v", err)
+	}
+	if got := detached(e.fake.Calls); !slices.Equal(got, []string{"/dev/loop7", "/dev/loop0"}) {
+		t.Fatalf("detached %v, want [/dev/loop7 /dev/loop0]", got)
+	}
+}
+
+// A failed lookup must fail the unstage so the kubelet retries, rather
+// than report success and leak the loop.
+func TestNodeUnstageListErrorFails(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	inner := e.fake.Func
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "losetup" && len(args) > 0 && args[0] == "--json" {
+			return "", &fbexec.Error{Cmd: "losetup", ExitCode: 1}
+		}
+		return inner(ctx, name, args...)
+	}
+	_, err := e.n.NodeUnstageVolume(context.Background(), unstageReq(e))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want Internal", err)
+	}
+}
