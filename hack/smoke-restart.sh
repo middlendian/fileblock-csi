@@ -131,6 +131,16 @@ stage "$STAGE" "$VOL"
 [[ $(loops_on "$IMG") -eq 1 ]] || fail "re-stage attached a second loop"
 [[ $(findmnt -n "$STAGE" | wc -l) -eq 1 ]] || fail "re-stage stacked a second mount"
 
+echo "::: stateless re-stage of a still-mounted volume adopts it"
+# As v0.5.0 left it after a replacement: mounted, attached, no state entry.
+kill "$NODE_PID"; wait "$NODE_PID" 2>/dev/null || true
+rm -f "$STATE/loop-mappings.json"
+start_node
+stage "$STAGE" "$VOL"
+[[ $(loops_on "$IMG") -eq 1 ]] || fail "stateless re-stage attached a second loop"
+[[ $(findmnt -n "$STAGE" | wc -l) -eq 1 ]] || fail "stateless re-stage stacked a second mount"
+grep -q "\"$VOL\"" "$STATE/loop-mappings.json" || fail "stateless re-stage did not record the adopted mount"
+
 replace_node
 node unstage --staging-target-path "$STAGE" "$VOL"
 mountpoint -q "$STAGE" && fail "stage path still mounted after unstage"

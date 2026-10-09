@@ -34,11 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused with `FailedPrecondition`, and idle leftovers are detached
   before a fresh attach.
 - Loops leaked by earlier versions are detached by the reconciler the
-  next time the node plugin starts, if their image sits at the store
-  root or one subDir level down (images under deeper subDirs are
-  detached at their next unstage). A leaked loop that is still mounted
-  is freed when it is unmounted. Silly-renamed NFS files (`.nfsXXXX`)
-  are not cleaned automatically.
+  next time the node plugin starts (restarting or replacing the node
+  plugin pod is enough). A leaked loop that is still mounted is freed
+  when it is unmounted. Otherwise the next stage of that volume on the
+  node detaches idle leftovers, or `losetup -d` them by hand.
+  Silly-renamed NFS files (`.nfsXXXX`, an image deleted while attached)
+  are not cleaned at startup; unstage still detaches the one its state
+  entry records.
 
 ## [0.5.0] - 2026-09-26
 

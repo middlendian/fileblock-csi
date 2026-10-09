@@ -298,19 +298,21 @@ dm-crypt mapping, empty for a plaintext one. Invariants:
    `/<subDir>/fb-….img`); that trailing match counts.
 2. Every loop device backed by a `.img` under our `backingStorePath`, or
    by a volume image in the disconnected form above (`/fb-<storeID>-….img`
-   or `/<one dir>/fb-….img`), and *not* present in the state file gets
-   detached on plugin start. A mounted loop is only marked autoclear by
-   the kernel. `losetup` back-files lose the kernel's ` (deleted)` suffix
-   in `Losetup.List`. Not matched, so left for unstage: images under a
-   nested (multi-level) subDir, and NFS silly-renamed `.nfsXXXX` files.
+   or `/<subDir…>/fb-….img`, any depth), and *not* present in the state
+   file gets detached on plugin start. A mounted loop is only marked
+   autoclear by the kernel. `losetup` back-files lose the kernel's
+   ` (deleted)` suffix in `Losetup.List`. NFS silly-renamed `.nfsXXXX`
+   back-files are not matched.
 3. The state file is a cache, not the only record. Unstage pops stacked
    mounts at the staging path (up to 8), then detaches every loop whose
-   back-file is named `<volumeID>.img` (`Losetup.FindImage`) — the state
-   entry's `LoopDev` only if it is among them. Stage finds the image's
+   back-file is named `<volumeID>.img` — the state entry's `LoopDev` only
+   if it is among them, or if its back-file is a `.nfsXXXX` silly-rename
+   (`loop.SillyRenamed`). Stage finds the image's
    loops with `Losetup.FindBacking`: with the staging path mounted it
    adopts the mount if its source is one of them (or this volume's
    dm-crypt mapping over one), else `FailedPrecondition`; unmounted, any
-   busy loop (mounted, or with sysfs holders) is `FailedPrecondition` and
+   busy loop (mounted in the plugin's or pid 1's mount namespace, or with
+   sysfs holders) is `FailedPrecondition` and
    idle ones are detached before a fresh attach.
 4. Concurrent in-process Stage/Unstage on the same volume is serialized by
    `NodeServer.lockVolume`.
