@@ -86,7 +86,12 @@ type Attachment struct {
 	BackFile string `json:"back-file"`
 }
 
-// List returns every currently-attached loop device.
+// deletedSuffix is what the kernel appends to the path of an unlinked file.
+const deletedSuffix = " (deleted)"
+
+// List returns every currently-attached loop device. A back-file whose
+// image was unlinked while attached is reported without the kernel's
+// " (deleted)" suffix, so it still matches its image.
 func (l *Losetup) List(ctx context.Context) ([]Attachment, error) {
 	out, err := l.exec.Run(ctx, "losetup", "--json", "--list")
 	if err != nil {
@@ -101,22 +106,35 @@ func (l *Losetup) List(ctx context.Context) ([]Attachment, error) {
 	if err := json.Unmarshal([]byte(out), &wire); err != nil {
 		return nil, fmt.Errorf("parse losetup output: %w", err)
 	}
+	for i := range wire.Loopdevices {
+		wire.Loopdevices[i].BackFile = strings.TrimSuffix(wire.Loopdevices[i].BackFile, deletedSuffix)
+	}
 	return wire.Loopdevices, nil
 }
 
 // FindImage returns every loop device whose backing file is named name, a
-// volume's "<volumeID>.img". It matches the name, not the full path: a loop
-// attached by an earlier node-plugin process reports its file relative to
-// that process's backing-store mount once its mount namespace is gone (see
-// Backs), and volume IDs already carry their store.
+// volume's "<volumeID>.img". It matches the name, not the full path, for
+// callers that do not know the image's store: a loop attached by an earlier
+// node-plugin process reports its file relative to that process's
+// backing-store mount (see Backs), and volume IDs already carry their store.
 func (l *Losetup) FindImage(ctx context.Context, name string) ([]string, error) {
+	return l.find(ctx, func(back string) bool { return filepath.Base(back) == name })
+}
+
+// FindBacking returns every loop device attached to the image at imagePath
+// (see Backs).
+func (l *Losetup) FindBacking(ctx context.Context, imagePath string) ([]string, error) {
+	return l.find(ctx, func(back string) bool { return Backs(back, imagePath) })
+}
+
+func (l *Losetup) find(ctx context.Context, match func(string) bool) ([]string, error) {
 	live, err := l.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var devs []string
 	for _, a := range live {
-		if filepath.Base(a.BackFile) == name {
+		if match(a.BackFile) {
 			devs = append(devs, a.Device)
 		}
 	}

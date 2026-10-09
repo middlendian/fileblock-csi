@@ -277,3 +277,35 @@ func TestReconcileDetachesDuplicateLoop(t *testing.T) {
 		t.Fatal("tracked entry dropped")
 	}
 }
+
+// Only the shapes a disconnected store mount produces count as ours: the
+// image at the mount root or one directory down. A volume-named file
+// deeper in some other tree is not this plugin's.
+func TestReconcileLeavesDeepForeignImageNames(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[
+		{"name":"/dev/loop1","back-file":"/mnt/nas/fb-0123456789ab-pvc-2.img"},
+		{"name":"/dev/loop2","back-file":"/fb-0123456789ab-pvc-3.img (deleted)"}]}`, &log)
+	if err := NewReconciler(state, NewLosetup(fake), nil, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"detach /dev/loop2"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}
+
+// An orphan fbcrypt mapping over a loop left by an earlier plugin process
+// is closed before that loop is detached.
+func TestReconcileClosesOrphanCryptOverDisconnectedLoop(t *testing.T) {
+	state, _ := LoadState(filepath.Join(t.TempDir(), "s.json"))
+	var log []string
+	fake := losetupFake(`{"loopdevices":[{"name":"/dev/loop5","back-file":"/fb-0123456789ab-pvc-9.img"}]}`, &log)
+	cm := &fakeCrypt{mappings: []crypt.Mapping{{Name: "fbcrypt-z", Backing: "/dev/loop5"}}, log: &log}
+	if err := NewReconciler(state, NewLosetup(fake), cm, "/stores").Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"close fbcrypt-z", "detach /dev/loop5"}; !slices.Equal(log, want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+}

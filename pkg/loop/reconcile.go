@@ -16,8 +16,11 @@ type CryptMappings interface {
 	Close(ctx context.Context, name string) error
 }
 
-// imageName matches a volume image's file name, "fb-<storeID>-<name>.img".
-var imageName = regexp.MustCompile(`^fb-[0-9a-f]{12}-[^/]+\.img$`)
+// disconnectedImage matches the back-file of a volume image ("fb-<storeID>-
+// <name>.img") attached through a store mount that is no longer reachable:
+// at the mount root, or one subDir level down. Deeper subDirs are not
+// matched, so their orphans are left for unstage to detach.
+var disconnectedImage = regexp.MustCompile(`^/([^/]+/)?fb-[0-9a-f]{12}-[^/]+\.img$`)
 
 // Backs reports whether back, a loop's backing file as losetup reports it,
 // is the image at imagePath. The node plugin's backing-store mounts exist
@@ -104,7 +107,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	ours := func(dev string) bool {
 		back, ok := liveByDev[dev]
 		return ok && (strings.HasPrefix(filepath.Clean(back), cleanRoot+string(filepath.Separator)) ||
-			imageName.MatchString(filepath.Base(back)))
+			disconnectedImage.MatchString(back))
 	}
 
 	// 2. Close orphan crypt mappings first: an open mapping holds its loop.
