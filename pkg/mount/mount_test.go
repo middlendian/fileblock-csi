@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
@@ -158,5 +159,28 @@ func TestIsMountPointAncestorOnly(t *testing.T) {
 	}
 	if got {
 		t.Fatal("expected false for a directory under a mounted ancestor")
+	}
+}
+
+func TestSourceReturnsTopmostMount(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "/dev/loop0\n/dev/loop3\n", nil)
+	got, err := New(fake).Source(context.Background(), "/stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/dev/loop3" {
+		t.Fatalf("Source = %q, want /dev/loop3", got)
+	}
+	if want := []string{"-n", "-o", "SOURCE", "/stage"}; !slices.Equal(fake.Calls[0].Args, want) {
+		t.Fatalf("argv = %v, want %v", fake.Calls[0].Args, want)
+	}
+}
+
+func TestSourceError(t *testing.T) {
+	fake := exectest.New()
+	fake.Set("findmnt", "", &fbexec.Error{Cmd: "findmnt", ExitCode: 1, Err: errors.New("exit status 1")})
+	if _, err := New(fake).Source(context.Background(), "/stage"); err == nil {
+		t.Fatal("want an error for a target that is not mounted")
 	}
 }
