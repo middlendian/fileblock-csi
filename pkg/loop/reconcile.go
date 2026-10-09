@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/middlendian/fileblock-csi/pkg/crypt"
@@ -13,6 +14,23 @@ import (
 type CryptMappings interface {
 	List(ctx context.Context) ([]crypt.Mapping, error)
 	Close(ctx context.Context, name string) error
+}
+
+// imageName matches a volume image's file name, "fb-<storeID>-<name>.img".
+var imageName = regexp.MustCompile(`^fb-[0-9a-f]{12}-[^/]+\.img$`)
+
+// Backs reports whether back, a loop's backing file as losetup reports it,
+// is the image at imagePath. The node plugin's backing-store mounts exist
+// only in its own mount namespace, so once the process that attached a loop
+// is gone the kernel reports the file relative to that mount instead
+// ("/fb-….img", or "/<subDir>/fb-….img"): a trailing match on a path
+// boundary counts too.
+func Backs(back, imagePath string) bool {
+	if back == imagePath {
+		return true
+	}
+	return strings.HasPrefix(back, "/") && strings.HasSuffix(imagePath, back) &&
+		filepath.Base(back) == filepath.Base(imagePath)
 }
 
 // Reconciler runs at node-plugin start and after kubelet-driven retries to
@@ -34,9 +52,11 @@ func NewReconciler(state *State, losetup *Losetup, cm CryptMappings, backingStor
 
 // Reconcile drops state entries whose loop device (or crypt mapping) is no
 // longer what the entry says, closes fbcrypt mappings over our loops that
-// no entry tracks, and then detaches loop devices backed by a .img under
-// our backing store that no entry tracks. The staging mount itself is left
-// alone; the kubelet retries publish/unstage.
+// no entry tracks, and then detaches loop devices backed by one of our
+// images that no entry tracks. An untracked loop that is still mounted is
+// only marked autoclear by the kernel and goes away when it is unmounted.
+// The staging mount itself is left alone; the kubelet retries
+// publish/unstage.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	live, err := r.losetup.List(ctx)
 	if err != nil {
@@ -60,7 +80,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	// 1. Drop stale state entries.
 	for _, m := range r.state.All() {
 		back, ok := liveByDev[m.LoopDev]
-		stale := !ok || back != m.ImagePath
+		stale := !ok || !Backs(back, m.ImagePath)
 		if m.CryptDev != "" {
 			b, open := backingByName[filepath.Base(m.CryptDev)]
 			stale = stale || !open || b != m.LoopDev
@@ -79,9 +99,12 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 	}
 	cleanRoot := filepath.Clean(r.backingStorePath)
+	// Ours: under the stores root, or a volume image attached by an earlier
+	// plugin process, whose path no longer starts with the root (see Backs).
 	ours := func(dev string) bool {
 		back, ok := liveByDev[dev]
-		return ok && strings.HasPrefix(filepath.Clean(back), cleanRoot+string(filepath.Separator))
+		return ok && (strings.HasPrefix(filepath.Clean(back), cleanRoot+string(filepath.Separator)) ||
+			imageName.MatchString(filepath.Base(back)))
 	}
 
 	// 2. Close orphan crypt mappings first: an open mapping holds its loop.

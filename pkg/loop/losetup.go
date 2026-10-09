@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -101,6 +102,25 @@ func (l *Losetup) List(ctx context.Context) ([]Attachment, error) {
 		return nil, fmt.Errorf("parse losetup output: %w", err)
 	}
 	return wire.Loopdevices, nil
+}
+
+// FindImage returns every loop device whose backing file is named name, a
+// volume's "<volumeID>.img". It matches the name, not the full path: a loop
+// attached by an earlier node-plugin process reports its file relative to
+// that process's backing-store mount once its mount namespace is gone (see
+// Backs), and volume IDs already carry their store.
+func (l *Losetup) FindImage(ctx context.Context, name string) ([]string, error) {
+	live, err := l.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var devs []string
+	for _, a := range live {
+		if filepath.Base(a.BackFile) == name {
+			devs = append(devs, a.Device)
+		}
+	}
+	return devs, nil
 }
 
 // SetCapacity refreshes the loop device's view of the backing file's size
