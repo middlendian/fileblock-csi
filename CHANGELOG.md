@@ -10,25 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Loop devices are no longer leaked when a volume is unstaged after the
-  node plugin container has restarted. Backing stores are mounted in the
-  plugin's own mount namespace, so after a restart the kernel reports
-  each surviving loop's backing file relative to the store mount
-  (`/fb-<storeID>-<name>.img`) instead of its path under
-  `--stores-root`. The startup reconciler compared paths exactly, so it
-  dropped the state entries of volumes that were still staged and never
-  detached the loops left behind; `NodeUnstageVolume` then had no entry
-  and detached nothing while reporting success. Each leaked loop held
-  its `.img` open, which on a `hard` NFS mount can stall node shutdown
-  once the network is down. The reconciler now recognizes these paths,
-  and unstage detaches every loop attached to the volume's image.
+  node plugin pod has been replaced (every driver upgrade or rollout) or
+  its container restarted. Backing stores are mounted in the plugin's own
+  mount namespace, so afterwards the kernel reports each surviving loop's
+  backing file relative to the store mount (`/fb-<storeID>-<name>.img`)
+  instead of its path under `--stores-root`. The startup reconciler
+  compared paths exactly, so it dropped the state entries of volumes that
+  were still staged and never detached the loops left behind;
+  `NodeUnstageVolume` then had no entry and detached nothing while
+  reporting success. Each leaked loop held its `.img` open, which on a
+  `hard` NFS mount can stall node shutdown once the network is down. The
+  reconciler now recognizes these paths, and unstage detaches every loop
+  still attached to the volume's image (including ones whose image was
+  deleted while attached) after unmounting every mount stacked on the
+  staging path.
 - `NodeStageVolume` no longer attaches a second loop device to an image
-  that already has one. It reuses the attached loop, and when the
-  staging path is already mounted but unrecorded (the kubelet re-staging
-  after a plugin restart) it adopts that mount instead of stacking a
-  second ext4 instance of the same image on top of it. A staging path
-  mounted from anything else is refused with `FailedPrecondition`.
-  Loops leaked by earlier versions are detached by the reconciler the
-  next time the node plugin starts.
+  that already has one. When the staging path is already mounted but
+  unrecorded (the kubelet re-staging after the plugin lost its state
+  entry) it adopts that mount instead of stacking a second ext4 instance
+  of the same image on top of it; a staging path mounted from anything
+  else is refused with `FailedPrecondition`. When the staging path is not
+  mounted, a loop on the image that is mounted or held elsewhere is
+  refused with `FailedPrecondition`, and idle leftovers are detached
+  before a fresh attach.
+- Loops leaked by earlier versions are detached by the reconciler the
+  next time the node plugin starts, if their image sits at the store
+  root or one subDir level down (images under deeper subDirs are
+  detached at their next unstage). A leaked loop that is still mounted
+  is freed when it is unmounted. Silly-renamed NFS files (`.nfsXXXX`)
+  are not cleaned automatically.
 
 ## [0.5.0] - 2026-09-26
 

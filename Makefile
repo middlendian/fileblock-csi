@@ -16,6 +16,7 @@
 #                        # runs literally this target.
 #   make smoke           # local end-to-end (requires root, loop devices)
 #   make sanity          # csi-sanity (requires root, loop devices, csi-sanity)
+#   make smoke-restart   # loop leaks across a plugin replacement (root, unshare)
 #   make e2e             # kind + go test ./test/e2e (local backing store)
 #   make e2e-nfs         # kind + go test ./test/e2e (NFS backing store, NFSv4.1)
 #   make e2e-nfs3        # same as e2e-nfs with NFS_VERSION=3
@@ -123,6 +124,10 @@ tidy-check:
 .PHONY: smoke
 smoke:
 	sudo -E env "PATH=$$PATH" hack/smoke.sh
+
+.PHONY: smoke-restart
+smoke-restart:
+	sudo -E env "PATH=$$PATH" hack/smoke-restart.sh
 
 .PHONY: sanity
 sanity:

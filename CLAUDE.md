@@ -43,6 +43,7 @@ make tidy           # go mod tidy
 make tidy-check     # fail if go.mod/go.sum need tidying (CI gate)
 make check          # full CI gate (fmt+vet+lint+tidy+cover+build+smoke+sanity)
 make smoke          # sudo hack/smoke.sh
+make smoke-restart  # sudo hack/smoke-restart.sh: no loop leak across a plugin replacement
 make sanity         # sudo hack/csi-sanity.sh
 make e2e            # kind + go test ./test/e2e (local backing store)
 make e2e-nfs        # kind + go test ./test/e2e (NFSv3 backing store)
@@ -67,6 +68,10 @@ an image that ships only Go.
 
 The smoke and sanity scripts must run as root (loop devices and mount(8)).
 They use plain temp directories — no kind, no kubelet.
+`hack/smoke-restart.sh` additionally runs the node plugin under
+`unshare --mount` with a private stores root and a shared staging area,
+the DaemonSet's layout, and kills it between stage and unstage the way a
+pod replacement does. It is not yet part of `make check`.
 
 The e2e suite is the only layer that drives kubelet directly. It boots a
 two-node kind cluster with a shared backing store, applies the `e2e` overlay,
@@ -292,13 +297,21 @@ dm-crypt mapping, empty for a plaintext one. Invariants:
    reports its file relative to the store mount (`/fb-….img`, or
    `/<subDir>/fb-….img`); that trailing match counts.
 2. Every loop device backed by a `.img` under our `backingStorePath`, or
-   by a file named like a volume image (`fb-<storeID>-<name>.img`, the
-   form above), and *not* present in the state file gets detached on
-   plugin start. A mounted loop is only marked autoclear by the kernel.
-3. The state file is a cache, not the only record: Unstage detaches every
-   loop whose back-file is named `<volumeID>.img` (`Losetup.FindImage`),
-   and Stage reuses such a loop, or adopts an unrecorded mount at the
-   staging path whose source is one, instead of attaching another.
+   by a volume image in the disconnected form above (`/fb-<storeID>-….img`
+   or `/<one dir>/fb-….img`), and *not* present in the state file gets
+   detached on plugin start. A mounted loop is only marked autoclear by
+   the kernel. `losetup` back-files lose the kernel's ` (deleted)` suffix
+   in `Losetup.List`. Not matched, so left for unstage: images under a
+   nested (multi-level) subDir, and NFS silly-renamed `.nfsXXXX` files.
+3. The state file is a cache, not the only record. Unstage pops stacked
+   mounts at the staging path (up to 8), then detaches every loop whose
+   back-file is named `<volumeID>.img` (`Losetup.FindImage`) — the state
+   entry's `LoopDev` only if it is among them. Stage finds the image's
+   loops with `Losetup.FindBacking`: with the staging path mounted it
+   adopts the mount if its source is one of them (or this volume's
+   dm-crypt mapping over one), else `FailedPrecondition`; unmounted, any
+   busy loop (mounted, or with sysfs holders) is `FailedPrecondition` and
+   idle ones are detached before a fresh attach.
 4. Concurrent in-process Stage/Unstage on the same volume is serialized by
    `NodeServer.lockVolume`.
 5. Every `fbcrypt-*` mapping over a loop backed by our store and absent
