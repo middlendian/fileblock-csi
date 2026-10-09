@@ -43,6 +43,7 @@ type NodeServer struct {
 	log      *slog.Logger
 	registry *store.Registry
 	luks     *crypt.Crypt
+	sysRoot  string
 
 	// One mutex per volumeID protects Stage/Unstage from racing each other
 	// inside this process.
@@ -62,6 +63,7 @@ func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *lo
 		log:      log,
 		registry: reg,
 		luks:     crypt.New(exec),
+		sysRoot:  "/sys",
 		volMutex: map[string]*sync.Mutex{},
 	}
 }
@@ -134,7 +136,9 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 
 	// Idempotency: if we already staged this volume to this path, return ok.
 	stageMounted, err := n.mnt.IsMountPoint(ctx, stagePath)
-	stageMounted = err == nil && stageMounted
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "check staging path: %v", err)
+	}
 	if existing, ok := n.state.Get(volumeID); ok && existing.StagePath == stagePath && stageMounted {
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
@@ -162,12 +166,26 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 
 	mapper := crypt.MapperName(volumeID)
-	loops, err := n.losetup.FindImage(ctx, filepath.Base(imgPath))
+	loops, err := n.losetup.FindBacking(ctx, imgPath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "find loop devices: %v", err)
 	}
 	if stageMounted {
 		return n.adoptStage(ctx, volumeID, imgPath, stagePath, loops, encrypted)
+	}
+	// The staging path is not mounted, so a loop already on the image is
+	// either a leftover or in use elsewhere. A live one must not be
+	// fscked, mounted again, or joined by a second loop.
+	for _, dev := range loops {
+		busy, err := n.loopBusy(ctx, dev)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "check %s: %v", dev, err)
+		}
+		if busy {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"volume %s is already in use on this node through %s; refusing a second attachment of one image",
+				volumeID, dev)
+		}
 	}
 	if encrypted {
 		// The staging path is not mounted, so an open mapping is held by
@@ -184,30 +202,33 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		}
 	}
 
-	// 1. Attach a loop device, sized to what the image already records —
-	//    or reuse one a stage that lost its state entry left attached:
-	//    two loops on one image are two block devices, and two ext4
-	//    instances if both are ever mounted.
-	var dev string
+	// Idle leftovers (a stage whose state entry was lost) are detached, so
+	// this stage is a normal first stage: fresh sector size, a freshly
+	// opened backing file, set-capacity before the first read.
+	for _, dev := range loops {
+		if err := n.losetup.Detach(ctx, dev); err != nil {
+			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
+		}
+	}
 	if len(loops) > 0 {
-		dev = loops[0]
-		n.log.Info("reusing loop device already attached to image",
-			"volumeID", volumeID, "loopDev", dev)
-	} else {
-		sector, err := n.loopSectorSize(ctx, imgPath, imgInfo.Size(), encrypted)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "read sector size of %s: %v", imgPath, err)
+		n.log.Info("detached idle loop devices left on image", "volumeID", volumeID, "loopDevs", loops)
+	}
+
+	// 1. Attach a loop device, sized to what the image already records.
+	sector, err := n.loopSectorSize(ctx, imgPath, imgInfo.Size(), encrypted)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read sector size of %s: %v", imgPath, err)
+	}
+	if sector != image.DefaultBlockSize {
+		n.log.Info("loop sector size follows the image's on-disk format",
+			"volumeID", volumeID, "sectorSize", sector)
+	}
+	dev, err := n.losetup.Attach(ctx, imgPath, sector)
+	if err != nil {
+		if errors.Is(err, loop.ErrPoolExhausted) {
+			return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
 		}
-		if sector != image.DefaultBlockSize {
-			n.log.Info("loop sector size follows the image's on-disk format",
-				"volumeID", volumeID, "sectorSize", sector)
-		}
-		if dev, err = n.losetup.Attach(ctx, imgPath, sector); err != nil {
-			if errors.Is(err, loop.ErrPoolExhausted) {
-				return nil, status.Errorf(codes.ResourceExhausted, "%v", err)
-			}
-			return nil, status.Errorf(codes.Internal, "losetup: %v", err)
-		}
+		return nil, status.Errorf(codes.Internal, "losetup: %v", err)
 	}
 	detachOnFail := func() { _ = n.losetup.Detach(ctx, dev) }
 
@@ -282,7 +303,9 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 // adoptStage handles a stage request for a path that is already mounted
 // but that the state file does not record — the kubelet re-staging after
 // the plugin lost its state. If the mount is this volume's, record it and
-// succeed; never stack a second loop and mount over it.
+// succeed; never stack a second loop and mount over it. Nothing else a
+// stage does runs here: key-slot rotation and checking the requested
+// capability against the existing mount wait for the next real stage.
 func (n *NodeServer) adoptStage(ctx context.Context, volumeID, imgPath, stagePath string, loops []string, encrypted bool) (*csi.NodeStageVolumeResponse, error) {
 	src, err := n.mnt.Source(ctx, stagePath)
 	if err != nil {
@@ -322,8 +345,22 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 	unlock := n.lockVolume(volumeID)
 	defer unlock()
 
-	if err := n.mnt.Unmount(ctx, stagePath); err != nil {
-		return nil, status.Errorf(codes.Internal, "umount stage: %v", err)
+	// Older versions could stack a second mount on the staging path; pop
+	// them all, but give up rather than loop on a path that stays mounted.
+	for i := 0; ; i++ {
+		mounted, err := n.mnt.IsMountPoint(ctx, stagePath)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "check stage: %v", err)
+		}
+		if !mounted {
+			break
+		}
+		if i == maxStageUnmounts {
+			return nil, status.Errorf(codes.Internal, "%s still mounted after %d unmounts", stagePath, i)
+		}
+		if err := n.mnt.Unmount(ctx, stagePath); err != nil {
+			return nil, status.Errorf(codes.Internal, "umount stage: %v", err)
+		}
 	}
 	_ = os.Remove(stagePath)
 
@@ -334,9 +371,6 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 				return nil, status.Errorf(codes.Internal, "cryptsetup close: %v", err)
 			}
 		}
-		if err := n.losetup.Detach(ctx, m.LoopDev); err != nil {
-			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
-		}
 	} else {
 		// No state entry to say whether this volume was ever opened
 		// encrypted; try the deterministic mapper name anyway. A mapping
@@ -344,17 +378,16 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 		// the error is discarded rather than failing the unstage.
 		_ = n.luks.Close(ctx, crypt.MapperName(volumeID))
 	}
-	// The state entry can be missing, or name only one of several loops on
-	// this image, after a plugin restart: detach whatever is attached to it.
-	// A loop still held open elsewhere is only marked autoclear.
+	// Detach whatever is attached to the image, not just the state entry's
+	// loop: the entry can be missing, or name one of several, after a
+	// plugin restart, and its loop number may since have been reused by
+	// another volume. A loop still held open elsewhere is only marked
+	// autoclear.
 	loops, err := n.losetup.FindImage(ctx, volumeID+image.ImageExt)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "find loop devices: %v", err)
 	}
 	for _, dev := range loops {
-		if ok && dev == m.LoopDev {
-			continue
-		}
 		if err := n.losetup.Detach(ctx, dev); err != nil {
 			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
 		}
@@ -479,6 +512,22 @@ func (n *NodeServer) loopSectorSize(ctx context.Context, imgPath string, size in
 		return 0, err
 	}
 	return loop.SectorSizeFor(recorded, size), nil
+}
+
+// maxStageUnmounts bounds how many stacked mounts unstage pops.
+const maxStageUnmounts = 8
+
+// loopBusy reports whether dev is mounted or held by another block device
+// (a dm-crypt mapping).
+func (n *NodeServer) loopBusy(ctx context.Context, dev string) (bool, error) {
+	if mounted, err := n.mnt.IsSourceMounted(ctx, dev); err != nil || mounted {
+		return mounted, err
+	}
+	holders, err := os.ReadDir(filepath.Join(n.sysRoot, "block", filepath.Base(dev), "holders"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	return len(holders) > 0, nil
 }
 
 func (n *NodeServer) lockVolume(volumeID string) func() {
