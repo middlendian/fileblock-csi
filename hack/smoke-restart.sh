@@ -52,7 +52,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+# What the mount and loop tables looked like, for diagnosing a failure.
+dump() {
+  set +e
+  echo "--- / and kubelet-dir propagation (outer namespace)"
+  findmnt -n -o TARGET,PROPAGATION,ID,PARENT /
+  findmnt -n -o TARGET,PROPAGATION,ID,PARENT "$KUBELET"
+  if [[ -n "${STAGE-}" ]]; then
+    echo "--- findmnt $STAGE (outer namespace)"
+    findmnt -n -o TARGET,SOURCE,FSTYPE,PROPAGATION,ID,PARENT "$STAGE"
+  fi
+  echo "--- outer mountinfo under $WORK"
+  grep -F "$WORK" /proc/self/mountinfo
+  if [[ -n "${NODE_PID-}" && -r "/proc/$NODE_PID/mountinfo" ]]; then
+    echo "--- node plugin (pid $NODE_PID) mountinfo under $WORK"
+    grep -F "$WORK" "/proc/$NODE_PID/mountinfo"
+  fi
+  echo "--- losetup"
+  losetup -l -O NAME,BACK-FILE
+  echo "--- node plugin log (tail)"
+  tail -n 40 "$LOG"/node*.log
+  set -e
+}
+
+fail() { echo "FAIL: $*" >&2; dump >&2; exit 1; }
+trap 'echo "FAIL: command failed at line $LINENO" >&2; dump >&2' ERR
 
 rm -rf "$WORK"
 mkdir -p "$BACKING" "$CTL_STORES" "$STORES" "$KUBELET/staging" "$STATE" "$BIN" "$LOG"
@@ -122,6 +146,8 @@ mkdir -p "$STAGE"
 stage "$STAGE" "$VOL"
 findmnt -n "$STAGE" >/dev/null || fail "stage mount not visible outside the plugin namespace"
 [[ $(loops_on "$IMG") -eq 1 ]] || fail "expected one loop after stage"
+echo "--- mount table after the first stage"
+dump
 replace_node
 grep -q "\"$VOL\"" "$STATE/loop-mappings.json" || fail "reconciler dropped the staged volume's state entry"
 [[ $(loops_on "$IMG") -eq 1 ]] || fail "expected one loop after plugin replacement"
