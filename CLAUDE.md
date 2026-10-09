@@ -71,7 +71,8 @@ They use plain temp directories — no kind, no kubelet.
 `hack/smoke-restart.sh` additionally runs the node plugin under
 `unshare --mount` with a private stores root and a shared staging area,
 the DaemonSet's layout, and kills it between stage and unstage the way a
-pod replacement does. It is not yet part of `make check`.
+pod replacement does. It is not part of `make check`; `ci.yml` runs it
+as a separate step after `make check`.
 
 The e2e suite is the only layer that drives kubelet directly. It boots a
 two-node kind cluster with a shared backing store, applies the `e2e` overlay,
@@ -87,7 +88,8 @@ GitHub Actions workflows live in `.github/workflows/`:
 
 - `ci.yml` runs on every push and PR: fmt-check, vet, golangci-lint
   (config in `.golangci.yml`), race-enabled `go test ./...` with
-  coverage, `go mod tidy` verification, and a container build.
+  coverage, `go mod tidy` verification, and a container build, then
+  `make smoke-restart`.
 - `integration.yml` runs `hack/smoke.sh` and `hack/csi-sanity.sh` on
   push to `main` and via workflow_dispatch.
 - `e2e.yml` runs `hack/e2e.sh` in a `local` and an `nfs` matrix variant on
