@@ -286,12 +286,22 @@ optional: the `/dev/mapper/fbcrypt-…` path for an encrypted volume's
 dm-crypt mapping, empty for a plaintext one. Invariants:
 
 1. Every entry must correspond to a `losetup --json --list` row whose
-   `back-file` matches `ImagePath`. Otherwise the reconciler drops it.
-2. Every loop device backed by a `.img` under our `backingStorePath` and
-   *not* present in the state file gets detached on plugin start.
-3. Concurrent in-process Stage/Unstage on the same volume is serialized by
+   `back-file` matches `ImagePath` (`loop.Backs`). Otherwise the
+   reconciler drops it. Backing stores are mounted in the node plugin's
+   own mount namespace, so a loop attached by an earlier plugin process
+   reports its file relative to the store mount (`/fb-….img`, or
+   `/<subDir>/fb-….img`); that trailing match counts.
+2. Every loop device backed by a `.img` under our `backingStorePath`, or
+   by a file named like a volume image (`fb-<storeID>-<name>.img`, the
+   form above), and *not* present in the state file gets detached on
+   plugin start. A mounted loop is only marked autoclear by the kernel.
+3. The state file is a cache, not the only record: Unstage detaches every
+   loop whose back-file is named `<volumeID>.img` (`Losetup.FindImage`),
+   and Stage reuses such a loop, or adopts an unrecorded mount at the
+   staging path whose source is one, instead of attaching another.
+4. Concurrent in-process Stage/Unstage on the same volume is serialized by
    `NodeServer.lockVolume`.
-4. Every `fbcrypt-*` mapping over a loop backed by our store and absent
+5. Every `fbcrypt-*` mapping over a loop backed by our store and absent
    from the state file is closed on plugin start, before orphan loops
    are detached.
 
