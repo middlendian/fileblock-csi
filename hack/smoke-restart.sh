@@ -86,7 +86,12 @@ echo "::: building binaries"
 ( cd "$ROOT" && go build -o "$BIN/fileblock-node" ./cmd/node )
 
 # Shared staging area, private stores root: the DaemonSet's layout.
+# The self-bind would otherwise join /'s peer group (a bind of a shared
+# mount is its peer), and every stage mount would also propagate to the
+# same path under /, shadowed by the bind: two mountinfo entries for one
+# mount. Private, then shared, gives it a peer group of its own.
 mount --bind "$KUBELET" "$KUBELET"
+mount --make-private "$KUBELET"
 mount --make-shared "$KUBELET"
 mount --bind "$STORES" "$STORES"
 mount --make-private "$STORES"
@@ -121,6 +126,18 @@ stage() {
 
 loops_on() { losetup -j "$1" | wc -l; }
 
+# Mount instances at the staging path in this namespace: distinct
+# (device, peer group) pairs, so propagated copies of one mount count once
+# while a second mount stacked on top (its own peer group) counts again.
+stage_mounts() {
+  awk -v mp="$STAGE" '$5 == mp {
+    tag = "id:" $1
+    for (i = 7; $i != "-"; i++) if ($i ~ /^shared:/) tag = $i
+    k = $3 " " tag
+    if (!(k in seen)) { seen[k] = 1; n++ }
+  } END { print n + 0 }' /proc/self/mountinfo
+}
+
 "$BIN/fileblock-controller" \
   --endpoint="unix://$CTL_SOCK" \
   --stores-root="$CTL_STORES" \
@@ -146,8 +163,7 @@ mkdir -p "$STAGE"
 stage "$STAGE" "$VOL"
 findmnt -n "$STAGE" >/dev/null || fail "stage mount not visible outside the plugin namespace"
 [[ $(loops_on "$IMG") -eq 1 ]] || fail "expected one loop after stage"
-echo "--- mount table after the first stage"
-dump
+[[ $(stage_mounts) -eq 1 ]] || fail "expected one mount at the staging path after stage"
 replace_node
 grep -q "\"$VOL\"" "$STATE/loop-mappings.json" || fail "reconciler dropped the staged volume's state entry"
 [[ $(loops_on "$IMG") -eq 1 ]] || fail "expected one loop after plugin replacement"
@@ -155,7 +171,7 @@ grep -q "\"$VOL\"" "$STATE/loop-mappings.json" || fail "reconciler dropped the s
 echo "::: re-stage of a still-mounted volume adopts it (no second loop, no stacked mount)"
 stage "$STAGE" "$VOL"
 [[ $(loops_on "$IMG") -eq 1 ]] || fail "re-stage attached a second loop"
-[[ $(findmnt -n "$STAGE" | wc -l) -eq 1 ]] || fail "re-stage stacked a second mount"
+[[ $(stage_mounts) -eq 1 ]] || fail "re-stage stacked a second mount"
 
 echo "::: stateless re-stage of a still-mounted volume adopts it"
 # As v0.5.0 left it after a replacement: mounted, attached, no state entry.
@@ -164,7 +180,7 @@ rm -f "$STATE/loop-mappings.json"
 start_node
 stage "$STAGE" "$VOL"
 [[ $(loops_on "$IMG") -eq 1 ]] || fail "stateless re-stage attached a second loop"
-[[ $(findmnt -n "$STAGE" | wc -l) -eq 1 ]] || fail "stateless re-stage stacked a second mount"
+[[ $(stage_mounts) -eq 1 ]] || fail "stateless re-stage stacked a second mount"
 grep -q "\"$VOL\"" "$STATE/loop-mappings.json" || fail "stateless re-stage did not record the adopted mount"
 
 replace_node
