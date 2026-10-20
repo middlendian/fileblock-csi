@@ -2,7 +2,9 @@
 # Manual reproduction of an NFS server answering ESTALE for a short window,
 # the condition failed-volume remediation exists for. Not run in CI: it
 # depends on timing. Run against a `make e2e-nfs` cluster (KEEP=1) with a pod
-# writing continuously to a fileblock volume.
+# writing continuously to a fileblock volume, for example:
+#
+#   kubectl -n ns exec deploy/writer -- sh -c 'while :; do date >> /data/log; sync; sleep 1; done'
 #
 #   hack/estale-repro.sh /path/to/export 30
 #

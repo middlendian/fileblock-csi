@@ -27,7 +27,7 @@ func TestFailedVolumeIsRemediated(t *testing.T) {
 	ns := makeNamespace(t)
 	applyRemountROSC(t)
 	applyYAML(t, pvcManifestSC(ns, "vol", "128Mi", remountROSC))
-	applyYAML(t, deploymentWithPVC(ns, "app", "vol", ""))
+	applyYAML(t, deploymentWithPVC(ns, "app", "vol", "", 1))
 
 	old := waitDeploymentPod(t, ns, "app", "")
 	failVolume(t, ns, old)
@@ -47,7 +47,10 @@ func TestFailedVolumeRestagesOnSameNode(t *testing.T) {
 	ns := makeNamespace(t)
 	applyRemountROSC(t)
 	applyYAML(t, pvcManifestSC(ns, "vol", "128Mi", remountROSC))
-	applyYAML(t, deploymentWithPVC(ns, "app", "vol", node))
+	// A longer grace period keeps the old pod's publish in place until the
+	// replacement is in the kubelet's desired state, so the kubelet never
+	// unstages and only the driver's re-stage on publish can recover it.
+	applyYAML(t, deploymentWithPVC(ns, "app", "vol", node, 10))
 
 	old := waitDeploymentPod(t, ns, "app", "")
 	if old.node != node {
@@ -64,9 +67,7 @@ func TestFailedVolumeRestagesOnSameNode(t *testing.T) {
 	}
 	assertWritable(t, ns, repl.name)
 
-	// A fresh superblock (checked by assertWritable) is the proof; the log
-	// says which path produced it. The kubelet unstaging and re-staging the
-	// volume itself would be just as good, but logs nothing at info level.
+	// The driver, not the kubelet, must have replaced the broken stage.
 	nodePod := dsPodOnNode(t, "fileblock-system", "fileblock-node", node)
 	logs := kubectl(t, "-n", "fileblock-system", "logs", nodePod, "-c", "fileblock-node")
 	for _, line := range strings.Split(logs, "\n") {
@@ -75,7 +76,7 @@ func TestFailedVolumeRestagesOnSameNode(t *testing.T) {
 			return
 		}
 	}
-	t.Logf("no in-place re-stage logged for %s; the kubelet must have unstaged and re-staged it", volumeID)
+	t.Fatalf("fileblock-node on %s logged no in-place re-stage of %s", node, volumeID)
 }
 
 // TestPodDeletePolicyDeniesOtherNode checks the admission policy that limits
@@ -91,10 +92,12 @@ func TestPodDeletePolicyDeniesOtherNode(t *testing.T) {
 	ns := makeNamespace(t)
 
 	applyYAML(t, pvcManifest(ns, "vol-b", "64Mi"))
-	applyYAML(t, podOnNode(ns, "pod-b", "vol-b", nodeB, "sleep 3600\n"))
+	// Both pods are controller-owned and mount a PVC, so the node is the
+	// only thing that differs.
+	applyYAML(t, deploymentWithPVC(ns, "app-b", "vol-b", nodeB, 1))
 	applyYAML(t, pvcManifest(ns, "vol-a", "64Mi"))
-	applyYAML(t, deploymentWithPVC(ns, "app-a", "vol-a", nodeA))
-	waitPodReady(t, ns, "pod-b", defaultPodReady)
+	applyYAML(t, deploymentWithPVC(ns, "app-a", "vol-a", nodeA, 1))
+	podB := waitDeploymentPod(t, ns, "app-b", "")
 	podA := waitDeploymentPod(t, ns, "app-a", "")
 
 	nodePod := dsPodOnNode(t, "fileblock-system", "fileblock-node", nodeA)
@@ -103,7 +106,7 @@ func TestPodDeletePolicyDeniesOtherNode(t *testing.T) {
 	kc := tokenKubeconfig(t, token)
 
 	// --wait=false: the role grants no watch, which a waiting delete needs.
-	out, err := kubectlRaw("--kubeconfig", kc, "-n", ns, "delete", "pod", "pod-b", "--wait=false")
+	out, err := kubectlRaw("--kubeconfig", kc, "-n", ns, "delete", "pod", podB.name, "--wait=false")
 	if err == nil {
 		t.Fatalf("delete of a pod on another node succeeded:\n%s", out)
 	}
@@ -153,9 +156,9 @@ volumeBindingMode: WaitForFirstConsumer
 // deploymentWithPVC renders a one-replica Deployment (so its pods are
 // controller-owned) mounting pvc at /data. A non-empty node pins it there
 // through nodeSelector, which unlike nodeName still lets WaitForFirstConsumer
-// provisioning see the scheduler's choice. The short grace period stops
-// `sleep` as PID 1, which ignores SIGTERM, holding the volume for 30s.
-func deploymentWithPVC(ns, name, pvc, node string) string {
+// provisioning see the scheduler's choice. grace replaces the 30s default,
+// for which `sleep` as PID 1, ignoring SIGTERM, would hold the volume.
+func deploymentWithPVC(ns, name, pvc, node string, grace int) string {
 	selector := ""
 	if node != "" {
 		selector = fmt.Sprintf("      nodeSelector:\n        kubernetes.io/hostname: %s\n", node)
@@ -175,7 +178,7 @@ spec:
       labels:
         app: %[1]s
     spec:
-      terminationGracePeriodSeconds: 1
+      terminationGracePeriodSeconds: %[5]d
 %[3]s      tolerations:
         - operator: Exists
       containers:
@@ -189,7 +192,7 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: %[4]s
-`, name, ns, selector, pvc)
+`, name, ns, selector, pvc, grace)
 }
 
 type podRef struct{ name, uid, node string }
@@ -247,9 +250,16 @@ func hasOpt(opts []string, want string) bool {
 	return false
 }
 
+// forcedReadOnly applies the monitor's rule to superblock options: ext4
+// sets ro up to kernel 6.11 and adds emergency_ro (keeping rw) from 6.15;
+// shutdown marks a filesystem that was shut down.
+func forcedReadOnly(superOpts []string) bool {
+	return hasOpt(superOpts, "ro") || hasOpt(superOpts, "emergency_ro") || hasOpt(superOpts, "shutdown")
+}
+
 // failVolume raises an ext4 error on the pod's volume through sysfs on its
-// kind node. With errors=remount-ro, ext4 makes the superblock read-only
-// while each mount stays rw.
+// kind node. With errors=remount-ro, ext4 marks the superblock read-only
+// (see forcedReadOnly) while each mount stays rw.
 func failVolume(t *testing.T, ns string, p podRef) {
 	t.Helper()
 	majMin, _ := dataMount(t, ns, p.name)
@@ -258,8 +268,10 @@ func failVolume(t *testing.T, ns string, p podRef) {
 		t.Fatalf("no block device for %s on %s", majMin, p.node)
 	}
 	nodeExec(t, p.node, fmt.Sprintf("echo 1 > /sys/fs/ext4/%s/trigger_fs_error", dev))
-	if _, opts := dataMount(t, ns, p.name); !hasOpt(opts, "ro") {
-		t.Fatalf("superblock of %s still %v after trigger_fs_error; is errors=remount-ro in effect?", dev, opts)
+	if _, opts := dataMount(t, ns, p.name); !forcedReadOnly(opts) {
+		t.Fatalf("superblock options of %s are %q after trigger_fs_error: no ro, emergency_ro or shutdown. "+
+			"Either errors=remount-ro is not in effect, or the kernel is 6.12-6.14, which shows no passive signal",
+			dev, strings.Join(opts, ","))
 	}
 	t.Logf("forced %s (%s) read-only on %s", dev, majMin, p.node)
 }
@@ -310,7 +322,7 @@ func waitPodUIDGone(t *testing.T, ns, app, uid string) {
 // that was forced read-only, and that a write lands.
 func assertWritable(t *testing.T, ns, pod string) {
 	t.Helper()
-	if _, opts := dataMount(t, ns, pod); hasOpt(opts, "ro") {
+	if _, opts := dataMount(t, ns, pod); forcedReadOnly(opts) {
 		t.Fatalf("replacement %s was handed the read-only superblock: %v", pod, opts)
 	}
 	kubectl(t, "-n", ns, "exec", pod, "--", "sh", "-c", "touch /data/ok && sync")
