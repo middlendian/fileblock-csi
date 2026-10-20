@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ const (
 // fileblock-node to report it on the pod and delete the pod, so that its
 // Deployment brings up a replacement with a writable volume.
 func TestFailedVolumeIsRemediated(t *testing.T) {
+	skipWithoutPassiveSignal(t, nodeNames(t)[0])
 	ns := makeNamespace(t)
 	applyRemountROSC(t)
 	applyYAML(t, pvcManifestSC(ns, "vol", "128Mi", remountROSC))
@@ -44,6 +46,7 @@ func TestFailedVolumeIsRemediated(t *testing.T) {
 // working filesystem.
 func TestFailedVolumeRestagesOnSameNode(t *testing.T) {
 	node := nodeNames(t)[0]
+	skipWithoutPassiveSignal(t, node)
 	ns := makeNamespace(t)
 	applyRemountROSC(t)
 	applyYAML(t, pvcManifestSC(ns, "vol", "128Mi", remountROSC))
@@ -255,6 +258,44 @@ func hasOpt(opts []string, want string) bool {
 // shutdown marks a filesystem that was shut down.
 func forcedReadOnly(superOpts []string) bool {
 	return hasOpt(superOpts, "ro") || hasOpt(superOpts, "emergency_ro") || hasOpt(superOpts, "shutdown")
+}
+
+// passiveSignalKernel reports whether a kernel release (uname -r) leaves a
+// forced read-only ext4 visible in mountinfo; 6.12 to 6.14 do not. ok is
+// false when the release does not start with major.minor.
+func passiveSignalKernel(release string) (supported, ok bool) {
+	parts := strings.SplitN(release, ".", 3)
+	if len(parts) < 2 {
+		return false, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false, false
+	}
+	// The minor may run straight into a suffix, as in "14-rc1" or "14+".
+	end := 0
+	for end < len(parts[1]) && parts[1][end] >= '0' && parts[1][end] <= '9' {
+		end++
+	}
+	minor, err := strconv.Atoi(parts[1][:end])
+	if err != nil {
+		return false, false
+	}
+	return major != 6 || minor < 12 || minor > 14, true
+}
+
+// skipWithoutPassiveSignal skips on kernels the monitor documents as
+// unsupported. Kind nodes share the host kernel, so any node answers.
+func skipWithoutPassiveSignal(t *testing.T, node string) {
+	t.Helper()
+	release := strings.TrimSpace(nodeExec(t, node, "uname -r"))
+	supported, ok := passiveSignalKernel(release)
+	if !ok {
+		t.Fatalf("cannot parse kernel release %q from %s", release, node)
+	}
+	if !supported {
+		t.Skipf("kernel %s: 6.12 to 6.14 leave no passive signal in mountinfo, so failed-volume remediation is unsupported", release)
+	}
 }
 
 // failVolume raises an ext4 error on the pod's volume through sysfs on its
