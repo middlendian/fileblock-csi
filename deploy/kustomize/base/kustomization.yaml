@@ -5,6 +5,7 @@ resources:
   - namespace.yaml
   - csidriver.yaml
   - rbac.yaml
+  - remediation-policy.yaml
   - controller-deployment.yaml
   - node-daemonset.yaml
 

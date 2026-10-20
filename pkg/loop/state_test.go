@@ -3,6 +3,7 @@ package loop
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -56,7 +57,7 @@ func TestPutGetDeleteRoundTrip(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 	got, ok := s.Get("fb-1")
-	if !ok || got != m {
+	if !ok || !reflect.DeepEqual(got, m) {
 		t.Fatalf("Get: got=%+v ok=%v", got, ok)
 	}
 
@@ -65,7 +66,7 @@ func TestPutGetDeleteRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := s2.Get("fb-1"); !ok || got != m {
+	if got, ok := s2.Get("fb-1"); !ok || !reflect.DeepEqual(got, m) {
 		t.Fatalf("reload: got=%+v ok=%v", got, ok)
 	}
 
@@ -121,5 +122,34 @@ func TestAllReturnsSnapshot(t *testing.T) {
 	snap[0].VolumeID = "tampered"
 	if got, _ := s.Get("a"); got.VolumeID != "a" {
 		t.Fatalf("snapshot leaked: got %+v", got)
+	}
+}
+
+func TestStateLoadsWithoutStageContext(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	if err := os.WriteFile(p, []byte(`{"v":{"volumeId":"v","loopDev":"/dev/loop1","imagePath":"/i","stagePath":"/s"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := st.Get("v")
+	if !ok || m.StageContext != nil || m.MountFlags != nil {
+		t.Fatalf("old file: %+v", m)
+	}
+}
+
+func TestStageContextRoundTrip(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	st, _ := LoadState(p)
+	_ = st.Put(Mapping{VolumeID: "v", StageContext: map[string]string{"a": "b"}, MountFlags: []string{"errors=remount-ro"}})
+	st2, err := LoadState(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := st2.Get("v")
+	if m.StageContext["a"] != "b" || len(m.MountFlags) != 1 {
+		t.Fatalf("round trip: %+v", m)
 	}
 }

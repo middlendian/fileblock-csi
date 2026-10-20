@@ -1,14 +1,17 @@
 package driver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"golang.org/x/sys/unix"
@@ -18,6 +21,7 @@ import (
 	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/image"
+	"github.com/middlendian/fileblock-csi/pkg/kube"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 	"github.com/middlendian/fileblock-csi/pkg/store"
@@ -44,11 +48,20 @@ type NodeServer struct {
 	registry *store.Registry
 	luks     *crypt.Crypt
 	sysRoot  string
+	failures *failures
+	// mountInfo reads this process's mountinfo; tests replace it.
+	mountInfo func() ([]mount.MountInfo, error)
+	// kube, when set, receives events for pods whose publish cannot
+	// recover a failed volume.
+	kube kube.Client
 
 	// One mutex per volumeID protects Stage/Unstage from racing each other
 	// inside this process.
 	mu       sync.Mutex
 	volMutex map[string]*sync.Mutex
+	// keys holds each staged encrypted volume's stage secret, in memory
+	// only, so a failed volume can be re-staged on publish. Guarded by mu.
+	keys map[string]crypt.Keys
 }
 
 // NewNodeServer constructs a NodeServer. The registry is used to resolve and
@@ -64,9 +77,17 @@ func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *lo
 		registry: reg,
 		luks:     crypt.New(exec),
 		sysRoot:  "/sys",
+		failures: newFailures(),
+		mountInfo: func() ([]mount.MountInfo, error) {
+			return mount.ReadMountInfo("/proc/self/mountinfo")
+		},
 		volMutex: map[string]*sync.Mutex{},
+		keys:     map[string]crypt.Keys{},
 	}
 }
+
+// SetKube gives the server a Kubernetes client for pod events.
+func (n *NodeServer) SetKube(k kube.Client) { n.kube = k }
 
 func (n *NodeServer) NodeGetCapabilities(ctx context.Context, _ *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	rpc := func(t csi.NodeServiceCapability_RPC_Type) *csi.NodeServiceCapability {
@@ -81,6 +102,7 @@ func (n *NodeServer) NodeGetCapabilities(ctx context.Context, _ *csi.NodeGetCapa
 			rpc(csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME),
 			rpc(csi.NodeServiceCapability_RPC_GET_VOLUME_STATS),
 			rpc(csi.NodeServiceCapability_RPC_EXPAND_VOLUME),
+			rpc(csi.NodeServiceCapability_RPC_VOLUME_CONDITION),
 		},
 	}, nil
 }
@@ -98,6 +120,17 @@ func (n *NodeServer) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest)
 }
 
 func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
+	volumeID := req.GetVolumeId()
+	if volumeID == "" || req.GetStagingTargetPath() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and staging_target_path are required")
+	}
+	unlock := n.lockVolume(volumeID)
+	defer unlock()
+	return n.stageLocked(ctx, req)
+}
+
+// stageLocked is NodeStageVolume for a caller that holds the volume lock.
+func (n *NodeServer) stageLocked(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	volumeID := req.GetVolumeId()
 	stagePath := req.GetStagingTargetPath()
 	if volumeID == "" || stagePath == "" {
@@ -131,15 +164,16 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, err
 	}
 
-	unlock := n.lockVolume(volumeID)
-	defer unlock()
-
 	// Idempotency: if we already staged this volume to this path, return ok.
 	stageMounted, err := n.mnt.IsMountPoint(ctx, stagePath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check staging path: %v", err)
 	}
 	if existing, ok := n.state.Get(volumeID); ok && existing.StagePath == stagePath && stageMounted {
+		if encrypted {
+			// Refills a cache a plugin restart emptied; a held key stays.
+			n.cacheKeys(volumeID, keys, false)
+		}
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
@@ -171,7 +205,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		return nil, status.Errorf(codes.Internal, "find loop devices: %v", err)
 	}
 	if stageMounted {
-		return n.adoptStage(ctx, volumeID, imgPath, stagePath, loops, encrypted)
+		return n.adoptStage(ctx, req, imgPath, loops, encrypted, keys)
 	}
 	// The staging path is not mounted, so a loop already on the image is
 	// either a leftover or in use elsewhere. A live one must not be
@@ -287,17 +321,39 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 
 	// 5. Persist mapping.
 	if err := n.state.Put(loop.Mapping{
-		VolumeID:  volumeID,
-		LoopDev:   dev,
-		ImagePath: imgPath,
-		StagePath: stagePath,
-		CryptDev:  cryptDev,
+		VolumeID:     volumeID,
+		LoopDev:      dev,
+		ImagePath:    imgPath,
+		StagePath:    stagePath,
+		CryptDev:     cryptDev,
+		StageContext: maps.Clone(req.GetVolumeContext()),
+		MountFlags:   mountOptionsFromCap(req.GetVolumeCapability()),
 	}); err != nil {
 		_ = n.mnt.Unmount(ctx, stagePath)
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
 	}
+	if encrypted {
+		n.cacheKeys(volumeID, keys, true)
+	}
+	n.failures.Clear(volumeID)
 	return &csi.NodeStageVolumeResponse{}, nil
+}
+
+// cacheKeys keeps an encrypted volume's stage secret in memory for an
+// internal re-stage, since publish never sees it. Unless replace is set, a
+// key already held is kept.
+func (n *NodeServer) cacheKeys(volumeID string, keys crypt.Keys, replace bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if old, ok := n.keys[volumeID]; ok {
+		if !replace {
+			return
+		}
+		clear(old.Current)
+		clear(old.Previous)
+	}
+	n.keys[volumeID] = crypt.Keys{Current: bytes.Clone(keys.Current), Previous: bytes.Clone(keys.Previous)}
 }
 
 // adoptStage handles a stage request for a path that is already mounted
@@ -305,13 +361,21 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 // the plugin lost its state. If the mount is this volume's, record it and
 // succeed; never stack a second loop and mount over it. Nothing else a
 // stage does runs here: key-slot rotation and checking the requested
-// capability against the existing mount wait for the next real stage.
-func (n *NodeServer) adoptStage(ctx context.Context, volumeID, imgPath, stagePath string, loops []string, encrypted bool) (*csi.NodeStageVolumeResponse, error) {
+// capability against the existing mount wait for the next real stage. What a
+// re-stage needs (context, mount flags, key) is recorded from the request.
+func (n *NodeServer) adoptStage(ctx context.Context, req *csi.NodeStageVolumeRequest, imgPath string, loops []string, encrypted bool, keys crypt.Keys) (*csi.NodeStageVolumeResponse, error) {
+	volumeID, stagePath := req.GetVolumeId(), req.GetStagingTargetPath()
 	src, err := n.mnt.Source(ctx, stagePath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read stage mount: %v", err)
 	}
-	m := loop.Mapping{VolumeID: volumeID, ImagePath: imgPath, StagePath: stagePath}
+	m := loop.Mapping{
+		VolumeID:     volumeID,
+		ImagePath:    imgPath,
+		StagePath:    stagePath,
+		StageContext: maps.Clone(req.GetVolumeContext()),
+		MountFlags:   mountOptionsFromCap(req.GetVolumeCapability()),
+	}
 	if encrypted && src == crypt.MapperPath(crypt.MapperName(volumeID)) {
 		ms, err := n.luks.List(ctx)
 		if err != nil {
@@ -333,6 +397,10 @@ func (n *NodeServer) adoptStage(ctx context.Context, volumeID, imgPath, stagePat
 	if err := n.state.Put(m); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
 	}
+	if encrypted {
+		n.cacheKeys(volumeID, keys, true)
+	}
+	n.failures.Clear(volumeID)
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
@@ -345,22 +413,8 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 	unlock := n.lockVolume(volumeID)
 	defer unlock()
 
-	// Older versions could stack a second mount on the staging path; pop
-	// them all, but give up rather than loop on a path that stays mounted.
-	for i := 0; ; i++ {
-		mounted, err := n.mnt.IsMountPoint(ctx, stagePath)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "check stage: %v", err)
-		}
-		if !mounted {
-			break
-		}
-		if i == maxStageUnmounts {
-			return nil, status.Errorf(codes.Internal, "%s still mounted after %d unmounts", stagePath, i)
-		}
-		if err := n.mnt.Unmount(ctx, stagePath); err != nil {
-			return nil, status.Errorf(codes.Internal, "umount stage: %v", err)
-		}
+	if err := n.popStageMounts(ctx, stagePath); err != nil {
+		return nil, err
 	}
 	_ = os.Remove(stagePath)
 
@@ -397,9 +451,17 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 			return nil, status.Errorf(codes.Internal, "losetup --detach: %v", err)
 		}
 	}
+	n.mu.Lock()
+	if k, ok := n.keys[volumeID]; ok {
+		clear(k.Current)
+		clear(k.Previous)
+		delete(n.keys, volumeID)
+	}
+	n.mu.Unlock()
 	if ok {
 		_ = n.state.Delete(volumeID)
 	}
+	n.failures.Clear(volumeID)
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
@@ -412,6 +474,11 @@ func (n *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 	if err := validateCapability(req.GetVolumeCapability()); err != nil {
 		return nil, err
 	}
+	if _, failed := n.failures.Get(req.GetVolumeId()); failed {
+		if err := n.restageFailed(ctx, req); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return nil, status.Errorf(codes.Internal, "mkdir target: %v", err)
 	}
@@ -422,6 +489,116 @@ func (n *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 		return nil, status.Errorf(codes.Internal, "bind mount: %v", err)
 	}
 	return &csi.NodePublishVolumeResponse{}, nil
+}
+
+// restageFailed rebuilds a failed volume's staging mount from a fresh open of
+// its image when nothing publishes it. The kubelet never unstages a volume a
+// pod on this node still wants, so a same-node replacement would otherwise be
+// handed the broken filesystem.
+func (n *NodeServer) restageFailed(ctx context.Context, req *csi.NodePublishVolumeRequest) error {
+	volumeID := req.GetVolumeId()
+	unlock := n.lockVolume(volumeID)
+	defer unlock()
+	if _, failed := n.failures.Get(volumeID); !failed {
+		return nil // another publish already re-staged it
+	}
+	m, ok := n.state.Get(volumeID)
+	if !ok {
+		return status.Errorf(codes.Unavailable, "volume %s failed and has no state entry; waiting for the kubelet to unstage it", volumeID)
+	}
+	entries, err := n.mountInfo()
+	if err != nil {
+		return status.Errorf(codes.Internal, "read mountinfo: %v", err)
+	}
+	// Any target counts, this request's own too: a failed publish never
+	// binds, so a mount there is an earlier publish whose pod still runs.
+	if e, ok := mount.LastAt(entries, m.StagePath); ok {
+		if ts := mount.PublishTargets(entries, e.MajorMinor); len(ts) > 0 {
+			return status.Errorf(codes.Unavailable,
+				"volume %s failed and is still published at %s; waiting for that pod to go", volumeID, ts[0].Path)
+		}
+	}
+	if m.StageContext == nil {
+		n.publishEvent(ctx, req, "fileblock volume "+volumeID+
+			" failed and was staged by an older version; delete this pod to recover")
+		return status.Errorf(codes.Unavailable, "volume %s failed and was staged by an older version; delete the pod to recover", volumeID)
+	}
+	var secrets map[string]string
+	if m.StageContext[ParamEncrypted] == "true" {
+		n.mu.Lock()
+		k, ok := n.keys[volumeID]
+		n.mu.Unlock()
+		if !ok {
+			n.publishEvent(ctx, req, "fileblock volume "+volumeID+
+				" failed and its key is not in memory (the node plugin restarted); delete this pod to recover")
+			return status.Errorf(codes.Unavailable, "volume %s failed and cannot be re-staged without its key; delete the pod", volumeID)
+		}
+		secrets = map[string]string{secretKey: string(k.Current)}
+		if len(k.Previous) > 0 {
+			secrets[secretPreviousKey] = string(k.Previous)
+		}
+	}
+	// Tear down. Every stacked stage mount must go, or stageLocked would
+	// adopt the broken one.
+	if err := n.popStageMounts(ctx, m.StagePath); err != nil {
+		return status.Errorf(codes.Internal, "re-stage: %v", status.Convert(err).Message())
+	}
+	// An empty LoopDev means an earlier re-stage already tore this down.
+	if m.LoopDev != "" {
+		if m.CryptDev != "" {
+			if err := n.luks.Close(ctx, filepath.Base(m.CryptDev)); err != nil {
+				return status.Errorf(codes.Internal, "re-stage: cryptsetup close: %v", err)
+			}
+		}
+		if err := n.losetup.Detach(ctx, m.LoopDev); err != nil {
+			return status.Errorf(codes.Internal, "re-stage: losetup --detach: %v", err)
+		}
+		// Keep the entry, minus the devices just released, so a failed
+		// stage below can be retried; a success overwrites it.
+		m.LoopDev, m.CryptDev = "", ""
+		if err := n.state.Put(m); err != nil {
+			return status.Errorf(codes.Internal, "re-stage: persist state: %v", err)
+		}
+	}
+	_, err = n.stageLocked(ctx, &csi.NodeStageVolumeRequest{
+		VolumeId:          volumeID,
+		StagingTargetPath: m.StagePath,
+		VolumeContext:     m.StageContext,
+		Secrets:           secrets,
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{MountFlags: m.MountFlags}},
+			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+		},
+	})
+	if err != nil {
+		return status.Errorf(codes.Internal, "re-stage: %v", status.Convert(err).Message())
+	}
+	n.log.Warn("re-staged failed volume from a fresh open of its image", "volumeID", volumeID)
+	return nil
+}
+
+// Pod identity the kubelet adds to the publish volume context when the
+// CSIDriver sets podInfoOnMount.
+const (
+	podInfoName      = "csi.storage.k8s.io/pod.name"
+	podInfoNamespace = "csi.storage.k8s.io/pod.namespace"
+	podInfoUID       = "csi.storage.k8s.io/pod.uid"
+)
+
+// publishEvent tells the publishing pod why its volume cannot recover. The
+// CSIDriver ships with podInfoOnMount: false, so usually there is no pod
+// to name and the message is only logged.
+func (n *NodeServer) publishEvent(ctx context.Context, req *csi.NodePublishVolumeRequest, msg string) {
+	vc := req.GetVolumeContext()
+	var p kube.Pod
+	p.Metadata.Name, p.Metadata.Namespace, p.Metadata.UID = vc[podInfoName], vc[podInfoNamespace], vc[podInfoUID]
+	if n.kube == nil || p.Metadata.Name == "" || p.Metadata.Namespace == "" || p.Metadata.UID == "" {
+		n.log.Warn(msg, "volumeID", req.GetVolumeId())
+		return
+	}
+	if err := n.kube.PodEvent(ctx, p, EventReasonVolumeFailed, msg); err != nil {
+		n.log.Warn("emit event", "pod", p.Metadata.Namespace+"/"+p.Metadata.Name, "err", err)
+	}
 }
 
 func (n *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
@@ -462,11 +639,20 @@ func (n *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVol
 	total := int64(st.Blocks) * bs
 	free := int64(st.Bavail) * bs
 	used := total - free
+	cond := &csi.VolumeCondition{Abnormal: false, Message: "volume is healthy"}
+	if at, failed := n.failures.Get(volumeID); failed {
+		cond = &csi.VolumeCondition{
+			Abnormal: true,
+			Message: "ext4 forced the staged filesystem read-only at " + at.UTC().Format(time.RFC3339) +
+				"; the backing file is unusable until the volume is re-staged",
+		}
+	}
 	return &csi.NodeGetVolumeStatsResponse{
 		Usage: []*csi.VolumeUsage{
 			{Unit: csi.VolumeUsage_BYTES, Total: total, Available: free, Used: used},
 			{Unit: csi.VolumeUsage_INODES, Total: int64(st.Files), Available: int64(st.Ffree), Used: int64(st.Files - st.Ffree)},
 		},
+		VolumeCondition: cond,
 	}, nil
 }
 
@@ -521,6 +707,27 @@ func (n *NodeServer) loopSectorSize(ctx context.Context, imgPath string, size in
 
 // maxStageUnmounts bounds how many stacked mounts unstage pops.
 const maxStageUnmounts = 8
+
+// popStageMounts unmounts every mount stacked on stagePath (older versions
+// could stack a second one), but gives up rather than loop on a path that
+// stays mounted. Errors are gRPC statuses.
+func (n *NodeServer) popStageMounts(ctx context.Context, stagePath string) error {
+	for i := 0; ; i++ {
+		mounted, err := n.mnt.IsMountPoint(ctx, stagePath)
+		if err != nil {
+			return status.Errorf(codes.Internal, "check stage: %v", err)
+		}
+		if !mounted {
+			return nil
+		}
+		if i == maxStageUnmounts {
+			return status.Errorf(codes.Internal, "%s still mounted after %d unmounts", stagePath, i)
+		}
+		if err := n.mnt.Unmount(ctx, stagePath); err != nil {
+			return status.Errorf(codes.Internal, "umount stage: %v", err)
+		}
+	}
+}
 
 // loopBusy reports whether dev is mounted or held by another block device
 // (a dm-crypt mapping).

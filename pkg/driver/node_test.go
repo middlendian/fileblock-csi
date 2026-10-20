@@ -73,6 +73,7 @@ func TestNodeGetCapabilities(t *testing.T) {
 		csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME: false,
 		csi.NodeServiceCapability_RPC_GET_VOLUME_STATS:     false,
 		csi.NodeServiceCapability_RPC_EXPAND_VOLUME:        false,
+		csi.NodeServiceCapability_RPC_VOLUME_CONDITION:     false,
 	}
 	for _, c := range resp.Capabilities {
 		if r := c.GetRpc(); r != nil {
