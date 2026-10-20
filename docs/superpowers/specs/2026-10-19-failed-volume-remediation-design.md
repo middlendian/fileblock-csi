@@ -115,7 +115,7 @@ volume is permanently broken.
 
 A volume that triggers is **failed**, and the monitor records when it
 failed (`failedAt`). That state is held in memory only, and a re-stage
-clears it. When a volume enters it, the monitor:
+clears it, as does a monitor pass that finds the staging mount healthy. When a volume enters it, the monitor:
 - logs once at `warn`, with the volumeID, the loop and crypt devices, and
   the staging path;
 - emits a `Warning` event `FileblockVolumeFailed` on every pod that

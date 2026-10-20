@@ -266,3 +266,25 @@ func TestTickRediscoversAfterRestart(t *testing.T) {
 		t.Fatalf("want delete after restart, got %v", k.deleted)
 	}
 }
+
+// A re-stage of one volume can land while a tick is still working through
+// a mountinfo snapshot taken before it, re-marking the volume from a stale
+// entry. The next tick that sees the stage healthy must clear that mark.
+func TestHealthyTickClearsMarkFromStaleSnapshot(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	healthy := []mount.MountInfo{{MajorMinor: "7:3", MountPoint: stage, MountOptions: []string{"rw"}, SuperOptions: []string{"rw"}}}
+	m := newMonitor(t, &fakeKube{}, &now, healthy)
+	vol, _ := m.State.Get("vol-1")
+	m.Failures.Mark("vol-1", now)
+	m.Failures.Clear("vol-1") // the publish re-staged it
+	stale := failedMountInfo()
+	m.handleFailed(context.Background(), vol, stale[0], stale)
+	if _, failed := m.Failures.Get("vol-1"); !failed {
+		t.Fatal("precondition: the stale entry re-marks the volume")
+	}
+	now = now.Add(MonitorInterval)
+	m.Tick(context.Background())
+	if _, failed := m.Failures.Get("vol-1"); failed {
+		t.Fatal("volume still failed after a tick saw its stage healthy")
+	}
+}

@@ -85,6 +85,11 @@ func (m *Monitor) Tick(ctx context.Context) {
 	for _, vol := range m.State.All() {
 		e, ok := mount.LastAt(entries, vol.StagePath)
 		if !ok || !e.ForcedReadOnly() {
+			// A healthy stage clears any mark a stale snapshot left after
+			// a re-stage; an absent one may be mid-re-stage, so it waits.
+			if ok {
+				m.Failures.Clear(vol.VolumeID)
+			}
 			m.forget(vol.VolumeID)
 			continue
 		}
