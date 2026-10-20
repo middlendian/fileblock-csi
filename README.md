@@ -434,8 +434,8 @@ the node plugin to enable deletion.
 **Same-node replacement.** If the replacement pod lands on the same node
 while the old one is still terminating, the kubelet may keep the staging
 mount and only call `NodePublishVolume`. fileblock refuses to publish a
-failed volume: it returns `Unavailable` (the kubelet retries) while another
-pod still has the volume published, and otherwise re-stages the volume
+failed volume: it returns `Unavailable` (the kubelet retries) while any pod
+still has the volume published, and otherwise re-stages the volume
 itself (unmount, detach, attach, `e2fsck`, mount) before publishing. If that
 re-stage fails the call returns `Internal` and is retried. To re-stage an
 encrypted volume the plugin keeps its key in process memory only, never on

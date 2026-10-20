@@ -74,12 +74,29 @@ func TestRestageRefusedWhileAnotherTargetIsLive(t *testing.T) {
 	}
 }
 
-// Review Focus 5: this request's own target, left behind by an earlier
-// attempt, does not block the re-stage.
-func TestRestageWhenOnlyTargetIsThisRequest(t *testing.T) {
+// A mount at this request's own target can only be an earlier successful
+// publish (a failed one never binds), e.g. the kubelet re-publishing after
+// a restart, so its pod is still running on the stage: no re-stage.
+func TestRestageRefusedWhenThisRequestsTargetIsLive(t *testing.T) {
 	e := newEncStage(t, false, nil)
 	target := podTarget(t, uidThis)
 	failedStaged(t, e, nil, target)
+	_, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target))
+	if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), target) {
+		t.Fatalf("got %v, want Unavailable naming %s", err, target)
+	}
+	if callIndex(e.fake.Calls, "umount") >= 0 || len(detached(e.fake.Calls)) != 0 {
+		t.Fatalf("tore down under a live publish: %+v", e.fake.Calls)
+	}
+	if _, failed := e.n.failures.Get("vol-1"); !failed {
+		t.Fatal("failure cleared without a re-stage")
+	}
+}
+
+func TestRestageWhenNoTargetIsPublished(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	target := podTarget(t, uidThis)
+	failedStaged(t, e, nil)
 	e.depth[target] = 0 // not mounted, so the publish ends in a bind
 	if _, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target)); err != nil {
 		t.Fatalf("NodePublishVolume: %v", err)
@@ -87,6 +104,9 @@ func TestRestageWhenOnlyTargetIsThisRequest(t *testing.T) {
 	calls := e.fake.Calls
 	if b := callIndex(calls, "mount", "--bind", e.stage, target); b < 0 || b < callIndex(calls, "mount", "-t", "ext4") {
 		t.Fatalf("want the re-staged mount bound into the target: %+v", calls)
+	}
+	if callIndex(calls, "umount", target) >= 0 {
+		t.Fatalf("unmounted the request's target: %+v", calls)
 	}
 	um := callIndex(calls, "umount", e.stage)
 	det := callIndex(calls, "losetup", "--detach", "/dev/loop7")
@@ -108,7 +128,7 @@ func TestRestageEncryptedUsesCachedKey(t *testing.T) {
 	e := newEncStage(t, true, nil)
 	target := podTarget(t, uidThis)
 	prev := "prev-" + testKey
-	failedStaged(t, e, map[string]string{"key": testKey, "previousKey": prev}, target)
+	failedStaged(t, e, map[string]string{"key": testKey, "previousKey": prev})
 	if _, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target)); err != nil {
 		t.Fatalf("NodePublishVolume: %v", err)
 	}
@@ -132,7 +152,7 @@ func TestRestageEncryptedWithoutCachedKeyIsUnavailable(t *testing.T) {
 	k := &fakeKube{}
 	e.n.SetKube(k)
 	target := podTarget(t, uidThis)
-	failedStaged(t, e, map[string]string{"key": testKey}, target)
+	failedStaged(t, e, map[string]string{"key": testKey})
 	// A plugin restart loses the in-memory key.
 	e.n.mu.Lock()
 	delete(e.n.keys, "vol-1")
@@ -162,7 +182,7 @@ func TestRestageEventWithoutPodInfoLogs(t *testing.T) {
 	k := &fakeKube{}
 	e.n.SetKube(k)
 	target := podTarget(t, uidThis)
-	failedStaged(t, e, map[string]string{"key": testKey}, target)
+	failedStaged(t, e, map[string]string{"key": testKey})
 	e.n.mu.Lock()
 	delete(e.n.keys, "vol-1")
 	e.n.mu.Unlock()
@@ -181,7 +201,7 @@ func TestRestageEventWithoutPodInfoLogs(t *testing.T) {
 func TestRestageOlderMappingWithoutStageContextIsUnavailable(t *testing.T) {
 	e := newEncStage(t, false, nil)
 	target := podTarget(t, uidThis)
-	failedStaged(t, e, nil, target)
+	failedStaged(t, e, nil)
 	m, _ := e.n.state.Get("vol-1")
 	m.StageContext, m.MountFlags = nil, nil
 	if err := e.n.state.Put(m); err != nil {
@@ -266,7 +286,7 @@ func TestStageSavesContextAndFlags(t *testing.T) {
 func TestRestageFailureIsInternalAndRetryable(t *testing.T) {
 	e := newEncStage(t, false, nil)
 	target := podTarget(t, uidThis)
-	failedStaged(t, e, nil, target)
+	failedStaged(t, e, nil)
 	inner := e.fake.Func
 	fsckFails := true
 	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
@@ -308,7 +328,7 @@ func TestRestageFailureIsInternalAndRetryable(t *testing.T) {
 func TestRestagePopsStackedStageMounts(t *testing.T) {
 	e := newEncStage(t, false, nil)
 	target := podTarget(t, uidThis)
-	failedStaged(t, e, nil, target)
+	failedStaged(t, e, nil)
 	e.depth[e.stage] = 2
 	if _, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target)); err != nil {
 		t.Fatalf("NodePublishVolume: %v", err)
@@ -330,7 +350,7 @@ func TestRestagePopsStackedStageMounts(t *testing.T) {
 func TestRestageGivesUpOnStageThatStaysMounted(t *testing.T) {
 	e := newEncStage(t, false, nil)
 	target := podTarget(t, uidThis)
-	failedStaged(t, e, nil, target)
+	failedStaged(t, e, nil)
 	e.depth[e.stage] = 100
 	_, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target))
 	if status.Code(err) != codes.Internal {

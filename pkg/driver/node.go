@@ -467,9 +467,9 @@ func (n *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 }
 
 // restageFailed rebuilds a failed volume's staging mount from a fresh open of
-// its image when nothing else still publishes it. The kubelet never unstages
-// a volume a pod on this node still wants, so a same-node replacement would
-// otherwise be handed the broken filesystem.
+// its image when nothing publishes it. The kubelet never unstages a volume a
+// pod on this node still wants, so a same-node replacement would otherwise be
+// handed the broken filesystem.
 func (n *NodeServer) restageFailed(ctx context.Context, req *csi.NodePublishVolumeRequest) error {
 	volumeID := req.GetVolumeId()
 	unlock := n.lockVolume(volumeID)
@@ -485,12 +485,12 @@ func (n *NodeServer) restageFailed(ctx context.Context, req *csi.NodePublishVolu
 	if err != nil {
 		return status.Errorf(codes.Internal, "read mountinfo: %v", err)
 	}
+	// Any target counts, this request's own too: a failed publish never
+	// binds, so a mount there is an earlier publish whose pod still runs.
 	if e, ok := mount.LastAt(entries, m.StagePath); ok {
-		for _, t := range mount.PublishTargets(entries, e.MajorMinor) {
-			if t.Path != req.GetTargetPath() {
-				return status.Errorf(codes.Unavailable,
-					"volume %s failed and is still published at %s; waiting for that pod to go", volumeID, t.Path)
-			}
+		if ts := mount.PublishTargets(entries, e.MajorMinor); len(ts) > 0 {
+			return status.Errorf(codes.Unavailable,
+				"volume %s failed and is still published at %s; waiting for that pod to go", volumeID, ts[0].Path)
 		}
 	}
 	if m.StageContext == nil {
@@ -513,10 +513,8 @@ func (n *NodeServer) restageFailed(ctx context.Context, req *csi.NodePublishVolu
 			secrets[secretPreviousKey] = string(k.Previous)
 		}
 	}
-	// Tear down: a publish target left behind by this same request is
-	// unmounted first so the staging unmount isn't busy. Every stacked
-	// stage mount must go, or stageLocked would adopt the broken one.
-	_ = n.mnt.Unmount(ctx, req.GetTargetPath())
+	// Tear down. Every stacked stage mount must go, or stageLocked would
+	// adopt the broken one.
 	if err := n.popStageMounts(ctx, m.StagePath); err != nil {
 		return status.Errorf(codes.Internal, "re-stage: %v", status.Convert(err).Message())
 	}

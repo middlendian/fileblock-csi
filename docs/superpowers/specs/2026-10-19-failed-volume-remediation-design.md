@@ -169,8 +169,11 @@ the same broken filesystem into the new pod.
 
 To prevent that, **NodePublishVolume refuses to publish a failed volume.**
 When it is called for a volume in the failed state:
-- If any other publish target of that staging mount still exists (from
+- If any publish target of that staging mount still exists (from
   mountinfo, as above), it returns `Unavailable`. The kubelet retries.
+  That includes this request's own target: a failed publish never binds,
+  so a mount there is an earlier successful publish (say, the kubelet
+  re-publishing after a restart) whose pod still runs on the stage.
 - If there are none, it **re-stages internally**, under the volume lock:
   1. unmount the staging path;
   2. close the crypt mapping, if any;
@@ -281,8 +284,8 @@ only part of the base was applied, the default is therefore safe. This needs `ge
   - `preconditions.uid` is set;
   - with the flag off, nothing is deleted;
   - a missing policy or binding means detection only.
-- **Unit (NodePublishVolume):** a failed volume with another live target
-  gets `Unavailable`. With none, it re-stages a plaintext volume, and an
+- **Unit (NodePublishVolume):** a failed volume with any live target,
+  including the request's own, gets `Unavailable`. With none, it re-stages a plaintext volume, and an
   encrypted one when its in-memory key is present; without the key it
   returns `Unavailable` plus an event. Unstage zeroes the cached key.
 - **Policy:** a CEL test against the manifest, covering allow on the same
