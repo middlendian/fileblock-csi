@@ -87,6 +87,19 @@ func TestTickDeletesOwnedPodStartedBeforeFailure(t *testing.T) {
 	}
 }
 
+// Kernels >= 6.15 keep the superblock "rw" and add emergency_ro instead.
+func TestTickDeletesPodOnEmergencyRO(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	k := &fakeKube{pods: []kube.Pod{pod("app", uidOld, now.Add(-time.Hour), true)}}
+	mi := failedMountInfo()
+	mi[0].SuperOptions = []string{"rw", "emergency_ro"}
+	m := newMonitor(t, k, &now, mi)
+	m.Tick(context.Background())
+	if len(k.deleted) != 1 || k.deleted[0] != "ns/app@"+uidOld {
+		t.Fatalf("deleted %v", k.deleted)
+	}
+}
+
 func TestTickSkipsUnowned(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	k := &fakeKube{pods: []kube.Pod{pod("bare", uidOld, now.Add(-time.Hour), false)}}

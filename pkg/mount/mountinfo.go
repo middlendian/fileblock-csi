@@ -58,9 +58,13 @@ func ReadMountInfo(path string) ([]MountInfo, error) {
 	return ParseMountInfo(f)
 }
 
-// ForcedReadOnly reports a filesystem that was mounted read-write and has
-// since made its superblock read-only (ext4 after a journal abort).
+// ForcedReadOnly reports an ext4 that was mounted read-write and was forced
+// read-only: superblock "ro" (kernel <= 6.11), or "emergency_ro"/"shutdown"
+// in the super options (>= 6.15). Kernels 6.12-6.14 expose nothing.
 func (m MountInfo) ForcedReadOnly() bool {
+	if slices.Contains(m.SuperOptions, "emergency_ro") || slices.Contains(m.SuperOptions, "shutdown") {
+		return true
+	}
 	return slices.Contains(m.MountOptions, "rw") && slices.Contains(m.SuperOptions, "ro")
 }
 

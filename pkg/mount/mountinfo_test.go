@@ -55,6 +55,24 @@ func TestForcedReadOnly(t *testing.T) {
 	}
 }
 
+func TestForcedReadOnlyNewerKernels(t *testing.T) {
+	cases := map[string]struct {
+		mount, super []string
+		want         bool
+	}{
+		"emergency_ro":         {[]string{"rw"}, []string{"rw", "emergency_ro", "errors=remount-ro"}, true},
+		"shutdown":             {[]string{"rw"}, []string{"rw", "shutdown"}, true},
+		"ro on purpose":        {[]string{"ro"}, []string{"ro"}, false},
+		"healthy with errors=": {[]string{"rw"}, []string{"rw", "errors=remount-ro"}, false},
+	}
+	for name, c := range cases {
+		m := MountInfo{MountOptions: c.mount, SuperOptions: c.super}
+		if got := m.ForcedReadOnly(); got != c.want {
+			t.Errorf("%s: ForcedReadOnly=%v want %v", name, got, c.want)
+		}
+	}
+}
+
 func TestOctalEscapedMountPoint(t *testing.T) {
 	ms := parseSample(t)
 	m, ok := LastAt(ms, "/var/lib/kubelet/plugins/with space/globalmount")

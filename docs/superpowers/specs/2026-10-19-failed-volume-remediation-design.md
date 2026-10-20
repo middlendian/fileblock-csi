@@ -78,14 +78,26 @@ adding it later breaks nothing.
 Every 10s (a constant, not a flag), the monitor reads
 `/proc/self/mountinfo` for each volume in the state file.
 
-**Trigger:** the staging mount's **per-mount** options say `rw`, but its
-**super options** say `ro`.
-- ext4 changes only the superblock flag when it forces itself read-only,
-  so a mismatch means "this was mounted read-write and the filesystem gave
-  up". A volume mounted `ro` on purpose (`ro` in its mount flags) has both
-  fields `ro` and never triggers.
-- `statfs(2)` is not enough on its own, because its `ST_RDONLY` merges
-  the two.
+**Trigger:** the staging mount is *forced read-only*, which is true when
+either of these holds:
+- the **per-mount** options say `rw` and the **super options** say `ro`; or
+- the super options contain `emergency_ro` or `shutdown`.
+
+A volume mounted `ro` on purpose has `ro` in both fields and neither marker,
+so it never triggers. `statfs(2)` is not enough on its own, because its
+`ST_RDONLY` merges the two.
+
+How ext4's error handler shows up in mountinfo depends on the kernel:
+
+| Kernel | What ext4 does | Visible in mountinfo |
+|---|---|---|
+| <= 6.11 | sets `SB_RDONLY` | super options `ro`, per-mount `rw` |
+| 6.12 - 6.14 | sets an internal shutdown flag only | nothing |
+| >= 6.15 | sets `EXT4_FLAGS_EMERGENCY_RO` | super options `emergency_ro` (and `shutdown` once shut down), still `rw` |
+
+**Not detected passively: kernels 6.12 - 6.14.** Nothing in mountinfo changes
+there, and an active probe is ruled out below, so those nodes get no
+remediation for this failure.
 
 **Why not active probes.** Reading the loop device, or `stat`ing the
 `.img`, sends a READ or GETATTR to the server. Inside an `ESTALE` window,
