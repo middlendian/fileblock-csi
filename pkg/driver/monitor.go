@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/middlendian/fileblock-csi/pkg/kube"
@@ -32,7 +33,20 @@ type Monitor struct {
 	Now        func() time.Time
 	Log        *slog.Logger
 
-	offLogged map[string]bool
+	// Per-failure memory, forgotten once the volume is no longer failed.
+	offLogged   map[string]bool // volumeID: "auto-delete is off" logged
+	eventSent   map[string]bool // volumeID: first-failure events delivered
+	skipEvented map[string]bool // volumeID/podUID: skip event delivered
+}
+
+func (m *Monitor) forget(volumeID string) {
+	delete(m.offLogged, volumeID)
+	delete(m.eventSent, volumeID)
+	for k := range m.skipEvented {
+		if strings.HasPrefix(k, volumeID+"/") {
+			delete(m.skipEvented, k)
+		}
+	}
 }
 
 // Failures returns the tracker the monitor must share with this server.
@@ -71,6 +85,7 @@ func (m *Monitor) Tick(ctx context.Context) {
 	for _, vol := range m.State.All() {
 		e, ok := mount.LastAt(entries, vol.StagePath)
 		if !ok || !e.ForcedReadOnly() {
+			m.forget(vol.VolumeID)
 			continue
 		}
 		m.handleFailed(ctx, vol, e, entries)
@@ -82,13 +97,17 @@ func (m *Monitor) handleFailed(ctx context.Context, vol loop.Mapping, e mount.Mo
 	isNew := m.Failures.Mark(vol.VolumeID, now)
 	failedAt, _ := m.Failures.Get(vol.VolumeID)
 	if isNew {
+		m.forget(vol.VolumeID)
 		m.Log.Warn("staged filesystem was forced read-only; the volume must be re-staged",
 			"volumeID", vol.VolumeID, "loopDev", vol.LoopDev, "cryptDev", vol.CryptDev, "stagePath", vol.StagePath)
 	}
 	if m.Kube == nil {
 		return
 	}
-	needPods := isNew || m.AutoDelete && !now.Before(m.Failures.HeldUntil(vol.VolumeID))
+	if m.eventSent == nil {
+		m.eventSent, m.skipEvented = map[string]bool{}, map[string]bool{}
+	}
+	needPods := !m.eventSent[vol.VolumeID] || m.AutoDelete && !now.Before(m.Failures.HeldUntil(vol.VolumeID))
 	if !needPods {
 		return
 	}
@@ -108,7 +127,8 @@ func (m *Monitor) handleFailed(ctx context.Context, vol loop.Mapping, e mount.Mo
 			users = append(users, p)
 		}
 	}
-	if isNew {
+	if !m.eventSent[vol.VolumeID] {
+		m.eventSent[vol.VolumeID] = true
 		msg := fmt.Sprintf("fileblock volume %s was forced read-only by ext4 (backing-store I/O error); it must be re-staged", vol.VolumeID)
 		for _, p := range users {
 			m.event(ctx, p, msg)
@@ -131,6 +151,10 @@ func (m *Monitor) handleFailed(ctx context.Context, vol loop.Mapping, e mount.Mo
 	for _, p := range users {
 		if reason := skipReason(p, failedAt); reason != "" {
 			m.Log.Info("not deleting pod", "volumeID", vol.VolumeID, "pod", p.Metadata.Namespace+"/"+p.Metadata.Name, "reason", reason)
+			if key := vol.VolumeID + "/" + p.Metadata.UID; !m.skipEvented[key] {
+				m.skipEvented[key] = true
+				m.event(ctx, p, fmt.Sprintf("fileblock volume %s failed but this pod was not deleted automatically: %s", vol.VolumeID, reason))
+			}
 			continue
 		}
 		attempted = true

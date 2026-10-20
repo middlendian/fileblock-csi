@@ -17,6 +17,8 @@ type fakeKube struct {
 	listErr error
 	deleted []string
 	events  []string
+
+	deleteErr error
 }
 
 func (f *fakeKube) ListPodsOnNode(context.Context, string) ([]kube.Pod, error) {
@@ -24,7 +26,7 @@ func (f *fakeKube) ListPodsOnNode(context.Context, string) ([]kube.Pod, error) {
 }
 func (f *fakeKube) DeletePod(_ context.Context, ns, name, uid string) error {
 	f.deleted = append(f.deleted, ns+"/"+name+"@"+uid)
-	return nil
+	return f.deleteErr
 }
 func (f *fakeKube) PodEvent(_ context.Context, p kube.Pod, reason, _ string) error {
 	f.events = append(f.events, p.Metadata.Name+":"+reason)
@@ -80,17 +82,70 @@ func TestTickDeletesOwnedPodStartedBeforeFailure(t *testing.T) {
 	if len(k.deleted) != 1 || k.deleted[0] != "ns/app@"+uidOld {
 		t.Fatalf("deleted %v", k.deleted)
 	}
-	if len(k.events) == 0 {
-		t.Fatal("want a FileblockVolumeFailed event")
+	if len(k.events) != 1 || k.events[0] != "app:FileblockVolumeFailed" {
+		t.Fatalf("events %v", k.events)
 	}
 }
 
 func TestTickSkipsUnowned(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	k := &fakeKube{pods: []kube.Pod{pod("bare", uidOld, now.Add(-time.Hour), false)}}
-	newMonitor(t, k, &now, failedMountInfo()).Tick(context.Background())
+	m := newMonitor(t, k, &now, failedMountInfo())
+	m.Tick(context.Background())
 	if len(k.deleted) != 0 {
 		t.Fatalf("unowned pod deleted: %v", k.deleted)
+	}
+	// One event for the failure and one for the skip, not repeated per tick.
+	if len(k.events) != 2 {
+		t.Fatalf("events %v", k.events)
+	}
+	now = now.Add(MonitorInterval)
+	m.Tick(context.Background())
+	if len(k.events) != 2 {
+		t.Fatalf("skip event repeated: %v", k.events)
+	}
+}
+
+func TestTickEventsWithAutoDeleteOff(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	k := &fakeKube{pods: []kube.Pod{pod("app", uidOld, now.Add(-time.Hour), true)}}
+	m := newMonitor(t, k, &now, failedMountInfo())
+	m.AutoDelete = false
+	m.Tick(context.Background())
+	now = now.Add(MonitorInterval)
+	m.Tick(context.Background())
+	if len(k.events) != 1 || k.events[0] != "app:FileblockVolumeFailed" {
+		t.Fatalf("events %v", k.events)
+	}
+}
+
+func TestTickEventSurvivesListError(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	k := &fakeKube{listErr: errors.New("connection refused")}
+	m := newMonitor(t, k, &now, failedMountInfo())
+	m.AutoDelete = false
+	m.Tick(context.Background())
+	k.listErr = nil
+	k.pods = []kube.Pod{pod("app", uidOld, now.Add(-time.Hour), true)}
+	now = now.Add(MonitorInterval)
+	m.Tick(context.Background())
+	if len(k.events) != 1 || k.events[0] != "app:FileblockVolumeFailed" {
+		t.Fatalf("events %v", k.events)
+	}
+}
+
+func TestTickDeleteErrorStillHolds(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	k := &fakeKube{pods: []kube.Pod{pod("app", uidOld, now.Add(-time.Hour), true)}, deleteErr: errors.New("forbidden")}
+	m := newMonitor(t, k, &now, failedMountInfo())
+	m.Tick(context.Background())
+	if !m.Failures.HeldUntil("vol-1").Equal(now.Add(RemediationHold)) {
+		t.Fatalf("hold-off not started: %v", m.Failures.HeldUntil("vol-1"))
+	}
+	now = now.Add(MonitorInterval)
+	m.Tick(context.Background())
+	if len(k.deleted) != 1 {
+		t.Fatalf("retried inside hold-off: %v", k.deleted)
 	}
 }
 
