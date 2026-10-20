@@ -52,9 +52,9 @@ driver.
 ## Solution
 
 `fileblock-node` gets a **failed-volume monitor**. It notices when a staged
-volume's ext4 superblock has been forced read-only and reports it. When an
-operator opts in, it also deletes the pods using that volume on its own
-node, so their controller recreates them. The usual unstage then runs, or
+volume's ext4 superblock has been forced read-only and reports it. By
+default it also deletes the pods using that volume on its own node, so
+their controller recreates them. The usual unstage then runs, or
 fileblock's internal re-stage (below) when the replacement lands on the
 same node. Either way the volume is attached again from a fresh `open()`.
 
@@ -64,13 +64,18 @@ privileged on the host, so a delete permission limited to its own node adds
 little. That limit is enforced in the cluster by a
 ValidatingAdmissionPolicy shipped in `deploy/kustomize/base`.
 
-Prior art is Longhorn's "automatically delete workload pod when the volume
-is detached unexpectedly". That also deletes only controller-owned pods
-and leaves the rest to the controller.
+The interface copies Longhorn's `auto-delete-pod-when-volume-detached-unexpectedly`:
+- one boolean, on by default;
+- only controller-owned pods are deleted;
+- a pod is deleted only if it started before the volume failed.
+
+Longhorn also has a denylist of controller kinds. That is left out until a
+workload needs one. An empty denylist behaves exactly like having none, so
+adding it later breaks nothing.
 
 ## Detection
 
-Every `--remediation-interval` (default 10s), the monitor reads
+Every 10s (a constant, not a flag), the monitor reads
 `/proc/self/mountinfo` for each volume in the state file.
 
 **Trigger:** the staging mount's **per-mount** options say `rw`, but its
@@ -96,8 +101,9 @@ and it is passive. It is left out of v1 because the kernel rate-limits
 those lines, and because a read error on its own does not show the
 volume is permanently broken.
 
-A volume that triggers is **failed**. That state is held in memory only,
-and a re-stage clears it. When a volume enters it, the monitor:
+A volume that triggers is **failed**, and the monitor records when it
+failed (`failedAt`). That state is held in memory only, and a re-stage
+clears it. When a volume enters it, the monitor:
 - logs once at `warn`, with the volumeID, the loop and crypt devices, and
   the staging path;
 - emits a `Warning` event `FileblockVolumeFailed` on every pod that
@@ -107,10 +113,11 @@ and a re-stage clears it. When a volume enters it, the monitor:
 
 ## Remediation
 
-`--remediation=off|report|delete`. The default is **`report`**: everything
-under Detection, and nothing is deleted. `off` stops the monitor entirely.
+`--auto-delete-pod-when-volume-failed`, a boolean, **default `true`**. With
+`false`, everything under Detection still happens, and the monitor logs
+that it is not deleting.
 
-In `delete` mode, for a failed volume:
+For a failed volume, with the flag on:
 
 1. **Find the publishing pods.** Look for mountinfo entries on the same
    device (`major:minor`) whose mount point ends in
@@ -121,17 +128,22 @@ In `delete` mode, for a failed volume:
 3. **Skip pods that must not be deleted**, logging and emitting an event
    for each. These mirror the admission policy, so a denial there means a
    bug here:
-   - no `ownerReferences` entry with `controller: true`, because nothing
-     would recreate it;
+   - no controlling owner reference (`metav1.GetControllerOf(pod) == nil`),
+     because nothing would recreate it;
    - already terminating (`deletionTimestamp` set);
-   - younger than `--remediation-min-pod-age` (default 2m). This prevents
-     a delete loop if a fresh pod fails immediately.
+   - `status.startTime` unset or not before `failedAt`. This is Longhorn's
+     loop guard: a replacement pod is never deleted for the failure that
+     replaced it.
 4. **Delete each remaining pod** with `preconditions.uid`, so a StatefulSet
    pod recreated under the same name is never hit, and with the pod's own
-   grace period.
-5. **Hold off.** The volume is not considered again for
-   `--remediation-backoff` (default 10m, doubling on each repeat, capped at
-   1h). The backoff is per volume and in memory only.
+   grace period. Longhorn uses a fixed 30s; the pod's own lets workloads
+   that need longer shut down cleanly.
+5. **Hold off for 5 minutes** (a constant). The volume is not considered
+   again during that time, even if a re-stage cleared its state and it
+   failed again. Longhorn has no equivalent. This one guards against a
+   filesystem that goes read-only again on every fresh mount, which would
+   otherwise loop through delete and recreate. The hold-off is per volume,
+   in memory, and does not double.
 
 There is no per-node rate limit. The incident this addresses breaks many
 volumes at once, and every one of them needs its pod deleted.
@@ -220,25 +232,28 @@ This needs **Kubernetes 1.30+**:
 - and where pod-bound service-account tokens carry the node name in
   `userInfo.extra` by default (`ServiceAccountTokenPodNodeInfo`).
 
-The README states this as the minimum for `delete` mode. `off` and
-`report` need nothing new.
+The README states this as the minimum for automatic deletion. Detection
+and reporting need nothing new.
 
-In `delete` mode the plugin also checks at startup that the policy and the
-binding exist by name, with `Deny` in the binding's actions. If they
-don't, it logs an error and runs as `report`, because the RBAC grant
-alone is not node-scoped. This needs `get` on
+With the flag on, the plugin also checks at startup that the policy and
+the binding exist by name, with `Deny` in the binding's actions. If they
+don't, it logs an error and only detects and reports, because the RBAC
+grant alone is not node-scoped. On a cluster older than 1.30, or where
+only part of the base was applied, the default is therefore safe. This needs `get` on
 `validatingadmissionpolicies` and `validatingadmissionpolicybindings`.
 
 ## Surface changes
 
 | | |
 |---|---|
-| Flags (node) | `--remediation` (`report`), `--remediation-interval` (10s), `--remediation-min-pod-age` (2m), `--remediation-backoff` (10m) |
+| Flags (node) | `--auto-delete-pod-when-volume-failed` (`true`) |
+| Constants | check interval 10s; per-volume hold-off 5m |
 | CSI | Node: `VOLUME_CONDITION` |
 | RBAC (`fileblock-node`) | pods `get, list, delete`; events `create, patch`; VAP and binding `get` |
 | Manifests | `deploy/kustomize/base/remediation-policy.yaml` |
 | State file | `Mapping.StageContext`, `Mapping.MountFlags` (optional; old files load unchanged) |
-| Docs | README: a *Recovering from backing-store errors* section, the version requirement, and the flag table; CLAUDE.md: CSI surface and state-file invariants |
+| Docs | README: a *Recovering from backing-store errors* section, the version requirement, and the flag; CLAUDE.md: CSI surface and state-file invariants |
+| CHANGELOG | Leads with the behaviour change: after upgrading and applying the base, failed volumes' pods are deleted automatically; `--auto-delete-pod-when-volume-failed=false` turns that off |
 
 ## Testing
 
@@ -246,19 +261,22 @@ alone is not node-scoped. This needs `get` on
   cases: `rw`/`ro` triggers; `ro`/`ro` and `rw`/`rw` do not; a publish
   target is found by device and pod UID; the kubelet dir is prefix-agnostic.
 - **Unit (monitor):** with fake pods and a fake clock, check:
-  - owner, terminating and age skips;
-  - backoff doubling and cap;
+  - owner and terminating skips;
+  - a pod that started at or after `failedAt`, or has no start time, is
+    skipped;
+  - the 5-minute hold-off blocks a second delete even after the volume
+    re-fails;
   - `preconditions.uid` is set;
-  - `report` never deletes;
-  - a missing policy downgrades `delete` to `report`.
+  - with the flag off, nothing is deleted;
+  - a missing policy or binding means detection only.
 - **Unit (NodePublishVolume):** a failed volume with another live target
   gets `Unavailable`. With none, it re-stages a plaintext volume, and an
   encrypted one when its in-memory key is present; without the key it
   returns `Unavailable` plus an event. Unstage zeroes the cached key.
 - **Policy:** a CEL test against the manifest, covering allow on the same
   node, deny on another node, deny unowned, deny a pod with no PVC volume,
-  deny when `node-name` is missing, and no effect on other callers. Plus an e2e check that a
-  cross-node delete by the plugin's service account is `Forbidden`.
+  deny when `node-name` is missing, and no effect on other callers. Plus
+  an e2e check that a cross-node delete by the plugin's service account is `Forbidden`.
 - **e2e (kind, NFS variant):**
   1. Force a staged volume's ext4 read-only with
      `echo 1 > /sys/fs/ext4/<dev>/trigger_fs_error`, or use `dmsetup` to
