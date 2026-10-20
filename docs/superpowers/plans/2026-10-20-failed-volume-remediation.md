@@ -1908,8 +1908,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the docs**
 - [ ] **Step 2: Check for leaks and for a clean build**
 
-Run: `grep -rniE 'homelab|hasknet|haskins' README.md CLAUDE.md CHANGELOG.md docs/ || echo clean; make fmt-check vet lint tidy-check test build`
-Expected: `clean`, and every gate passes.
+Re-read the diff for anything that names a real deployment (hostnames, IPs, organisations, repositories other than this one); it must be generic. Then run: `make fmt-check vet lint tidy-check test build`
+Expected: every gate passes.
 - [ ] **Step 3: Commit**
 
 ```bash
