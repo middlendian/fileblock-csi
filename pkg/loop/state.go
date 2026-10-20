@@ -21,6 +21,11 @@ type Mapping struct {
 	// CryptDev is the /dev/mapper path of an encrypted volume's dm-crypt
 	// mapping; empty for plaintext volumes.
 	CryptDev string `json:"cryptDev,omitempty"`
+	// StageContext and MountFlags are the stage request's volume context
+	// and mount flags, kept so a failed volume can be re-staged without a
+	// stage request. Entries from older versions have neither.
+	StageContext map[string]string `json:"stageContext,omitempty"`
+	MountFlags   []string          `json:"mountFlags,omitempty"`
 }
 
 // State persists volumeID -> loop device + staging path. The on-disk file is
