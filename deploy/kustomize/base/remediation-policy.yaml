@@ -1,0 +1,48 @@
+# Limits fileblock-node's pod deletes (granted cluster-wide in rbac.yaml) to
+# pods on the caller's own node that a controller owns and that mount a
+# PVC. fileblock-node checks at startup that this policy and its binding
+# exist, with Deny, before it deletes anything. Requires Kubernetes 1.30+:
+# GA ValidatingAdmissionPolicy, and pod-bound service-account tokens that
+# carry the node name in userInfo.extra.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: fileblock-node-pod-delete
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [DELETE]
+        resources: [pods]
+  # The namespace is a wildcard because kustomize's namespace: rewrites the
+  # ServiceAccount but not this string. Matching more callers only
+  # restricts more callers.
+  matchConditions:
+    - name: is-fileblock-node
+      expression: >-
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+        request.userInfo.username.endsWith(':fileblock-node')
+  validations:
+    - expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        oldObject.spec.?nodeName.orValue('') ==
+        request.userInfo.extra['authentication.kubernetes.io/node-name'][0]
+      message: fileblock-node may only delete pods on its own node
+    - expression: >-
+        oldObject.metadata.?ownerReferences.orValue([]).exists(r,
+        r.?controller.orValue(false))
+      message: fileblock-node may only delete pods a controller will recreate
+    - expression: >-
+        oldObject.spec.?volumes.orValue([]).exists(v,
+        has(v.persistentVolumeClaim))
+      message: fileblock-node may only delete pods that mount a PVC
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: fileblock-node-pod-delete
+spec:
+  policyName: fileblock-node-pod-delete
+  validationActions: [Deny]

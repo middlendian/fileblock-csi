@@ -61,7 +61,9 @@ roleRef:
   name: fileblock-controller
   apiGroup: rbac.authorization.k8s.io
 ---
-# csi-node-driver-registrar only needs to GET its own pod and list nodes.
+# csi-node-driver-registrar needs to GET its own pod and list nodes. The
+# failed-volume remediation additionally needs the pod, event and policy
+# rules below.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -70,6 +72,19 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+  # Failed-volume remediation (--auto-delete-pod-when-volume-failed). The
+  # delete is cluster-wide here; remediation-policy.yaml limits it to pods
+  # on the caller's own node that a controller owns and that mount a PVC.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+    resourceNames: [fileblock-node-pod-delete]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
