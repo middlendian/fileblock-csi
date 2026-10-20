@@ -119,7 +119,8 @@ In `delete` mode, for a failed volume:
 2. **Resolve the pods.** List pods with `fieldSelector=spec.nodeName=<node>`
    and match on UID.
 3. **Skip pods that must not be deleted**, logging and emitting an event
-   for each:
+   for each. These mirror the admission policy, so a denial there means a
+   bug here:
    - no `ownerReferences` entry with `controller: true`, because nothing
      would recreate it;
    - already terminating (`deletionTimestamp` set);
@@ -197,6 +198,22 @@ is cluster-wide. The new `remediation-policy.yaml`
   This uses `oldObject`: on DELETE, `object` is null.
 - **Validation 2:** `oldObject.metadata.?ownerReferences.orValue([]).exists(r,
   r.?controller.orValue(false))`.
+- **Validation 3:** `oldObject.spec.?volumes.orValue([]).exists(v,
+  has(v.persistentVolumeClaim))`. The pod must mount at least one PVC.
+  - This is a sanity check, not a fileblock check. Proving that a PVC is
+    fileblock means following PVC → PV → driver, and admission can't look
+    up other objects. The driver's own check (the pod publishes the failed
+    volume on this node) is what makes it fileblock-specific.
+  - What it catches is the likeliest bug: resolving the wrong pod. A pod
+    with no persistent storage can never be the right target.
+  - fileblock supports only `Persistent` volumes, so a fileblock pod always
+    has a `persistentVolumeClaim` volume. A generic ephemeral volume is not
+    one and is denied; fileblock does not support those.
+
+The policy guards against bugs in the remediation logic, not a compromised
+plugin. A privileged node plugin with host PID can already stop any
+container on its node through the container runtime, so a node-scoped
+delete grants nothing new.
 
 This needs **Kubernetes 1.30+**:
 - that is where ValidatingAdmissionPolicy reached GA;
@@ -239,8 +256,8 @@ alone is not node-scoped. This needs `get` on
   encrypted one when its in-memory key is present; without the key it
   returns `Unavailable` plus an event. Unstage zeroes the cached key.
 - **Policy:** a CEL test against the manifest, covering allow on the same
-  node, deny on another node, deny unowned, deny when `node-name` is
-  missing, and no effect on other callers. Plus an e2e check that a
+  node, deny on another node, deny unowned, deny a pod with no PVC volume,
+  deny when `node-name` is missing, and no effect on other callers. Plus an e2e check that a
   cross-node delete by the plugin's service account is `Forbidden`.
 - **e2e (kind, NFS variant):**
   1. Force a staged volume's ext4 read-only with
