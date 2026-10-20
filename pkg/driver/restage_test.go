@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -361,5 +362,106 @@ func TestRestageGivesUpOnStageThatStaysMounted(t *testing.T) {
 	}
 	if _, failed := e.n.failures.Get("vol-1"); !failed {
 		t.Fatal("failure cleared")
+	}
+}
+
+// cachedKey returns the in-memory key for vol-1, if any.
+func cachedKey(e *encStage) (crypt.Keys, bool) {
+	e.n.mu.Lock()
+	defer e.n.mu.Unlock()
+	k, ok := e.n.keys["vol-1"]
+	return k, ok
+}
+
+// The saved context is a copy, so a caller reusing its map cannot change
+// what a later re-stage uses.
+func TestStageSavesContextAsCopy(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	req := e.req(nil)
+	req.VolumeContext = maps.Clone(e.vc)
+	if _, err := e.n.NodeStageVolume(context.Background(), req); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	req.VolumeContext["later"] = "x"
+	if m, _ := e.n.state.Get("vol-1"); !maps.Equal(m.StageContext, e.vc) {
+		t.Fatalf("StageContext = %v, want %v", m.StageContext, e.vc)
+	}
+}
+
+// An adopted stage records what a re-stage needs, so a volume that fails
+// after a plugin restart re-adopted it can still be re-staged.
+func TestAdoptStageSavesContextFlagsAndKey(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	mapper := crypt.MapperName("vol-1")
+	d := filepath.Join(e.sysRoot, "block", "dm-0")
+	for _, p := range []string{filepath.Join(d, "dm"), filepath.Join(d, "slaves", "loop3")} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(d, "dm", "name"), []byte(mapper+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	e.withStageMounted(t, crypt.MapperPath(mapper))
+	req := e.req(map[string]string{"key": testKey, "previousKey": "prev-" + testKey})
+	req.VolumeContext = maps.Clone(e.vc)
+	req.VolumeCapability.GetMount().MountFlags = []string{"noatime"}
+	if _, err := e.n.NodeStageVolume(context.Background(), req); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	req.VolumeContext["later"] = "x"
+	m, _ := e.n.state.Get("vol-1")
+	if m.LoopDev != "/dev/loop3" || !maps.Equal(m.StageContext, e.vc) || !slices.Equal(m.MountFlags, []string{"noatime"}) {
+		t.Fatalf("state = %+v", m)
+	}
+	if k, ok := cachedKey(e); !ok || string(k.Current) != testKey || string(k.Previous) != "prev-"+testKey {
+		t.Fatalf("key not cached on adopt: %v", ok)
+	}
+}
+
+func TestAdoptStagePlaintextCachesNoKey(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	e.withLoops(`{"loopdevices":[{"name":"/dev/loop3","back-file":"/vol-1.img"}]}`)
+	e.withStageMounted(t, "/dev/loop3")
+	req := e.req(nil)
+	req.VolumeCapability.GetMount().MountFlags = []string{"noatime"}
+	if _, err := e.n.NodeStageVolume(context.Background(), req); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	m, _ := e.n.state.Get("vol-1")
+	if !maps.Equal(m.StageContext, e.vc) || !slices.Equal(m.MountFlags, []string{"noatime"}) {
+		t.Fatalf("state = %+v", m)
+	}
+	if _, ok := cachedKey(e); ok {
+		t.Fatal("plaintext adopt cached a key")
+	}
+}
+
+// An idempotent stage retry carries the secret too; it fills the cache if
+// it is empty but never replaces a key already held.
+func TestIdempotentStageCachesKeyIfAbsent(t *testing.T) {
+	e := newEncStage(t, true, nil)
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("NodeStageVolume: %v", err)
+	}
+	e.n.mu.Lock()
+	delete(e.n.keys, "vol-1") // as after a plugin restart
+	e.n.mu.Unlock()
+	e.fake.Reset()
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": testKey})); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find") >= 0 {
+		t.Fatalf("retry was not the idempotent path: %+v", e.fake.Calls)
+	}
+	if k, ok := cachedKey(e); !ok || string(k.Current) != testKey {
+		t.Fatalf("key not cached by the idempotent retry: %v", ok)
+	}
+	if _, err := e.n.NodeStageVolume(context.Background(), e.req(map[string]string{"key": "other-" + testKey})); err != nil {
+		t.Fatalf("second retry: %v", err)
+	}
+	if k, _ := cachedKey(e); string(k.Current) != testKey {
+		t.Fatalf("idempotent retry replaced the cached key with %q", k.Current)
 	}
 }

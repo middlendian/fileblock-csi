@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -169,6 +170,10 @@ func (n *NodeServer) stageLocked(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Errorf(codes.Internal, "check staging path: %v", err)
 	}
 	if existing, ok := n.state.Get(volumeID); ok && existing.StagePath == stagePath && stageMounted {
+		if encrypted {
+			// Refills a cache a plugin restart emptied; a held key stays.
+			n.cacheKeys(volumeID, keys, false)
+		}
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
@@ -200,7 +205,7 @@ func (n *NodeServer) stageLocked(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Errorf(codes.Internal, "find loop devices: %v", err)
 	}
 	if stageMounted {
-		return n.adoptStage(ctx, volumeID, imgPath, stagePath, loops, encrypted)
+		return n.adoptStage(ctx, req, imgPath, loops, encrypted, keys)
 	}
 	// The staging path is not mounted, so a loop already on the image is
 	// either a leftover or in use elsewhere. A live one must not be
@@ -321,7 +326,7 @@ func (n *NodeServer) stageLocked(ctx context.Context, req *csi.NodeStageVolumeRe
 		ImagePath:    imgPath,
 		StagePath:    stagePath,
 		CryptDev:     cryptDev,
-		StageContext: req.GetVolumeContext(),
+		StageContext: maps.Clone(req.GetVolumeContext()),
 		MountFlags:   mountOptionsFromCap(req.GetVolumeCapability()),
 	}); err != nil {
 		_ = n.mnt.Unmount(ctx, stagePath)
@@ -329,17 +334,26 @@ func (n *NodeServer) stageLocked(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
 	}
 	if encrypted {
-		// Kept for an internal re-stage: publish never sees the secret.
-		n.mu.Lock()
-		if old, ok := n.keys[volumeID]; ok {
-			clear(old.Current)
-			clear(old.Previous)
-		}
-		n.keys[volumeID] = crypt.Keys{Current: bytes.Clone(keys.Current), Previous: bytes.Clone(keys.Previous)}
-		n.mu.Unlock()
+		n.cacheKeys(volumeID, keys, true)
 	}
 	n.failures.Clear(volumeID)
 	return &csi.NodeStageVolumeResponse{}, nil
+}
+
+// cacheKeys keeps an encrypted volume's stage secret in memory for an
+// internal re-stage, since publish never sees it. Unless replace is set, a
+// key already held is kept.
+func (n *NodeServer) cacheKeys(volumeID string, keys crypt.Keys, replace bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if old, ok := n.keys[volumeID]; ok {
+		if !replace {
+			return
+		}
+		clear(old.Current)
+		clear(old.Previous)
+	}
+	n.keys[volumeID] = crypt.Keys{Current: bytes.Clone(keys.Current), Previous: bytes.Clone(keys.Previous)}
 }
 
 // adoptStage handles a stage request for a path that is already mounted
@@ -347,13 +361,21 @@ func (n *NodeServer) stageLocked(ctx context.Context, req *csi.NodeStageVolumeRe
 // the plugin lost its state. If the mount is this volume's, record it and
 // succeed; never stack a second loop and mount over it. Nothing else a
 // stage does runs here: key-slot rotation and checking the requested
-// capability against the existing mount wait for the next real stage.
-func (n *NodeServer) adoptStage(ctx context.Context, volumeID, imgPath, stagePath string, loops []string, encrypted bool) (*csi.NodeStageVolumeResponse, error) {
+// capability against the existing mount wait for the next real stage. What a
+// re-stage needs (context, mount flags, key) is recorded from the request.
+func (n *NodeServer) adoptStage(ctx context.Context, req *csi.NodeStageVolumeRequest, imgPath string, loops []string, encrypted bool, keys crypt.Keys) (*csi.NodeStageVolumeResponse, error) {
+	volumeID, stagePath := req.GetVolumeId(), req.GetStagingTargetPath()
 	src, err := n.mnt.Source(ctx, stagePath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read stage mount: %v", err)
 	}
-	m := loop.Mapping{VolumeID: volumeID, ImagePath: imgPath, StagePath: stagePath}
+	m := loop.Mapping{
+		VolumeID:     volumeID,
+		ImagePath:    imgPath,
+		StagePath:    stagePath,
+		StageContext: maps.Clone(req.GetVolumeContext()),
+		MountFlags:   mountOptionsFromCap(req.GetVolumeCapability()),
+	}
 	if encrypted && src == crypt.MapperPath(crypt.MapperName(volumeID)) {
 		ms, err := n.luks.List(ctx)
 		if err != nil {
@@ -374,6 +396,9 @@ func (n *NodeServer) adoptStage(ctx context.Context, volumeID, imgPath, stagePat
 	n.log.Info("adopting existing stage mount", "volumeID", volumeID, "loopDev", m.LoopDev)
 	if err := n.state.Put(m); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
+	}
+	if encrypted {
+		n.cacheKeys(volumeID, keys, true)
 	}
 	n.failures.Clear(volumeID)
 	return &csi.NodeStageVolumeResponse{}, nil
