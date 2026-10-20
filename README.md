@@ -226,6 +226,12 @@ whenever it isn't 4096.
 Multiple StorageClasses with distinct backing stores can coexist in a
 single driver install — no manifest forking is required.
 
+Node plugin flag:
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--auto-delete-pod-when-volume-failed` | `true` | Delete pods using a volume whose ext4 was forced read-only; see [Recovering from backing-store errors](#recovering-from-backing-store-errors) |
+
 Other knobs:
 
 - `volumeBindingMode: WaitForFirstConsumer` is **required** — fileblock
@@ -371,6 +377,87 @@ without the cipher fails `NodeStageVolume` with `Internal` and
 cryptsetup's error — on first stage the image is left blank, so fix the
 StorageClass and recreate the PVC.
 
+## Recovering from backing-store errors
+
+**Why a short outage can break a volume for good.** An NFS server often
+answers `ESTALE` for a minute or two while it restarts. The NFS client marks
+the `.img` file's inode stale and never clears it, and the loop device keeps
+that inode for as long as it is attached, so every later request fails with
+an I/O error even after the server is healthy again. ext4 then aborts its
+journal and forces the filesystem read-only, and it cannot return to
+read-write. Kubernetes does not unstage the volume while a pod still uses it,
+and restarting a container re-binds the same broken mount, so until now only
+deleting the pod recovered the volume. Volumes that were idle during the
+outage are not affected.
+
+**What the monitor does.** `fileblock-node` checks every 10 seconds whether
+a staged volume's filesystem has been forced read-only by ext4. The check is
+passive: it reads `/proc/self/mountinfo` and never touches the loop device,
+the `.img` file or the backing store, because any I/O there could itself
+poison a healthy inode. Which signal ext4 leaves depends on the kernel:
+
+| Kernel | Detected |
+|---|---|
+| 6.11 and older | yes (the superblock is `ro` while the mount is `rw`) |
+| 6.12 to 6.14 | **no**: nothing visible in mountinfo, so no remediation |
+| 6.15 and newer | yes (superblock options `emergency_ro` or `shutdown`) |
+
+A volume that is mounted read-only on purpose is never flagged.
+
+**Automatic pod deletion.** With `--auto-delete-pod-when-volume-failed`
+(node plugin, default `true`) the plugin deletes the pods that use a failed
+volume on its own node, so their controller recreates them on a freshly
+opened image. A pod is deleted only if it:
+
+1. has a controlling owner (a Deployment, StatefulSet, Job and so on), so
+   something recreates it;
+2. is not already terminating;
+3. started before the volume failed, so a replacement pod is never deleted
+   for the failure that replaced it.
+
+Pods are deleted with a UID precondition and their own grace period. A
+volume is considered again at most once every 5 minutes, even if it fails
+again. Pods that are skipped get a `FileblockVolumeFailed` event giving the
+reason (once per pod per failure). Set the flag to `false` to keep
+detection and reporting but never delete.
+
+**Admission policy.** The plugin's service account is granted pod deletes
+cluster-wide, so `deploy/kustomize/base/remediation-policy.yaml` narrows it
+with a `ValidatingAdmissionPolicy`: the plugin may only delete pods that are
+on its own node, are owned by a controller, and mount a PVC. This needs
+**Kubernetes 1.30 or newer** (GA admission policies, and service-account
+tokens that carry the node name). At startup the plugin checks that the
+policy and its binding exist with `Deny`; if they do not, it logs an error
+and only reports. Apply the base manifests (or copy the policy) and restart
+the node plugin to enable deletion.
+
+**Same-node replacement.** If the replacement pod lands on the same node
+while the old one is still terminating, the kubelet may keep the staging
+mount and only call `NodePublishVolume`. fileblock refuses to publish a
+failed volume: it returns `Unavailable` (the kubelet retries) while another
+pod still has the volume published, and otherwise re-stages the volume
+itself (unmount, detach, attach, `e2fsck`, mount) before publishing. If that
+re-stage fails the call returns `Internal` and is retried. To re-stage an
+encrypted volume the plugin keeps its key in process memory only, never on
+disk, and zeroes it on unstage. If the plugin restarted after staging, the
+key is gone: the pod gets an event and must be deleted by hand. This is the
+one manual case.
+
+**How to spot it.**
+
+- `kubectl describe pod` shows a `Warning` event with reason
+  `FileblockVolumeFailed` on each pod using the volume.
+- `NodeGetVolumeStats` reports `VolumeCondition` abnormal. The kubelet turns
+  that into events and a metric only with its alpha `CSIVolumeHealth`
+  feature gate enabled.
+- Node plugin logs: `staged filesystem was forced read-only; the volume must
+  be re-staged`, then either `deleted pod so its volume is re-staged`,
+  `not deleting pod` (with a reason), or `automatic pod deletion is off`.
+
+**Not covered.** A volume that only reads data blocks gets I/O errors in the
+application, but ext4 does not go read-only for those, so nothing is
+detected. Delete the pod by hand.
+
 ## Limitations
 
 - **RWO only.** `ext4` has no distributed locking, so two nodes cannot
@@ -389,6 +476,10 @@ StorageClass and recreate the PVC.
   `privileged: true` with `SYS_ADMIN`, matching csi-driver-nfs. The
   privilege is required for `mount.nfs` (NFSv3 in particular needs a
   privileged source port for the lock manager) and for `losetup`.
+- **Failed-volume recovery is best effort.** Kernels 6.12 to 6.14 and
+  read-only-traffic volumes are not detected, and automatic deletion needs
+  Kubernetes 1.30+; see [Recovering from backing-store
+  errors](#recovering-from-backing-store-errors).
 - **Encryption applies to new volumes only.** Key rotation lands on the
   next stage, not live; master-key re-encryption is not supported.
 

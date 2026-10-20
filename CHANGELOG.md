@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Failed volumes recover on their own.** A burst of `ESTALE` from an NFS
+  server (common while it restarts) marks a staged image's NFS inode
+  permanently stale; the loop device keeps failing, ext4 aborts its journal
+  and goes read-only, and until now only deleting the pod recovered it.
+  `fileblock-node` now notices a staging mount whose ext4 gave up (forced
+  read-only), reports it (a `FileblockVolumeFailed` event on each pod using
+  it, `VolumeCondition` from `NodeGetVolumeStats`), and by default deletes
+  those pods on its own node so their controller recreates them on a
+  freshly opened image. Only controller-owned pods that started before the
+  failure are deleted, at most once per volume every 5 minutes; skipped
+  pods get an event with the reason. Detection is passive and depends on
+  the kernel: it works on 6.11 and older and on 6.15 and newer, and does
+  not detect 6.12 to 6.14, which show nothing in mountinfo.
+  **Behaviour change:** after upgrading and applying the base manifests,
+  this happens automatically. Set `--auto-delete-pod-when-volume-failed=false`
+  on the node DaemonSet to keep reporting without deleting.
+- `deploy/kustomize/base/remediation-policy.yaml`: a ValidatingAdmissionPolicy
+  limiting the node plugin's pod deletes to its own node, controller-owned
+  pods, and pods that mount a PVC. Needs Kubernetes 1.30+; without it the
+  plugin only reports.
+- A failed volume is re-staged in place when its replacement pod lands on
+  the same node (an encrypted one needs the in-memory key, so after a
+  plugin restart its pod must be deleted by hand).
+- Node capability `VOLUME_CONDITION`.
+- `github.com/google/cel-go` is a test-only dependency (checks the
+  admission policy).
+
 ## [0.5.1] - 2026-10-09
 
 ### Fixed

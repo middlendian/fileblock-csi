@@ -16,6 +16,7 @@ pkg/driver/             Identity / Controller / Node CSI gRPC servers + bootstra
 pkg/image/              .img CRUD; ext4 fsck + resize2fs helpers
 pkg/loop/               losetup wrappers, loop-mappings.json state file, reconciler
 pkg/mount/              mount / bind / unmount / findmnt wrappers
+pkg/kube/               minimal API client (no client-go)
 pkg/exec/               os/exec wrapper with timeout + structured Error
 pkg/crypt/              LUKS2 via cryptsetup: format-on-first-stage, key-slot rotation, dm mapping list
 deploy/kustomize/       base manifests + example-localdir, example-nfs-shared, e2e overlays
@@ -288,9 +289,13 @@ without a separate "in use" check.
 ## State file invariants (`pkg/loop`)
 
 `/var/lib/kubelet/plugins/fileblock.csi/loop-mappings.json` is a JSON map
-`volumeID -> {LoopDev, ImagePath, StagePath, CryptDev}`. `CryptDev` is
+`volumeID -> {LoopDev, ImagePath, StagePath, CryptDev, StageContext, MountFlags}`. `CryptDev` is
 optional: the `/dev/mapper/fbcrypt-…` path for an encrypted volume's
-dm-crypt mapping, empty for a plaintext one. Invariants:
+dm-crypt mapping, empty for a plaintext one. `StageContext` and `MountFlags`
+are optional too: the stage request's volume context and mount flags, kept so
+NodePublishVolume can re-stage a failed volume (old files load unchanged).
+Encryption keys are never persisted: they live in process memory only and are
+zeroed on unstage. Invariants:
 
 1. Every entry must correspond to a `losetup --json --list` row whose
    `back-file` matches `ImagePath` (`loop.Backs`). Otherwise the
@@ -346,7 +351,8 @@ dm-crypt mapping, empty for a plaintext one. Invariants:
 - Identity: `CONTROLLER_SERVICE`, `VOLUME_ACCESSIBILITY_CONSTRAINTS`,
   `VolumeExpansion=OFFLINE`.
 - Controller: `CREATE_DELETE_VOLUME`, `EXPAND_VOLUME`, `LIST_VOLUMES`.
-- Node: `STAGE_UNSTAGE_VOLUME`, `GET_VOLUME_STATS`, `EXPAND_VOLUME`.
+- Node: `STAGE_UNSTAGE_VOLUME`, `GET_VOLUME_STATS`, `EXPAND_VOLUME`,
+  `VOLUME_CONDITION`.
 - Access modes: `SINGLE_NODE_WRITER` only.
 - fsType: `ext4` only.
 - Encryption: opt-in via SC `encrypted: "true"` + node-stage secret
