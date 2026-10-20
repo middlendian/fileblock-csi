@@ -137,6 +137,11 @@ func TestPolicyCEL(t *testing.T) {
 		{"owner not controller", request(nodeSA, "node-a"), pod("node-a", nonCtrl, pvcVols), true, false, true},
 		{"no PVC", request(nodeSA, "node-a"), pod("node-a", ctrl, emptyV), true, true, false},
 		{"no node-name extra", request(nodeSA, ""), pod("node-a", ctrl, pvcVols), false, true, true},
+		{"no extra at all", map[string]any{"userInfo": map[string]any{"username": nodeSA}}, pod("node-a", ctrl, pvcVols), false, true, true},
+		{"empty node-name list", map[string]any{"userInfo": map[string]any{"username": nodeSA,
+			"extra": map[string]any{"authentication.kubernetes.io/node-name": []any{}}}}, pod("node-a", ctrl, pvcVols), false, true, true},
+		{"no nodeName on pod", request(nodeSA, "node-a"), map[string]any{"metadata": map[string]any{"ownerReferences": ctrl},
+			"spec": map[string]any{"volumes": pvcVols}}, false, true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

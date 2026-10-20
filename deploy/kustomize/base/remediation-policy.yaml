@@ -25,10 +25,11 @@ spec:
         request.userInfo.username.startsWith('system:serviceaccount:') &&
         request.userInfo.username.endsWith(':fileblock-node')
   validations:
+    # Optional access, so a token without the node-name extra (or with an
+    # empty list) evaluates to false instead of erroring.
     - expression: >-
-        'authentication.kubernetes.io/node-name' in request.userInfo.extra &&
-        oldObject.spec.?nodeName.orValue('') ==
-        request.userInfo.extra['authentication.kubernetes.io/node-name'][0]
+        request.userInfo.?extra[?'authentication.kubernetes.io/node-name'].orValue([]).exists(n,
+        n == oldObject.spec.?nodeName.orValue(''))
       message: fileblock-node may only delete pods on its own node
     - expression: >-
         oldObject.metadata.?ownerReferences.orValue([]).exists(r,
