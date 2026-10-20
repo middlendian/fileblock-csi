@@ -13,9 +13,9 @@ func TestPassiveSignalKernel(t *testing.T) {
 		{"6.11.0-29-generic", true},
 		{"6.12.0", false},
 		{"6.13.7-arch1-1", false},
-		{"6.14.0-1015-raspi", false},
+		{"6.14.0-1015-generic", false},
 		{"6.15.2", true},
-		{"7.0.0-1020-raspi", true},
+		{"7.0.0-1020-generic", true},
 		{"5.15.0-122-generic", true},
 		{"6.14", false},
 	} {

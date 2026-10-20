@@ -41,7 +41,7 @@
 2. **Several mountinfo rows for one staging path** (stacked mounts from older versions). The trigger must use the **last** row, the one visible at that path, as `mount.Source` does. Task 1 pins it.
 3. **A plugin restart while a volume is already failed.** The monitor must rediscover the failure from mountinfo with a fresh `failedAt`. Pods started before restart + detection still qualify, because their `startTime` is older. Task 4 pins it.
 4. **The API server is unreachable or returns 5xx during a tick.** The tick must log and continue: no crash, no hold-off consumed, a retry next tick. Task 4 pins it.
-5. **NodePublishVolume for a failed volume whose other target is the very target being published** (a kubelet retry after a partial publish). The check must exclude `req.TargetPath` itself. Task 5 pins it.
+5. **NodePublishVolume for a failed volume whose other target is the very target being published** (a kubelet retry after a partial publish). The check must exclude `req.TargetPath` itself. Task 5 pins it. Superseded in the final review: any existing publish target, including the request's own, means a live pod, so NodePublishVolume returns Unavailable.
 
 ---
 
