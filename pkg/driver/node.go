@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"golang.org/x/sys/unix"
@@ -44,6 +45,7 @@ type NodeServer struct {
 	registry *store.Registry
 	luks     *crypt.Crypt
 	sysRoot  string
+	failures *failures
 
 	// One mutex per volumeID protects Stage/Unstage from racing each other
 	// inside this process.
@@ -64,6 +66,7 @@ func NewNodeServer(nodeID string, exec fbexec.Runner, mnt *mount.Mounter, ls *lo
 		registry: reg,
 		luks:     crypt.New(exec),
 		sysRoot:  "/sys",
+		failures: newFailures(),
 		volMutex: map[string]*sync.Mutex{},
 	}
 }
@@ -81,6 +84,7 @@ func (n *NodeServer) NodeGetCapabilities(ctx context.Context, _ *csi.NodeGetCapa
 			rpc(csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME),
 			rpc(csi.NodeServiceCapability_RPC_GET_VOLUME_STATS),
 			rpc(csi.NodeServiceCapability_RPC_EXPAND_VOLUME),
+			rpc(csi.NodeServiceCapability_RPC_VOLUME_CONDITION),
 		},
 	}, nil
 }
@@ -297,6 +301,7 @@ func (n *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		detachOnFail()
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
 	}
+	n.failures.Clear(volumeID)
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
@@ -333,6 +338,7 @@ func (n *NodeServer) adoptStage(ctx context.Context, volumeID, imgPath, stagePat
 	if err := n.state.Put(m); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist state: %v", err)
 	}
+	n.failures.Clear(volumeID)
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
@@ -400,6 +406,7 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 	if ok {
 		_ = n.state.Delete(volumeID)
 	}
+	n.failures.Clear(volumeID)
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
@@ -462,11 +469,20 @@ func (n *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVol
 	total := int64(st.Blocks) * bs
 	free := int64(st.Bavail) * bs
 	used := total - free
+	cond := &csi.VolumeCondition{Abnormal: false, Message: "volume is healthy"}
+	if at, failed := n.failures.Get(volumeID); failed {
+		cond = &csi.VolumeCondition{
+			Abnormal: true,
+			Message: "ext4 forced the staged filesystem read-only at " + at.UTC().Format(time.RFC3339) +
+				"; the backing file is unusable until the volume is re-staged",
+		}
+	}
 	return &csi.NodeGetVolumeStatsResponse{
 		Usage: []*csi.VolumeUsage{
 			{Unit: csi.VolumeUsage_BYTES, Total: total, Available: free, Used: used},
 			{Unit: csi.VolumeUsage_INODES, Total: int64(st.Files), Available: int64(st.Ffree), Used: int64(st.Files - st.Ffree)},
 		},
+		VolumeCondition: cond,
 	}, nil
 }
 
