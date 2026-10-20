@@ -10,10 +10,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/middlendian/fileblock-csi/pkg/crypt"
 	"github.com/middlendian/fileblock-csi/pkg/driver"
 	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
+	"github.com/middlendian/fileblock-csi/pkg/kube"
 	"github.com/middlendian/fileblock-csi/pkg/loop"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 	"github.com/middlendian/fileblock-csi/pkg/store"
@@ -25,6 +27,8 @@ func main() {
 	stateDir := flag.String("state-dir", "/var/lib/kubelet/plugins/fileblock.csi", "directory for the loop-mappings state file")
 	storesRoot := flag.String("stores-root", "/var/lib/fileblock/stores", "directory under which each backing store is mounted at <id>/")
 	logLevel := flag.String("log-level", "info", "log level: debug, info, warn, error")
+	autoDelete := flag.Bool("auto-delete-pod-when-volume-failed", true,
+		"delete the controller-owned pods on this node that use a volume whose ext4 was forced read-only, so it is re-staged; needs the fileblock-node-pod-delete admission policy")
 	flag.Parse()
 
 	log := newLogger(*logLevel)
@@ -73,8 +77,46 @@ func main() {
 	node := driver.NewNodeServer(*nodeID, exec, mnt, losetup, state, log, registry)
 	srv := driver.NewServer(*endpoint, log, identity, nil, node)
 
+	// Without API access the plugin still serves CSI; failures are only logged.
+	kc, err := kube.InCluster()
+	if err != nil {
+		log.Warn("no Kubernetes API access; failed volumes are only logged", "err", err)
+		kc = nil
+	}
+	deleting := false
+	if kc != nil {
+		node.SetKube(kc)
+		if *autoDelete {
+			// Checked once at startup; applying the policy later needs a restart.
+			ok, perr := kc.PolicyEnforced(context.Background(), driver.PodDeletePolicyName)
+			switch {
+			case perr != nil:
+				log.Error("cannot verify the pod-delete admission policy; failed volumes are only reported", "err", perr)
+			case !ok:
+				log.Error("admission policy " + driver.PodDeletePolicyName + " or its binding is missing, or does not Deny; " +
+					"failed volumes are only reported until it is applied and the plugin restarts")
+			default:
+				deleting = true
+			}
+		}
+	}
+	mon := &driver.Monitor{
+		Node:       *nodeID,
+		State:      state,
+		Failures:   node.Failures(),
+		AutoDelete: deleting,
+		MountInfo:  func() ([]mount.MountInfo, error) { return mount.ReadMountInfo("/proc/self/mountinfo") },
+		Now:        time.Now,
+		Log:        log,
+	}
+	if kc != nil {
+		// Assign only when non-nil: a typed-nil *HTTPClient in the interface is not nil.
+		mon.Kube = kc
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go mon.Run(ctx)
 	if err := srv.Serve(ctx); err != nil {
 		log.Error("serve", "err", err)
 		os.Exit(1)
