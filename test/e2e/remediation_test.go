@@ -298,23 +298,39 @@ func skipWithoutPassiveSignal(t *testing.T, node string) {
 	}
 }
 
-// failVolume raises an ext4 error on the pod's volume through sysfs on its
-// kind node. With errors=remount-ro, ext4 marks the superblock read-only
-// (see forcedReadOnly) while each mount stays rw.
+// failVolume raises an ext4 error on the pod's volume through sysfs. Kind
+// nodes see sysfs read-only, but they share the runner's kernel, so the
+// write is made on the runner as root. With errors=remount-ro, ext4 marks
+// the superblock read-only (see forcedReadOnly) while each mount stays rw.
 func failVolume(t *testing.T, ns string, p podRef) {
 	t.Helper()
 	majMin, _ := dataMount(t, ns, p.name)
-	dev := strings.TrimSpace(nodeExec(t, p.node, fmt.Sprintf("basename \"$(readlink /sys/dev/block/%s)\"", majMin)))
+	dev := strings.TrimSpace(runnerSh(t, fmt.Sprintf(`basename "$(readlink /sys/dev/block/%s)"`, majMin)))
 	if dev == "" || dev == "." {
-		t.Fatalf("no block device for %s on %s", majMin, p.node)
+		t.Fatalf("no block device for %s on the runner", majMin)
 	}
-	nodeExec(t, p.node, fmt.Sprintf("echo 1 > /sys/fs/ext4/%s/trigger_fs_error", dev))
+	attr := "/sys/fs/ext4/" + dev + "/trigger_fs_error"
+	if out, err := sudo(nil, "sh", "-c", "echo 1 > "+attr); err != nil {
+		ls, _ := sudo(nil, "ls", "-l", "/sys/fs/ext4/"+dev+"/")
+		t.Fatalf("write %s on the runner: %v\n%s\nls -l /sys/fs/ext4/%s/:\n%s", attr, err, out, dev, ls)
+	}
 	if _, opts := dataMount(t, ns, p.name); !forcedReadOnly(opts) {
 		t.Fatalf("superblock options of %s are %q after trigger_fs_error: no ro, emergency_ro or shutdown. "+
 			"Either errors=remount-ro is not in effect, or the kernel is 6.12-6.14, which shows no passive signal",
 			dev, strings.Join(opts, ","))
 	}
-	t.Logf("forced %s (%s) read-only on %s", dev, majMin, p.node)
+	t.Logf("forced %s (%s) read-only; pod on %s", dev, majMin, p.node)
+}
+
+// runnerSh runs a shell script as root on the runner and returns its
+// combined output.
+func runnerSh(t *testing.T, script string) string {
+	t.Helper()
+	out, err := sudo(nil, "sh", "-c", script)
+	if err != nil {
+		t.Fatalf("sudo sh -c %q: %v\n%s", script, err, out)
+	}
+	return string(out)
 }
 
 // nodeExec runs a shell script on a kind node. Kind names each node's
