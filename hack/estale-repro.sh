@@ -9,8 +9,9 @@
 #   hack/estale-repro.sh /path/to/export 30
 #
 # Unexports the directory for N seconds (default 30) and exports it again.
-# In-flight I/O gets ESTALE, ext4 aborts, and the monitor should delete the
-# writer pod within one check interval of the export returning.
+# In-flight I/O gets ESTALE and ext4 aborts during the outage. The monitor
+# should flag the volume and delete the writer pod within one check
+# interval of that abort, without waiting for the export to return.
 set -euo pipefail
 EXPORT="${1:?usage: $0 EXPORT_DIR [SECONDS]}"
 SECS="${2:-30}"
