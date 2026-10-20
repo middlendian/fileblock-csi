@@ -18,7 +18,7 @@
 
 ## Pre-flight
 
-- [ ] Confirm you are in `/Users/greg/code/greghaskins/claude-code-workspace/middlendian/fileblock-csi` (the submodule, not the workspace root).
+- [ ] Confirm you are at the root of your `fileblock-csi` checkout.
 - [ ] Confirm you are on branch `fix/adoptexisting-mountpoint-verify` with the spec commit (`7864a62`) as `HEAD`. Run: `git status && git log --oneline -2`. Expected: clean working tree, HEAD contains the spec doc.
 - [ ] Confirm `make test` passes against the current `HEAD` (baseline). Run: `make test`. Expected: all packages PASS.
 
@@ -784,7 +784,7 @@ Open `CHANGELOG.md`. Find the `## [Unreleased]` heading near the top. Under its 
   its NFS mount; `AdoptExisting` poisoned the in-process cache; the
   next `NodeStageVolume` short-circuited on the false cache hit and
   returned `NotFound` for `.img` files that were still present on the
-  NFS server. Confirmed in production on a 6-node k0s cluster after a
+  NFS server. Confirmed in production on a multi-node cluster after a
   multi-node reboot, 2026-05-17.
   `TestRegistryAdoptExistingSkipsNonMountedDirs` (unit) added to guard
   against regression.
