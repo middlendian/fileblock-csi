@@ -388,22 +388,8 @@ func (n *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstage
 	unlock := n.lockVolume(volumeID)
 	defer unlock()
 
-	// Older versions could stack a second mount on the staging path; pop
-	// them all, but give up rather than loop on a path that stays mounted.
-	for i := 0; ; i++ {
-		mounted, err := n.mnt.IsMountPoint(ctx, stagePath)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "check stage: %v", err)
-		}
-		if !mounted {
-			break
-		}
-		if i == maxStageUnmounts {
-			return nil, status.Errorf(codes.Internal, "%s still mounted after %d unmounts", stagePath, i)
-		}
-		if err := n.mnt.Unmount(ctx, stagePath); err != nil {
-			return nil, status.Errorf(codes.Internal, "umount stage: %v", err)
-		}
+	if err := n.popStageMounts(ctx, stagePath); err != nil {
+		return nil, err
 	}
 	_ = os.Remove(stagePath)
 
@@ -528,20 +514,29 @@ func (n *NodeServer) restageFailed(ctx context.Context, req *csi.NodePublishVolu
 		}
 	}
 	// Tear down: a publish target left behind by this same request is
-	// unmounted first so the staging unmount isn't busy.
+	// unmounted first so the staging unmount isn't busy. Every stacked
+	// stage mount must go, or stageLocked would adopt the broken one.
 	_ = n.mnt.Unmount(ctx, req.GetTargetPath())
-	if err := n.mnt.Unmount(ctx, m.StagePath); err != nil {
-		return status.Errorf(codes.Internal, "re-stage: umount stage: %v", err)
+	if err := n.popStageMounts(ctx, m.StagePath); err != nil {
+		return status.Errorf(codes.Internal, "re-stage: %v", status.Convert(err).Message())
 	}
-	if m.CryptDev != "" {
-		if err := n.luks.Close(ctx, filepath.Base(m.CryptDev)); err != nil {
-			return status.Errorf(codes.Internal, "re-stage: cryptsetup close: %v", err)
+	// An empty LoopDev means an earlier re-stage already tore this down.
+	if m.LoopDev != "" {
+		if m.CryptDev != "" {
+			if err := n.luks.Close(ctx, filepath.Base(m.CryptDev)); err != nil {
+				return status.Errorf(codes.Internal, "re-stage: cryptsetup close: %v", err)
+			}
+		}
+		if err := n.losetup.Detach(ctx, m.LoopDev); err != nil {
+			return status.Errorf(codes.Internal, "re-stage: losetup --detach: %v", err)
+		}
+		// Keep the entry, minus the devices just released, so a failed
+		// stage below can be retried; a success overwrites it.
+		m.LoopDev, m.CryptDev = "", ""
+		if err := n.state.Put(m); err != nil {
+			return status.Errorf(codes.Internal, "re-stage: persist state: %v", err)
 		}
 	}
-	if err := n.losetup.Detach(ctx, m.LoopDev); err != nil {
-		return status.Errorf(codes.Internal, "re-stage: losetup --detach: %v", err)
-	}
-	_ = n.state.Delete(volumeID)
 	_, err = n.stageLocked(ctx, &csi.NodeStageVolumeRequest{
 		VolumeId:          volumeID,
 		StagingTargetPath: m.StagePath,
@@ -553,7 +548,7 @@ func (n *NodeServer) restageFailed(ctx context.Context, req *csi.NodePublishVolu
 		},
 	})
 	if err != nil {
-		return status.Errorf(status.Code(err), "re-stage: %v", status.Convert(err).Message())
+		return status.Errorf(codes.Internal, "re-stage: %v", status.Convert(err).Message())
 	}
 	n.log.Warn("re-staged failed volume from a fresh open of its image", "volumeID", volumeID)
 	return nil
@@ -689,6 +684,27 @@ func (n *NodeServer) loopSectorSize(ctx context.Context, imgPath string, size in
 
 // maxStageUnmounts bounds how many stacked mounts unstage pops.
 const maxStageUnmounts = 8
+
+// popStageMounts unmounts every mount stacked on stagePath (older versions
+// could stack a second one), but gives up rather than loop on a path that
+// stays mounted. Errors are gRPC statuses.
+func (n *NodeServer) popStageMounts(ctx context.Context, stagePath string) error {
+	for i := 0; ; i++ {
+		mounted, err := n.mnt.IsMountPoint(ctx, stagePath)
+		if err != nil {
+			return status.Errorf(codes.Internal, "check stage: %v", err)
+		}
+		if !mounted {
+			return nil
+		}
+		if i == maxStageUnmounts {
+			return status.Errorf(codes.Internal, "%s still mounted after %d unmounts", stagePath, i)
+		}
+		if err := n.mnt.Unmount(ctx, stagePath); err != nil {
+			return status.Errorf(codes.Internal, "umount stage: %v", err)
+		}
+	}
+}
 
 // loopBusy reports whether dev is mounted or held by another block device
 // (a dm-crypt mapping).

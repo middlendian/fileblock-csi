@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/middlendian/fileblock-csi/pkg/crypt"
+	fbexec "github.com/middlendian/fileblock-csi/pkg/exec"
 	"github.com/middlendian/fileblock-csi/pkg/mount"
 )
 
@@ -79,10 +80,14 @@ func TestRestageWhenOnlyTargetIsThisRequest(t *testing.T) {
 	e := newEncStage(t, false, nil)
 	target := podTarget(t, uidThis)
 	failedStaged(t, e, nil, target)
+	e.depth[target] = 0 // not mounted, so the publish ends in a bind
 	if _, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target)); err != nil {
 		t.Fatalf("NodePublishVolume: %v", err)
 	}
 	calls := e.fake.Calls
+	if b := callIndex(calls, "mount", "--bind", e.stage, target); b < 0 || b < callIndex(calls, "mount", "-t", "ext4") {
+		t.Fatalf("want the re-staged mount bound into the target: %+v", calls)
+	}
 	um := callIndex(calls, "umount", e.stage)
 	det := callIndex(calls, "losetup", "--detach", "/dev/loop7")
 	att := callIndex(calls, "losetup", "--find", "--show")
@@ -253,5 +258,88 @@ func TestStageSavesContextAndFlags(t *testing.T) {
 	e.n.mu.Unlock()
 	if cached {
 		t.Fatal("plaintext stage cached a key")
+	}
+}
+
+// Review finding 1: a re-stage that fails after teardown must stay
+// retryable, because the kubelet will not unstage while the pod waits.
+func TestRestageFailureIsInternalAndRetryable(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	target := podTarget(t, uidThis)
+	failedStaged(t, e, nil, target)
+	inner := e.fake.Func
+	fsckFails := true
+	e.fake.Func = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "e2fsck" && fsckFails {
+			return "", &fbexec.Error{Cmd: "e2fsck", ExitCode: 8}
+		}
+		return inner(ctx, name, args...)
+	}
+	_, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target))
+	if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "fsck") {
+		t.Fatalf("got %v, want Internal carrying the fsck error", err)
+	}
+	if _, failed := e.n.failures.Get("vol-1"); !failed {
+		t.Fatal("failure cleared by a failed re-stage")
+	}
+	m, ok := e.n.state.Get("vol-1")
+	if !ok || m.LoopDev != "" || m.StageContext == nil || m.StagePath != e.stage {
+		t.Fatalf("state after failed re-stage = %+v, %v", m, ok)
+	}
+
+	fsckFails = false
+	e.fake.Reset()
+	if _, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target)); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, failed := e.n.failures.Get("vol-1"); failed {
+		t.Fatal("still failed after a successful retry")
+	}
+	if got := detached(e.fake.Calls); len(got) != 0 {
+		t.Fatalf("retry detached %v; nothing was left attached", got)
+	}
+	if m, _ := e.n.state.Get("vol-1"); m.LoopDev != "/dev/loop7" {
+		t.Fatalf("state after retry = %+v", m)
+	}
+}
+
+// Review finding 2: every stacked mount at the staging path is popped,
+// so the re-stage never adopts the broken one.
+func TestRestagePopsStackedStageMounts(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	target := podTarget(t, uidThis)
+	failedStaged(t, e, nil, target)
+	e.depth[e.stage] = 2
+	if _, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target)); err != nil {
+		t.Fatalf("NodePublishVolume: %v", err)
+	}
+	n := 0
+	for _, c := range e.fake.Calls {
+		if c.Name == "umount" && slices.Equal(c.Args, []string{e.stage}) {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("umounted the stage %d times, want 2", n)
+	}
+	if callIndex(e.fake.Calls, "losetup", "--find", "--show") < 0 {
+		t.Fatalf("no fresh attach; the stacked mount was adopted: %+v", e.fake.Calls)
+	}
+}
+
+func TestRestageGivesUpOnStageThatStaysMounted(t *testing.T) {
+	e := newEncStage(t, false, nil)
+	target := podTarget(t, uidThis)
+	failedStaged(t, e, nil, target)
+	e.depth[e.stage] = 100
+	_, err := e.n.NodePublishVolume(context.Background(), publishReq(e, target))
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("got %v, want Internal", err)
+	}
+	if callIndex(e.fake.Calls, "losetup") >= 0 {
+		t.Fatalf("staged over a path that is still mounted: %+v", e.fake.Calls)
+	}
+	if _, failed := e.n.failures.Get("vol-1"); !failed {
+		t.Fatal("failure cleared")
 	}
 }
