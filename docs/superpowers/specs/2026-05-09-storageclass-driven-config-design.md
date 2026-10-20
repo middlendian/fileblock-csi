@@ -430,7 +430,7 @@ this. A truly dead server requires a driver-pod restart to drop the
 hung mount; this is the same trade-off `csi-driver-nfs` accepts.
 
 **Privilege verification.** The spec advertises `SYS_ADMIN`-only for
-the controller. Verify on a kind cluster *and* on the production k0s
+the controller. Verify on a kind cluster *and* on a production
 cluster during step 6 (deploy/kustomize/base) of the implementation
 order that `SYS_ADMIN` without `privileged: true` is sufficient for
 `mount.nfs` and the bind-mount used by `type: local`. Some kernels,

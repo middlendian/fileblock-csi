@@ -54,7 +54,7 @@ reboot or container crash leaves the emptyDir populated.
 
 ### Real-world incident
 
-Confirmed on a homelab k0s cluster, 2026-05-17. All 6 worker nodes
+Confirmed on a production cluster, 2026-05-17. All worker nodes
 rebooted within a ~6 hour window. Every fileblock volume across 2
 namespaces (4 application pods, 1 fileblock-canary) failed to mount,
 with backing `.img` files confirmed present on the NAS at the expected
@@ -295,7 +295,7 @@ Add under `[Unreleased] → Fixed`:
 > without its NFS mount; `AdoptExisting` poisoned the in-process cache;
 > the next `NodeStageVolume` short-circuited on the false cache hit and
 > returned `NotFound` for `.img` files that were still present on the
-> NFS server. Confirmed in production on a 6-node k0s cluster after a
+> NFS server. Confirmed in production on a multi-node cluster after a
 > multi-node reboot, 2026-05-17.
 > `TestRegistryAdoptExistingSkipsNonMountedDirs` (unit) added to guard
 > against regression.

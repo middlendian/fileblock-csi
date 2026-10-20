@@ -2331,7 +2331,7 @@ git -c user.email=hello@middlendian.dev -c user.name=middlendian commit -m "depl
 Spec promotes this from "open question" to a required implementation step. On a kind cluster (or whichever cluster you have), apply the new manifests and exercise an NFS mount end to end:
 
 ```bash
-# 1. Bring up the test stack (kind-based works; the real homelab works too).
+# 1. Bring up the test stack (kind-based works; a real cluster works too).
 kubectl apply -k deploy/kustomize/overlays/example-nfs-shared/
 kubectl wait -n fileblock-system --for=condition=Ready pod -l app=fileblock-controller --timeout=120s
 
